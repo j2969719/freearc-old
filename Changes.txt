@@ -1,0 +1,154 @@
+There were too much changes between Freearc 0.36 and 0.40 releases - actually,
+half of the program was wriiten in this period! If you are interested to know them,
+read the http://freearc.sourceforge.net/Presenting%20FreeArc%200.40.htm
+or "Presenting FreeArc 0.40.htm" in this archive. The whole list of changes is in
+History.txt and includes 250 items!
+
+This file lists only changes made in FreeArc pre-release versions.
+
+
+First, I'm glad to inform you that FreeArc now occupies first 3 places
+in MFC efficiency test, i.e. it's ranked as the most efficient archiver
+at the wide range of compression levels - starting with zip-level compression
+in -m1 mode and ending with ccm-level compression in -mx mode:
+
+http://www.maximumcompression.com/data/summary_mf2.php
+
+
+===========================================================================================
+=== CHANGES in FreeArc 0.40 release, dated Jan 1 2008 =====================================
+===========================================================================================
+
+Fixed errors:
+  In freearc.addon (settings for Total Commander plugin). You should reimport new settings
+  It was impossible to extract archives created with external compression (in -m5p..-max modes)
+Improved compression in -m5p..-max modes by adding "exe" to $iso/$precomp methods in arc.ini
+
+
+===========================================================================================
+=== CHANGES in FreeArc 0.40 pre-release 4, dated Dec 16 2007 ==============================
+===========================================================================================
+
+I still stuck with English docs, so it's one more prerelease version. Changes are:
+- Fixed problem with use of -dm9 option
+- "All OK" message printed only if --display option includes 'k' letter
+- Progress indicator now is much more accurate. It will never more freeze exactly at 99.9% :)
+- Listing/extracting archives directly from Internet (see below)
+- Archive recovery by redowloading broken parts from Internet (see below)
+- Improved recovery feature (see below)
+- Russian docs were updated with description of all the new features
+
+
+=== EXTRACTING FROM INTERNET ================================================
+
+Archives can be listed/extracted directly from Internet without downloading whole archive:
+  arc l http://www.haskell.org/bz/arc.arc
+  arc x http://www.haskell.org/bz/arc.arc *.h
+
+URL may be also used as name of filelist, comment file, original archive (see
+below) - anything that's open only for reading. Please note that compressing files
+directly from Internet is impossible.
+
+When we work with archive, only the data required for actual operation will be
+downloaded. This means that you may work quickly even with huge archives.
+Please note that servers without RESUME functionality are not supported at all
+
+In Windows, Internet Explorer proxy settings are used; you can override them with --proxy and --bypass options
+(read http://msdn2.microsoft.com/en-US/library/aa383996.aspx for details, use "," instead of " ")
+
+In Linux, libcurl is used, so you can use http_proxy, ftp_proxy, all_proxy and no_proxy
+environment variables (man curl for details), --proxy option is also supported
+
+
+=== RECOVERY USING INTERNET =================================================
+
+If archive contains recovery record and there is reliable archive copy in Internet,
+you can restore archive by redownloading only broken parts of archive.
+To try this feature download http://www.haskell.org/bz/bad.arc . Run the command
+
+arc t bad
+
+Program says that archive is broken. Let's try to restore it:
+
+arc r bad
+
+Impossible. Now ask FreeArc to redownload broken parts from Internet:
+
+arc r bad --original=http://www.haskell.org/bz/good.arc
+
+And archive succesfuly restored! This required to download only 8kb -
+size of 2 archive sectors that was broken! You can further spoil archive with
+your favourite binary editor and see how it will survive despite any damages!
+
+There is also alternative way - you can save list of broken archive ranges to file
+and use any other utility (such as curl) to download these data that may be used to patch the archive:
+
+arc r bad --save-bad-ranges=bad.ranges
+
+--original option has two more forms:
+* you can use it without parameter, in this case FreeArc will try to extract URL
+  from archive description in files.bbs/descript.ion
+* --original?get_url will run "get_url arcname" external command and use its
+  output as URL/filename of original archive
+
+Both forms are great for using in arc.ini. Please note that FreeArc checks that size of archive
+being downloaded is the same as of archive being recovered and that CRCs of downloaded sectors
+are correct so there are strong guarantees that recovered data will be correct
+
+Filename specified in --original option don't need to be a URL - it may point
+to ordinary file
+
+
+=== RECOVERY ================================================================
+
+Now progress indicator is displayed when archive protection/scanning/recovery
+performed. That's especially important when you recover archive using Internet,
+since this operation may be rather slow
+
+Recovered archive (fixed.*) now includes original recovery record, which was
+stripped by previous versions of FreeArc
+
+Option -rr0% or -rr0 may be used to add to archive as small recovery info as
+possible. Now it's only 0.1% of archive size. This info contains only CRCs of
+archive sectors, so it's not enough to recover archive by itself, but it
+allows to recover archives over Internet. I recommend to use at least this
+amount of recovery info for every archive you share via Internet
+
+Amount of recovery info may be also specified explicitly:
+* -rr1%;4kb forces using of 4kb recovery sectors for 1% recovery record
+* -rr4*64kb forces using four 64kb recovery sectors
+
+So, -rr0% == -rr0%;4kb == -rr0*4kb which means that recovery record includes
+no recovery sectors and CRC-32 for each 4kb archive sector
+
+
+
+===========================================================================================
+=== CHANGES in FreeArc 0.40 pre-release 3, dated Nov 17 2007 ==============================
+===========================================================================================
+
+This update fixes all known severe bugs, and should be last before the final release. The main task
+remained now is English version of docs. I've tested new Tornado algorithm on 1 TB of data and
+fixed several bugs, now it should be reliable enough for practical usage. FAR plugin was extended
+to support archives and files larger than 4 GB. Total Commander plugin was updated to open archives
+faster - you should reimport freearc.addon and copy unarc.exe into the PATH. Definition of external
+compressors having multiple versions was simplified, look for "ccm" in arc.ini for examples. If you
+will follow the new style, compressed data will be tagged with exact version of compressor used,
+which means less confusion when extracting data. At last, Unix version was added Ctrl-Break
+handling.
+
+
+===========================================================================================
+=== CHANGES in FreeArc 0.40 pre-release 2, dated Nov 1 2007  ==============================
+===========================================================================================
+
+FreeArc 0.40 prerelease-2 version implements RAR-compatible -ep option and fixes several bugs with
+handling absolute pathnames
+
+
+===========================================================================================
+=== CHANGES in FreeArc 0.40 pre-release 1, dated Oct 24 2007 ==============================
+===========================================================================================
+
+It's a public test version of FreeArc 0.40. Please use it only for tests
+

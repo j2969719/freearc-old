@@ -1,0 +1,1 @@
+rar a Arc_ -ag -tl -dh -r -t -x!\*.* -x1\*.* -x_darcs\*.* -xdict\*.* -xDocumentation\Site\*.* -x*.~* *.bat *.btm *.cmd *.*hs *.c *.cpp *.h *.hpp readme *.txt *.doc *.docx *.htm arc.groups arc.ini *.rb makefile* compile* *.mak custom.ini.addition *.dev FarPlugin.def

@@ -1,0 +1,22 @@
+
+; If freearc.fmt don't work, then use these settings:
+;
+; FreeArc support for FAR MultiArc plugin
+; Append the following strings to file
+; ...\Program Files\Far\Plugins\MultiArc\Formats\Custom.ini
+
+[FreeArc]
+TypeName=FreeArc
+ID=41 72 43 01
+Extension=arc
+List=arc v --noarcext --
+Start="^--"
+End="^--"
+Format0="yyyy tt dd hh mm ss aaaaaaa zzzzzzzzzzzzzzz ppppppppppppppp rrrrrrrr nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+Extract=arc x {-ap%%R} -y -kb --noarcext {%%S} -- %%A @%%LNMA
+ExtractWithoutPath=arc e -y -kb --noarcext {%%S} -- %%A @%%LNMA
+Test=arc t --noarcext {%%S} -- %%A @%%LNMA
+Delete=arc d --noarcext {%%S} -- %%A @%%LNMA
+Add=arc a {-ap%%R} --noarcext {%%S} -- %%A @%%LNMA
+AddRecurse=arc a -r {-ap%%R} --noarcext {%%S} -- %%A @%%LNMA
+AllFilesMask="*"
