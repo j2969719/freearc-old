@@ -99,7 +99,8 @@ long **malloc2d (long num, unsigned long len)
     return (array);
 }
 
-static long read_wave (long *data, void *rest, void **bufferptr, void *prevbuf, long prevsize, long byte_size, long num_chan, unsigned long len, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+#ifndef FREEARC_DECOMPRESS_ONLY
+static long read_wave (long *data, void *rest, void **bufferptr, void *prevbuf, long prevsize, long byte_size, long num_chan, unsigned long len, CALLBACK_FUNC *callback, void *auxdata)
 {
     long i, rest_bytes, elements;
     char *buffer = (char*) malloc1d (len + 2, num_chan*byte_size);
@@ -146,8 +147,9 @@ static long read_wave (long *data, void *rest, void **bufferptr, void *prevbuf, 
     *bufferptr = buffer;
     return (bytes_read);
 }
+#endif
 
-static long write_wave (long **data, long byte_size, long num_chan, unsigned long len, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+static long write_wave (long **data, long byte_size, long num_chan, unsigned long len, CALLBACK_FUNC *callback, void *auxdata)
 {
     long    n;
     long    i, res;
@@ -188,6 +190,7 @@ static long write_wave (long **data, long byte_size, long num_chan, unsigned lon
     return res;
 }
 
+#ifndef FREEARC_DECOMPRESS_ONLY
 void split_int (long *data, long frame_len, long num_chan, long **buffer)
 {
     long    i, j, n;
@@ -204,6 +207,7 @@ void split_int (long *data, long frame_len, long num_chan, long **buffer)
         buffer[n][i] = buffer[n][i] - (buffer[n-1][i] / 2);
     }
 }
+#endif
 
 void combine_int (long frame_len, long num_chan, long **buffer)
 {
@@ -217,6 +221,7 @@ void combine_int (long frame_len, long num_chan, long **buffer)
     }
 }
 
+#ifndef FREEARC_DECOMPRESS_ONLY
 void split_float (long *data, long frame_len, long num_chan, long **buffer)
 {
     long    i, j;
@@ -232,6 +237,7 @@ void split_float (long *data, long frame_len, long num_chan, long **buffer)
         buffer[j+num_chan][i] = (SWAP16(data_lo) + 1) * negative;
     }
 }
+#endif
 
 void combine_float (long frame_len, long num_chan, long **buffer)
 {
@@ -249,7 +255,8 @@ void combine_float (long frame_len, long num_chan, long **buffer)
 }
 
 
-int tta_compress (int level, int skip_header, int is_float, int num_chan, int word_size, int offset, int raw_data, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+#ifndef FREEARC_DECOMPRESS_ONLY
+int tta_compress (int level, int skip_header, int is_float, int num_chan, int word_size, int offset, int raw_data, CALLBACK_FUNC *callback, void *auxdata)
 {
     long            *data=NULL, **buffer=NULL;
     void            *rest=NULL, *origdata=NULL;
@@ -258,7 +265,7 @@ int tta_compress (int level, int skip_header, int is_float, int num_chan, int wo
     unsigned long   frame_size, frame_len, bit_array_size;
     unsigned char   header[4];
     int             errcode, byte_size;
-    bit_array = NULL;
+    bit_array_write = NULL;
     level = mymin (level, 3);
 
     // Size of each chunk processed, in samples (num_chan*byte_size bytes each)
@@ -274,7 +281,7 @@ int tta_compress (int level, int skip_header, int is_float, int num_chan, int wo
     } else {
         // Read first 1mb of data for MM type autodetection
         prevbuf = prevptr = (char*)malloc1d (1*mb, 1);
-        READ_LEN (prevsize, prevbuf, 1*mb);
+        READ_LEN_OR_EOF (prevsize, prevbuf, 1*mb);
 
         // If both WAV file header and entropy autodetection fails use default values
         if (!skip_header && autodetect_wav_header (prevbuf, prevsize, &is_float, &num_chan, &word_size, &offset)) {
@@ -290,7 +297,7 @@ storing:
             while (1) {
                 if (prevbuf != NULL)   {WRITE (prevbuf, prevsize)}
                 else                   prevbuf = (char*)malloc1d (1*mb, 1);
-                READ_LEN (prevsize, prevbuf, 1*mb);
+                READ_LEN_OR_EOF (prevsize, prevbuf, 1*mb);
             }
         }
     }
@@ -375,17 +382,17 @@ storing:
                 goto skip_writing_rest;
             } else {
                 WRITE4 (bit_array_size);              // write compressed data
-                WRITE  (bit_array, bit_array_size);
+                WRITE  (bit_array_write, bit_array_size);
             }
         }
         WRITE (rest, bytes_read%(num_chan*byte_size));
 skip_writing_rest:
-        FreeAndNil (bit_array);
+        FreeAndNil (bit_array_write);
         FreeAndNil (origdata);
     }
 
 finished:
-    FreeAndNil (bit_array);
+    FreeAndNil (bit_array_write);
     FreeAndNil (origdata);
     FreeAndNil (buffer);
     FreeAndNil (rest);
@@ -394,8 +401,9 @@ finished:
 
     return errcode;
 }
+#endif
 
-int tta_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int tta_decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
     long    **buffer=NULL;
     void    *rest=NULL;
@@ -405,7 +413,7 @@ int tta_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
     unsigned long   is_float, frame_len, bit_array_size;
     unsigned char   header[4];
     int errcode;
-    bit_array = NULL;
+    bit_array_read = NULL;
 
     // read TTA header
     READ (header, 4)
@@ -427,7 +435,7 @@ int tta_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
         prevbuf = malloc1d (1*mb, 1);
         while (1) {
             int prevsize;
-            READ_LEN (prevsize, prevbuf, 1*mb);
+            READ_LEN_OR_EOF (prevsize, prevbuf, 1*mb);
             WRITE (prevbuf, prevsize);
         }
     }
@@ -462,7 +470,7 @@ int tta_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
                 continue;                            //   and go to next block
             }
             init_bit_array_read (bit_array_size);
-            READ (bit_array, bit_array_size);
+            READ (bit_array_read, bit_array_size);
         }
 
         // grab some space for a buffer
@@ -480,7 +488,7 @@ int tta_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
         if (is_float)   combine_float (frame_len, num_chan, buffer);
         else            combine_int   (frame_len, num_chan, buffer);
 
-        FreeAndNil (bit_array);
+        FreeAndNil (bit_array_read);
         if (frame_len) {
             errcode = write_wave (buffer, byte_size, num_chan, frame_len, callback, auxdata);
             if (errcode<0)  goto finished;
@@ -494,7 +502,7 @@ int tta_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
 finished:
     FreeAndNil (prevbuf);
     FreeAndNil (buf1);
-    FreeAndNil (bit_array);
+    FreeAndNil (bit_array_read);
     FreeAndNil (buffer);
     FreeAndNil (rest);
     return errcode;
@@ -522,7 +530,7 @@ finished:
 #include <windows.h>
 
 #include "../Compression.h"
-#include "../Standalone.h"
+#include "../Common.cpp"
 #include "ttaenc.h"
 
 #ifdef _WIN32

@@ -9,31 +9,35 @@ import Control.Exception
 import Control.Monad
 import Data.Int
 import Data.IORef
+import Data.Maybe
 import Foreign.C.Types
 import Foreign.Ptr
 import Foreign.Marshal.Utils
 import Foreign.Storable
 
 import Utils
+import Errors
 import Process
 import FileInfo
 import CompressionLib
 import Compression
 import Encryption
-import Cmdline
-import Statistics
+import Options
+import UI
 import ArhiveStructure
 import ArhiveDirectory
 
+{-# NOINLINE decompress_file #-}
 -- |Распаковка файла из архива с использованием переданного процесса декомпрессора
 -- и записью распакованных данных с помощью функции `writer`
 decompress_file decompress_pipe compressed_file writer = do
   -- Не пытаться распаковать каталоги/пустые файлы и файлы без данных, поскольку ожидать получение 0 байтов - воистину дзенское занятие ;)
   when (fiSize(cfFileInfo compressed_file) > 0  &&  not (isCompressedFake compressed_file)) $ do
     sendP decompress_pipe (Just compressed_file)
-    repeat_whileM (receiveP decompress_pipe) ((>=0).snd) (uncurry writer)
-    return ()
+    repeat_while (receiveP decompress_pipe) ((>=0).snd) (uncurry writer)
+    failOnTerminated
 
+{-# NOINLINE decompress_PROCESS #-}
 -- |Процесс, распаковывающий файлы из архивов
 decompress_PROCESS command count_cbytes pipe = do
   cmd <- receiveP pipe
@@ -42,18 +46,23 @@ decompress_PROCESS command count_cbytes pipe = do
     Just cfile' -> do
       cfile <- ref cfile'
       state <- ref (error "Decompression state is not initialized!")
-      repeat_untilM $ do
+      repeat_until $ do
         decompress_block command cfile state count_cbytes pipe
+        operationTerminated' <- val operationTerminated
+        when operationTerminated' $ do
+          sendP pipe (error "Decompression terminated", aFREEARC_ERRCODE_OPERATION_TERMINATED)
         (x,_,_) <- val state
-        return (x == aSTOP_DECOMPRESS_THREAD)
+        return (x == aSTOP_DECOMPRESS_THREAD || operationTerminated')
 
+
+{-# NOINLINE decompress_block #-}
 -- |Распаковать один солид-блок
 decompress_block command cfile state count_cbytes pipe = mdo
   cfile' <- val cfile
   let size        =  fiSize      (cfFileInfo cfile')
       pos         =  cfPos        cfile'
       block       =  cfArcBlock   cfile'
-      compressor  =  blCompressor block .$ compressionLimitMemoryUsage freearcGetDecompressionMem (opt_limit_decompression_memory command)
+      compressor  =  blCompressor block .$ limitDecompressionMemoryUsage (opt_limit_decompression_memory command)
       startPos  | compressor==aNO_COMPRESSION  =  pos  -- для -m0 начинаем чтение напрямую с нужной позиции в блоке
                 | otherwise                    =  0
   state =: (startPos, pos, size)
@@ -72,51 +81,28 @@ decompress_block command cfile state count_cbytes pipe = mdo
 
   -- Добавить ключ в запись алгоритма дешифрования
   keyed_compressor <- generateDecryption compressor (opt_decryption_info command)
+  when (any isNothing keyed_compressor) $ do
+    registerError$ BAD_PASSWORD (cmd_arcname command) (cfile'.$cfFileInfo.$storedName)
 
   -- Превратим список методов сжатия/шифрования в конвейер процессов распаковки
-  let decompress1 = decompress_p reader times                    -- первый процесс в конвейере
-      decompressN = de_compress_PROCESS freearcDecompress times  -- последующие процессы в конвейере
-      decompressa [p]     = decompress1 p
-      decompressa [p1,p2] = decompress1 p2        |> decompressN p1 0
-      decompressa (p1:ps) = decompress1 (last ps) |> foldl1 (|>) (map (\x->decompressN x 0) (reverse$ init ps)) |> decompressN p1 0
+  let decompress1 = de_compress_PROCESS1 freearcDecompress reader times  -- первый процесс в конвейере
+      decompressN = de_compress_PROCESS  freearcDecompress times         -- последующие процессы в конвейере
+      decompressa [p]     = decompress1 p         0
+      decompressa [p1,p2] = decompress1 p2        0 |> decompressN p1 0
+      decompressa (p1:ps) = decompress1 (last ps) 0 |> foldl1 (|>) (map (\x->decompressN x 0) (reverse$ init ps)) |> decompressN p1 0
 
   -- И наконец процедура распаковки
   times <- uiStartDeCompression "decompression"  -- создать структуру для учёта времени распаковки
   ; result <- ref 0   -- количество байт, записанных в последнем вызове writer
-  ; runFuncP (decompressa keyed_compressor) (undefined) (undefined) (writer .>>= writeIORef result) (val result)
+  ; runFuncP (decompressa (map fromJust keyed_compressor)) (fail "decompress_block::runFuncP") (doNothing) (writer .>>= writeIORef result) (val result)
   uiFinishDeCompression times                    -- учесть в UI чистое время операции
 
-decompress_p reader times comprMethod pipe = do
-  total' <- ref ( 0 :: FileSize)
-  time'  <- ref (-1 :: Double)
-  let writer buf size = do total'+=i size; resend_data pipe (DataBuf buf size)
-      callback "quasiwrite" _ _  =  return aFREEARC_OK
-      callback "time" ptr 0 = do t <- peek (castPtr ptr::Ptr CDouble) >>==realToFrac
-                                 time' =: t
-                                 return aFREEARC_OK
-  -- СОБСТВЕННО РАСПАКОВКА
-  result <- freearcDecompress 0 comprMethod reader writer callback
-  -- Статистика
-  total <- val total'
-  time  <- val time'
-  uiDeCompressionTime times (comprMethod,time,total)
-  resend_data pipe NoMoreData
-  return ()
 
--- |Структура, используемая для передачи данных следующему процессу упаковки/распаковки
-data CompressionData = DataBuf (Ptr CChar) Int
-                     | NoMoreData
-
--- |Процедура передачи выходных данных упаковщика/распаковщика следующей процедуре в цепочке
-resend_data pipe x@DataBuf{}   =  sendP pipe x  >>  receive_backP pipe  -- возвратить количество потреблённых байт, возвращаемое из процесса-потребителя
-resend_data pipe x@NoMoreData  =  sendP pipe x  >>  return 0
-
-
+{-# NOINLINE de_compress_PROCESS #-}
 -- |Вспомогательный процесс перекладывания данных из буферов входного потока
 -- во входные буфера процедуры упаковки/распаковки
 --   comprMethod - строка метода сжатия с параметрами, типа "ppmd:o10:m48m"
 --   num - номер процесса в цепочке процессов упаковки
---   count - общее количество процессов упаковки (без шифрования)
 de_compress_PROCESS de_compress times comprMethod num pipe = do
   -- Информация об остатке данных, полученных из предыдущего процесса, но ещё не отправленных на упаковку/распаковку
   remains <- ref$ Just (error "undefined remains:buf0", error "undefined remains:srcbuf", 0)
@@ -152,33 +138,57 @@ de_compress_PROCESS de_compress times comprMethod num pipe = do
             DataBuf srcbuf srclen  ->  copyData srcbuf srcbuf srclen
             NoMoreData             ->  do remains =: Nothing;  return prevlen
 
-  -- Процедура чтения входных данных процесса упаковки/распаковки (вызывается лишь однажды, в отличие от read_data)
+  -- Процедура чтения входных данных процесса упаковки/распаковки (вызывается лишь однажды, в отличие от рекурсивной read_data)
   let reader  =  read_data 0
 
-  -- Процедура записи выходных данных процесса упаковки/распаковки
+  de_compress_PROCESS1 de_compress reader times comprMethod num pipe
+
+
+{-# NOINLINE de_compress_PROCESS1 #-}
+-- |de_compress_PROCESS с параметризуемой функцией чтения (может читать данные напрямую
+-- из архива для первого процесса в цепочке распаковки)
+de_compress_PROCESS1 de_compress reader times comprMethod num pipe = do
   total' <- ref ( 0 :: FileSize)
   time'  <- ref (-1 :: Double)
-  let writer buf size = do total' += i size
-                           uiWriteData num (i size)
-                           resend_data pipe (DataBuf buf size)
-
-  -- Все остальные запросы процесса (рас)паковки отрабатываются здесь
+  let -- Процедура чтения входных данных процесса упаковки/распаковки
+      callback "read" buf size = reader buf size
+      -- Процедура записи выходных данных
+      callback "write" buf size = do total' += i size
+                                     uiWriteData num (i size)
+                                     resend_data pipe (DataBuf buf size)
       -- "Квазизапись" просто сигнализирует сколько данных будет записано в результате сжатия
       -- уже прочитанных данных. Значение передаётся через int64* ptr
-  let callback "quasiwrite" ptr size = do bytes <- peek (castPtr ptr::Ptr Int64) >>==i
+      callback "quasiwrite" ptr size = do bytes <- peek (castPtr ptr::Ptr Int64) >>==i
                                           uiQuasiWriteData num bytes
                                           return aFREEARC_OK
       -- Информация о чистом времени выполнения упаковки/распаковки
       callback "time" ptr 0 = do t <- peek (castPtr ptr::Ptr CDouble) >>==realToFrac
                                  time' =: t
                                  return aFREEARC_OK
+      -- Прочие (неподдерживаемые) callbacks
+      callback _ _ _ = return aFREEARC_ERRCODE_NOT_IMPLEMENTED
+
+{-
+      -- Debugging wrapper
+      debug f what buf size = inside (print (comprMethod,what,size))
+                                     (print (comprMethod,what,size,"done"))
+                                     (f what buf size)
+-}
+      -- Non-debugging wrapper
+      debug f what buf size = f what buf size
 
   -- СОБСТВЕННО УПАКОВКА ИЛИ РАСПАКОВКА
-  result <- de_compress num comprMethod reader writer callback
+  result <- de_compress num comprMethod (debug callback)
+  debug callback "finished" nullPtr result
   -- Статистика
   total <- val total'
   time  <- val time'
   uiDeCompressionTime times (comprMethod,time,total)
+  -- Выйдем с сообщением, если произошла ошибка
+  unlessM (val operationTerminated) $ do
+    when (result `notElem` [aFREEARC_OK, aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED]) $ do
+      registerThreadError$ COMPRESSION_ERROR [compressionErrorMessage result, comprMethod]
+      operationTerminated =: True
   -- Сообщим предыдущему процессу, что данные больше не нужны, а следующему - что данных больше нет
   send_backP  pipe aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED
   resend_data pipe NoMoreData
@@ -241,7 +251,13 @@ decompress_step cfile state pipe buf len = do
 -- |Сигнал, требующий завершения работы треда распаковки
 aSTOP_DECOMPRESS_THREAD = -99
 
-{-# NOINLINE decompress_PROCESS #-}
-{-# NOINLINE decompress_p #-}
+
+-- |Структура, используемая для передачи данных следующему процессу упаковки/распаковки
+data CompressionData = DataBuf (Ptr CChar) Int
+                     | NoMoreData
+
 {-# NOINLINE resend_data #-}
-{-# NOINLINE de_compress_PROCESS #-}
+-- |Процедура передачи выходных данных упаковщика/распаковщика следующей процедуре в цепочке
+resend_data pipe x@DataBuf{}   =  sendP pipe x  >>  receive_backP pipe  -- возвратить количество потреблённых байт, возвращаемое из процесса-потребителя
+resend_data pipe x@NoMoreData  =  sendP pipe x  >>  return 0
+

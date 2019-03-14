@@ -45,8 +45,8 @@ const int MAX_O=128;                         /* maximum allowed model order  */
 #include "../Compression.h"
 class PRIME_STREAM {
 public:
-    CALLBACK_FUNC *callback;  VOID_FUNC *auxdata;
-    PRIME_STREAM (CALLBACK_FUNC *_callback, VOID_FUNC *_auxdata): Error(0), StrPos(0), Count(0), p(Buf) {
+    CALLBACK_FUNC *callback;  void *auxdata;
+    PRIME_STREAM (CALLBACK_FUNC *_callback, void *_auxdata): Error(0), StrPos(0), Count(0), p(Buf) {
       callback = _callback;  auxdata = _auxdata;
     }
     int  get(     ) { return (--Count >= 0)?(*p++    ):( fill( )); }

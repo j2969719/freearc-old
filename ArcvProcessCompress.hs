@@ -12,12 +12,13 @@ import Foreign.Ptr
 
 import Utils
 import Files
+import Errors
 import Process
 import FileInfo
 import Compression
 import Encryption
-import Cmdline           (opt_data_password, opt_headers_password, opt_encryption_algorithm)
-import Statistics
+import Options           (opt_data_password, opt_headers_password, opt_encryption_algorithm)
+import UI
 import ArhiveStructure
 import ArhiveDirectory
 import ArcvProcessExtract
@@ -50,9 +51,11 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
         DataEnd <- receiveP pipe
         return ()
 
-  repeat_whileM (receiveP pipe) (notTheEnd) $ \msg -> case msg of
-    DebugLog str -> do  -- Напечатать отладочное сообщение
+  repeat_while (receiveP pipe) (notTheEnd) $ \msg -> case msg of
+    DebugLog str -> do   -- Напечатать отладочное сообщение
         debugLog str
+    DebugLog0 str -> do
+        debugLog0 str
     CompressData block_type compressor real_compressor just_copy -> mdo
         case block_type of             -- Сообщим UI какого типа данные сейчас будут паковаться
             DATA_BLOCK  ->  uiStartFiles (length real_compressor)
@@ -90,8 +93,9 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
         -- Процесс упаковки одним алгоритмом
         let compressP = de_compress_PROCESS freearcCompress times
         -- Последовательность процессов упаковки, соответствующая последовательности алгоритмов `real_compressor`
-        let processes = zipWith (\a b ->a b) (map compressP (add_real_encryption real_compressor)) [1..]
-            compressa = case (add_real_encryption real_compressor) of
+        let real_crypted_compressor = add_real_encryption real_compressor
+            processes = zipWith compressP real_crypted_compressor [1..]
+            compressa = case real_crypted_compressor of
                           [_] -> storing_PROCESS |> last processes
                           _   -> storing_PROCESS |> foldl1 (|>) (init processes) |> last processes
         -- Процедура упаковки, вызывающая процесс упаковки со всеми необходимыми процедурами для получения/отправки данных
@@ -116,26 +120,28 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
         crc'             <-  val crc >>== finishCRC     -- Вычислим окончательное значение CRC
         origsize'        <-  val origsize
         putP backdoor (ArchiveBlock {
-                           blArchive    = archive
-                         , blType       = block_type
-                         , blCompressor = compressor .$(not just_copy &&& add_encryption_info)
-                         , blPos        = pos_begin
-                         , blOrigSize   = origsize'
-                         , blCompSize   = pos_end-pos_begin
-                         , blCRC        = crc'
-                         , blFiles      = undefined
+                           blArchive     = archive
+                         , blType        = block_type
+                         , blCompressor  = compressor .$(not just_copy &&& add_encryption_info) .$compressionDeleteTempCompressors
+                         , blPos         = pos_begin
+                         , blOrigSize    = origsize'
+                         , blCompSize    = pos_end-pos_begin
+                         , blCRC         = crc'
+                         , blFiles       = error "undefined ArchiveBlock::blFiles"
+                         , blIsEncrypted = error "undefined ArchiveBlock::blIsEncrypted"
                        }, dir)
 
 
 {-# NOINLINE storing_PROCESS #-}
 -- |Вспомогательный процесс, перекодирующий поток Instruction в поток CompressionData
 storing_PROCESS pipe = do
-  let send (DataChunk buf len)  =  resend_data pipe (DataBuf buf len)  >>  send_backP pipe (buf,len)
+  let send (DataChunk buf len)  =  failOnTerminated  >>  resend_data pipe (DataBuf buf len)  >>  send_backP pipe (buf,len)
       send  DataEnd             =  resend_data pipe NoMoreData >> return ()
       send _                    =  return ()
 
-  -- Цикл перекодирования инструкций
-  repeat_whileM (receiveP pipe) (notDataEnd) (send)
-  send DataEnd   -- сообщим следующему процессу, что данных больше нет
+  -- По окончании сообщим следующему процессу, что данных больше нет
+  ensureCtrlBreak "send DataEnd" (send DataEnd)$ do
+    -- Цикл перекодирования инструкций
+    repeat_while (receiveP pipe) (notDataEnd) (send)
   return ()
 

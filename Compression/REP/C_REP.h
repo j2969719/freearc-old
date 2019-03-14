@@ -1,8 +1,7 @@
 #include "../Compression.h"
 
-typedef int io_func (/*void* param,*/ void* buf, int size);  // Тип функции чтения/записи данных
-int rep_compress   (MemSize BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashSizeLog, int Amplifier, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
-int rep_decompress (MemSize BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashSizeLog, int Amplifier, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+int rep_compress   (MemSize BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashSizeLog, int Amplifier, CALLBACK_FUNC *callback, void *auxdata);
+int rep_decompress (MemSize BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashSizeLog, int Amplifier, CALLBACK_FUNC *callback, void *auxdata);
 
 
 #ifdef __cplusplus
@@ -24,19 +23,19 @@ public:
   REP_METHOD();
 
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_REP)
   virtual void ShowCompressionMethod (char *buf);
 
   // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return BlockSize/4*5;}
+  virtual MemSize GetCompressionMem     (void);
   virtual MemSize GetDecompressionMem   (void)         {return BlockSize;}
   virtual MemSize GetDictionary         (void)         {return BlockSize;}
   virtual MemSize GetBlockSize          (void)         {return 0;}
-  virtual void    SetCompressionMem     (MemSize mem)  {if (mem>0)   BlockSize = 1<<lb(mem/5*4);}
+  virtual void    SetCompressionMem     (MemSize mem)  {if (mem>0)   BlockSize = 1<<lb(mem/7*6);}
   virtual void    SetDecompressionMem   (MemSize mem)  {if (mem>0)   BlockSize = mem;}
   virtual void    SetDictionary         (MemSize dict) {if (dict>0)  BlockSize = dict;}
   virtual void    SetBlockSize          (MemSize bs)   {}

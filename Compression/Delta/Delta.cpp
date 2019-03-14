@@ -1,3 +1,29 @@
+/* Delta: binary tables preprocessor v1.0  (c) Bulat.Ziganshin@gmail.com  2008-03-13
+
+This algorithm preprocess data improving their further compression. It detects tables
+of binary records and 1) substracts sucessive values in columns, 2) reorder columns
+trying to maximize results of further compression.
+
+Algorithm includes 3 phases:
+
+1) Preliminary table detection. It finds 6+ repetitions of the same byte at the same distance,
+   i.e. anything like a...a...a...a...a...a where '.' denotes any byte except for 'a'.
+   This is done in delta_compress
+
+2) Candidates detected at first phase are then checked by FAST_CHECK_FOR_DATA_TABLE looking for
+   monotonic sequence of bytes with fixed distance. Most candidates found at first stage are
+   filtered out here
+
+3) Remaining candidates are tested by slow_check_for_data_table() that finds exact table boundaries
+   and detects columns that should and that shouldn't be substracted. Only if table is large enough
+   it will be finally processed
+
+The algorithm processes 20 mb/sec on 1GHz CPU, but i'm sure that the speed may be 3-fold increased
+
+*/
+
+
+
 /* To-do list:
 +1. Отличать константные столбцы и собирать их отдельно в начале таблицы (без вычитания)
       приводить переменную часть к кратной 4 ширине!
@@ -94,12 +120,6 @@ const int LINE=32;
 // C HEADERS **************************************************************************************
 #include "../Compression.h"
 
-#ifdef DELTA_LIBRARY
-#define stat1(nextmsg,size)
-#else
-void stat1 (char *nextmsg, int Size);
-#endif
-
 
 // OPTIONS FOR STANDALONE EXECUTABLE **************************************************************
 #ifndef DELTA_LIBRARY
@@ -137,6 +157,7 @@ struct Buffer
     ~Buffer()                { free(); }
     int    len()             { return mymax(p,end)-buf; }
     void   reset()           { p=buf; }
+    void   empty()           { p=end=buf; }
     void   free ()           { ::free(buf); buf=p=end=NULL; }
     void   put8 (uint x)     { reserve(sizeof(uint8 )); *(uint8 *)p=x; p+=sizeof(uint8 ); }
     void   put16(uint x)     { reserve(sizeof(uint16)); *(uint16*)p=x; p+=sizeof(uint16); }
@@ -175,7 +196,7 @@ struct Buffer
 // остальные биты=1 если соответствующий столбец не нужно вычитать
 
 // Encode `type` word from N, doDiff[] and immutable[] values.
-uint32 encode_type (int N, bool doDiff[], bool immutable[])
+inline static uint32 encode_type (int N, bool doDiff[], bool immutable[])
 {
     uint32 type = 1<<N;
     for (int i=0; i<N; i++) {
@@ -185,7 +206,7 @@ uint32 encode_type (int N, bool doDiff[], bool immutable[])
 }
 
 // Decode `type` word into N, doDiff[] and immutable[] values
-void decode_type (uint32 type, int &N, bool doDiff[], bool immutable[])
+static void decode_type (uint32 type, int &N, bool doDiff[], bool immutable[])
 {
     int i;
     for (i=0; type>1; i++, type>>=1) {
@@ -199,7 +220,7 @@ void decode_type (uint32 type, int &N, bool doDiff[], bool immutable[])
 // (bytewise with carries starting from lower address, i.e. in LSB aka Intel byte order).
 // bool doDiff[0..N-1] marks columns what should be diffed,
 // other columns are left untouched. Carry saved only over adjancent diffed columns
-static void diff_table (int N, BYTE *table_start, int table_len, bool doDiff[])
+inline static void diff_table (int N, BYTE *table_start, int table_len, bool doDiff[])
 {
     for (BYTE *r = table_start + N*table_len; (r-=N) > table_start; )
         for (int i=0,carry=0; i<N; i++)
@@ -225,7 +246,7 @@ static void undiff_table (int N, BYTE *table_start, int table_len, bool doDiff[]
 
 // Reorder table so that all immutable columns are placed before all mutable ones.
 // bool immutable[0..N-1] marks immutable columns
-static void reorder_table (int N, BYTE *table_start, int table_len, bool immutable[], Buffer &tempbuf)
+static inline void reorder_table (int N, BYTE *table_start, int table_len, bool immutable[], Buffer &tempbuf)
 {
     // First, copy all the data into temporary area
     tempbuf.reserve (N*table_len);
@@ -265,6 +286,7 @@ static void unreorder_table (int N, BYTE *table_start, int table_len, bool immut
 }
 
 
+#ifndef FREEARC_DECOMPRESS_ONLY
 // TABLE COLUMNS ANALYSIS *********************************************************************
 
 // Analyze which table colums need to be diffed and which ones are (almost) immutable
@@ -309,12 +331,13 @@ static BYTE* search_for_table_boundary (int N, BYTE *t, byte *bufstart, byte *bu
 {
     int dir = (*(int16*)(t+N) - *(int16*)t < 0)? -1:1,  len=0, omit=0, useless=_useless=0, bad=0;
     BYTE* lastpoint=t;  bool first_time=TRUE;
-    for (t+=N; bufstart<=t && t+sizeof(int16)<=bufend; t+=N) {
+    for (t+=N; bufstart<=t+N && t+N+sizeof(int16)<=bufend; t+=N) {
         int diff = *(int16*)t - *(int16*)(t-N);
-        double itemlb = logb(1 + abs(*(int16*)t));
-        double difflb = logb(1 + abs(diff));
-             if (dir<0 && diff<0)  difflb < itemlb/1.1?  len++,omit=0  :  useless++,omit++;
-        else if (dir>0 && diff>0)  difflb < itemlb/1.1?  len++,omit=0  :  useless++,omit++;
+        uint itemlb = lb(1 + abs(*(int16*)t));
+        uint difflb = lb(1 + abs(diff));
+        itemlb -= itemlb > 10;  // itemlb /= 1.1 (0 <= itemlb < 20)
+             if (dir<0 && diff<0) difflb < itemlb? len++,omit=0 : useless++,omit++;
+        else if (dir>0 && diff>0) difflb < itemlb? len++,omit=0 : useless++,omit++;
         else if (diff==0) useless++;
         else {
             if (len>=4 || first_time)  bad=0, lastpoint = t-N*omit,  _useless=useless,  first_time = FALSE;
@@ -345,7 +368,7 @@ static bool slow_check_for_data_table (int N, byte *p, uint32 &type, BYTE *&tabl
     int useful = rows - useless;  // количество полезных строк таблицы
     double skipBits = logb(mymax(table_start-bufstart,1));  // сколько бит придётся потратить на кодирование поля skip
     stat ((slow_checks++, verbose>1 && printf ("Slow check  %08x-%08x (%d*%d+%d)\n", int(table_start-buf+offset), int(table_end-buf+offset), N, useful, useless)));
-    if (useful*sqrt(N) > 30+4*skipBits) {
+    if (useful*sqrt((double)N) > 30+4*skipBits) {
         stat ((table_count++,  table_sumlen += N*rows, table_skipBits+=skipBits));
         stat (verbose>0 && printf("%08x-%08x %d*%d   ", int(table_start-buf+offset), int(table_end-buf+offset), N, rows));
 
@@ -392,23 +415,23 @@ static bool slow_check_for_data_table (int N, byte *p, uint32 &type, BYTE *&tabl
 }
 
 
-int delta_compress (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int delta_compress (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, void *auxdata)
 {
     int errcode = FREEARC_OK;
-    byte *buf = (byte*) malloc(BlockSize);  // Buffer for one block of input data (typically, 8mb long)
+    byte *buf = (byte*) BigAlloc(BlockSize);  // Buffer for one block of input data (typically, 8mb long)
     if (buf==NULL)  return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;   // Error: not enough memory
     uint64 offset = 0;  // Current offset of buf[] contents relative to file (increased after each input block processd)
+    Buffer TSkip, TType, TRows;    // Buffers for storing info about each table filtered
+    Buffer ReorderingBuffer;       // Buffer used in reorder_table
 
     // Each iteration of this cycle reads, process and encodes one block of data
     for (;;)
     {
         // Read input block
-        int Size;  READ_LEN (Size, buf, BlockSize);
+        int Size;  READ_LEN_OR_EOF (Size, buf, BlockSize);
 
         BYTE *bufend = buf + Size;     // End of data in buf[]
         BYTE *last_table_end = buf;    // End of last table found so far
-        Buffer TSkip, TType, TRows;    // Buffers for storing info about each table filtered
-        Buffer ReorderingBuffer;       // Buffer used in reorder_table
         BYTE *hash[256], *hash1[256];
         iterate_var(i,256)  hash[i] = hash1[i] = buf-1;
 
@@ -420,10 +443,11 @@ if (*(int32*)ptr != *(int32*)(ptr+3))   //  a little speed optimization, mainly 
             BYTE count[MAX_ELEMENT_SIZE]; zeroArray(count);
             BYTE *p = ptr; iterate_var(i,LINE)
             {
-                int n = p - hash[*p/16];
+                int n = p - hash[*p/16];   // detecting repeated data by 4 higher bits
                 hash[*p/16] = p;
                 if (n<=MAX_ELEMENT_SIZE)  count[n-1]++;
 #if 0
+                // Detecting repeating data by all 8 bits - useful for tables with longer rows
                 int n1 = p - hash1[*p];
                 hash1[*p] = p;
                 if (n!=n1 && n1<=MAX_ELEMENT_SIZE)  count[n1-1]++;
@@ -457,34 +481,36 @@ if (*(int32*)ptr != *(int32*)(ptr+3))   //  a little speed optimization, mainly 
         WRITE (TSkip.buf, TSkip.len());      // output the TSkip buffer contents
         WRITE (TType.buf, TType.len());      // ..
         WRITE (TRows.buf, TRows.len());      // ..
-        TSkip.free(), TType.free(), TRows.free(), ReorderingBuffer.free();
+        TSkip.empty(), TType.empty(), TRows.empty();
         WRITE (buf, Size);                   // output the preprocessed data
         offset += Size;
     }
 
  finished:
-    stat (printf("Tables %.0lf * %.0lf = %.0lf (%.0lf) bytes (%.0lf/%.0lf probes) %.1lf skipbits\n", double(table_count), double(table_sumlen/mymax(table_count,1)), double(table_sumlen), double(table_diffed), double(slow_checks), double(fast_checks), double(table_skipBits/mymax(table_count,1))));
-    free(buf);
-    return errcode;
+    stat (printf("\rTables %.0lf * %.0lf = %.0lf (%.0lf) bytes (%.0lf/%.0lf probes) %.1lf skipbits\n", double(table_count), double(table_sumlen/mymax(table_count,1)), double(table_sumlen), double(table_diffed), double(slow_checks), double(fast_checks), double(table_skipBits/mymax(table_count,1))));
+    BigFree(buf); return errcode;
 }
+#endif
 
 
 // Decompression which undiffs all data tables which was diffed by table_compress()
-int delta_decompress (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int delta_decompress (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, void *auxdata)
 {
     int errcode = FREEARC_OK;   // Error code returned by last operation or FREEARC_OK
-    uint64 offset = 0;          // Current offset of buf[] contents relative to file (increased after each input block processd)
+    uint64 offset = 0;   // Current offset of buf[] contents relative to file (increased after each input block processd)
+    Buffer Data, TSkip, TType, TRows,
+           ReorderingBuffer;           // Buffer used in reorder_table
+
     // Цикл, каждая итерация которого обрабатывает один блок сжатых данных
     for (;;)
     {
         // Прочитаем один блок данных и описание заключённых в нём таблиц
-        int DataSize;             READ4(DataSize);      // Size of data block
-        int TableSize;            READ4(TableSize);     // Size of each table describing data tables
-        Buffer TSkip(TableSize);  READ (TSkip.buf, TableSize);  // Read table descriptions (see below)
-        Buffer TType(TableSize);  READ (TType.buf, TableSize);
-        Buffer TRows(TableSize);  READ (TRows.buf, TableSize);
-        Buffer Data(DataSize);    READ (Data.buf,  DataSize);   // Finally, read block contents itself
-        Buffer ReorderingBuffer;                        // Buffer used in reorder_table
+        int DataSize;              READ4_OR_EOF(DataSize);       // Size of data block
+        int TableSize;             READ4(TableSize);             // Size of each table describing data tables
+        TSkip.reserve(TableSize);  READ (TSkip.buf, TableSize);  // Read table descriptions (see below)
+        TType.reserve(TableSize);  READ (TType.buf, TableSize);
+        TRows.reserve(TableSize);  READ (TRows.buf, TableSize);
+        Data .reserve(DataSize);   READ (Data.buf,  DataSize);   // Finally, read block contents itself
 
         // Undiff all data tables in this block
         BYTE *p = Data.buf;
@@ -502,10 +528,10 @@ int delta_decompress (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *call
             undiff_table    (N, p, rows, doDiff);
             p += N*rows;
         }
-        TSkip.free(), TType.free(), TRows.free(), ReorderingBuffer.free();
+        TSkip.empty(), TType.empty(), TRows.empty();
 
         // And finally write undiffed data
-        WRITE (Data.buf, DataSize);
+        WRITE (Data.buf, DataSize);  Data.empty();
         offset += DataSize;
     }
 finished:
@@ -516,46 +542,63 @@ finished:
 // FUNCTIONS FOR STANDALONE EXECUTABLE ************************************************************
 
 #ifndef DELTA_LIBRARY
-#include "../Standalone.h"
+#include "../Common.cpp"
 
-// Вывести время выполнения очередного шага алгоритма и запомнить название следующего шага
-void stat1 (char *nextmsg, int Size)
+// Structure for recording compression statistics and zero record of this type
+struct Results {
+  char *msg;                 // Mode: compression/decompression
+  FILE *fin, *fout;          // Input and output files
+  uint64 filesize;           // Size of input file
+  uint64 insize, outsize;    // How many bytes was already read/written
+  double time;               // How many time was spent in (de)compression routines
+} r0;
+
+int ReadWriteCallback (const char *what, void *buf, int size, void *r_)
 {
-    if (! print_timings) return;
+  Results &r = *(Results*)r_;        // Accumulator for compression statistics
 
-    static char *msg = NULL;
-    static clock_t StartClock, PreviousClock;
+  if (strequ(what,"init")) {
+    r.filesize = get_flen(r.fin);
+    r.time -= GetGlobalTime();
 
-    if (msg == NULL) {
-        StartClock = clock();
-    } else {
-        double seconds = (clock()-PreviousClock) / (double)CLOCKS_PER_SEC;
-        printf( "%s: %.3lf seconds, speed %.3lf mb/sec", msg, seconds, Size/seconds/1000/1000);
-        if (nextmsg==NULL) {
-            double seconds = (clock()-StartClock) / (double)CLOCKS_PER_SEC;
-            printf( "Total %.3lf seconds, speed %.3lf mb/sec", seconds, Size/seconds/1000/1000);
-        }
+  } else if (strequ(what,"read")) {
+    r.time += GetGlobalTime();
+    int n = file_read (r.fin, buf, size);
+    r.insize += n;
+    r.time -= GetGlobalTime();
+    return n;
+
+  } else if (strequ(what,"write")) {
+    r.time += GetGlobalTime();
+    if (r.fout)  file_write (r.fout, buf, size);
+    r.outsize += size;
+    if (!verbose)
+    {
+      char percents[10] = "";
+      if (r.filesize)    sprintf (percents, "%2d%%: ", int(double(r.insize)*100/r.filesize));
+      double insizeMB = double(r.insize)/1000/1000;
+      if (r.time > 0.01)  printf( "\r%sprocessed %.0lf mb, %.3lf seconds, speed %.3lf mb/sec",
+                                    percents, insizeMB, r.time, insizeMB/r.time);
+      //    4096.00 KiB ->     1230.92 KiB (ratio  30.05%, speed  299 KiB/s)
+    }
+    r.time -= GetGlobalTime();
+    return size;
+
+  } else if (strequ(what,"done")) {
+    r.time += GetGlobalTime();
+    if (!verbose)
+    {
+      double insizeMB = double(r.insize)/1000/1000;
+      if (r.time > 0.01)  printf( "\r%s: %.0lf mb, %.3lf seconds, speed %.3lf mb/sec     ",
+                                    r.msg, insizeMB, r.time, insizeMB/r.time);
     }
 
-    msg = nextmsg;
-    PreviousClock = clock();
+  } else {
+    return FREEARC_ERRCODE_NOT_IMPLEMENTED;
+  }
 }
 
-FILE *fin, *fout;
-int readFILE (/*void* param,*/ void* buf, int size)
-{
-    //FILE *fin = (FILE*)param;
-    return  read (fin, buf, size);
-}
-
-int writeFILE (/*void* param,*/ void* buf, int size)
-{
-    //FILE *fout = (FILE*)param;
-    if (fout)  write (fout, buf, size);
-    return 0;
-}
-
-// Разбор командной строки и вызов table_compress/table_decompress с соответствующими параметрами
+// Разбор командной строки и вызов delta_compress/delta_decompress с соответствующими параметрами
 int main (int argc, char **argv)
 {
     // Распаковка вместо упаковки?
@@ -579,9 +622,11 @@ int main (int argc, char **argv)
     // Кроме опций, в командной строке должно быть ровно 1 или 2 аргумента
     // (входной и опционально выходной файлы)
     if (argc != 2  &&  argc != 3) {
+        printf( "Delta: binary tables preprocessor v1.0  (c) Bulat.Ziganshin@gmail.com  2008-03-13");
+        printf( "\n" );
         printf( "\n Usage: delta [options] original-file [packed-file]");
         printf( "\n   -bN --  process data in N mb blocks");
-        printf( "\n   -x  --  enable extended tables (with 2..32-byte elements)");
+        //printf( "\n   -x  --  enable extended tables (with 32..64-byte elements)");
         printf( "\n   -v  --  increment verbosity level (0 - default, 2 - maximum)");
         printf( "\n" );
         printf( "\n For decompress: delta -d [-v] packed-file [unpacked-file]");
@@ -589,34 +634,38 @@ int main (int argc, char **argv)
         exit(2);
     }
 
+    Results r = r0;
+
     // Открыть входной файл
-    fin = fopen (argv[1], "rb");
-    if (fin == NULL) {
+    r.fin = fopen (argv[1], "rb");
+    if (r.fin == NULL) {
         printf( "Can't open %s for read\n", argv[1]);
         exit(3);
     }
 
     // Открыть выходной файл, если он задан в командной строке
-    fout = NULL;
     if (argc == 3) {
-        fout = fopen (argv[2], "wb");
-        if (fout == NULL) {
+        r.fout = fopen (argv[2], "wb");
+        if (r.fout == NULL) {
             printf( "Can't open %s for write\n", argv[2]);
             exit(4);
         }
-    }
-
-    if (!unpack) {
-        stat1("Compression",0);
-        delta_compress   (BlockSize, ExtendedTables, readFILE, fin, writeFILE, fout);
-        stat1("Result", get_flen(fin));
     } else {
-        stat1("Decompression",0);
-        delta_decompress (BlockSize, ExtendedTables, readFILE, fin, writeFILE, fout);
-        stat1("Result", get_flen(fout));
+        r.fout = NULL;
     }
 
-    fclose(fin);  if (fout)  fclose(fout);
+    // (De)compress
+    ReadWriteCallback ("init", NULL, 0, (void*)&r);
+    if (!unpack) {
+        r.msg = "Compression";
+        delta_compress   (BlockSize, ExtendedTables, ReadWriteCallback, &r);
+    } else {
+        r.msg = "Decompression";
+        delta_decompress (BlockSize, ExtendedTables, ReadWriteCallback, &r);
+    }
+    ReadWriteCallback ("done", NULL, 0, (void*)&r);
+
+    fclose(r.fin);  if (r.fout)  fclose(r.fout);
     return 0;
 }
 

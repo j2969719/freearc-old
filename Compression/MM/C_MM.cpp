@@ -22,7 +22,7 @@ MM_METHOD::MM_METHOD()
 }
 
 // Функция распаковки
-int MM_METHOD::decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int MM_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
     return mm_decompress (callback, auxdata);
 }
@@ -30,7 +30,7 @@ int MM_METHOD::decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
 #ifndef FREEARC_DECOMPRESS_ONLY
 
 // Функция упаковки
-int MM_METHOD::compress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int MM_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
     return mm_compress (mode, skip_header, is_float, num_chan, word_size, offset, reorder, callback, auxdata);
 }

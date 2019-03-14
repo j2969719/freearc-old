@@ -1,8 +1,19 @@
+{-# OPTIONS_GHC -cpp #-}
 ----------------------------------------------------------------------------------------------------
----- Имена файлов, храняющиеся в UTF8+\0 представлении.                                         ----
----- Имена сортируются/сравниваются с учётом или без учёта регистра в зависимости от того,      ----
-----   откомпилирована ли программа под Windows или Unix                                        ----
+---- ╚ьхэр Їрщыют, їЁрэ ■∙шхё  т UTF8+\0 яЁхфёЄртыхэшш.                                         ----
+---- ╚ьхэр ёюЁЄшЁє■Єё /ёЁртэштр■Єё  ё єў╕Єюь шыш схч єў╕Єр ЁхушёЄЁр т чртшёшьюёЄш юЄ Єюую,      ----
+----   юЄъюьяшышЁютрэр ыш яЁюуЁрььр яюф Windows шыш Unix                                        ----
 ----------------------------------------------------------------------------------------------------
+-- |
+-- Module      :  UTF8Z
+-- Copyright   :  (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
+-- License     :  Public domain
+--
+-- Maintainer  :  Bulat.Ziganshin@gmail.com
+-- Stability   :  experimental
+-- Portability :  GHC
+--
+-----------------------------------------------------------------------------
 
 module UTF8Z where
 
@@ -60,7 +71,7 @@ unpackPS (PS ba) = unpackFoldrUtf8# ba f [] where
 
 
 {-# INLINE comparePS #-}
--- Выберем между strcmp и strcasecmp в зависмости от ОС
+-- ┬√схЁхь ьхцфє strcmp ш strcasecmp т чртшёьюёЄш юЄ ╬╤
 #if defined(FREEARC_WIN)
 comparePS (PS x) (PS y) = case inlinePerformIO$ strcasecmp (unsafeCoerce# x) (unsafeCoerce# y) of
 #else
@@ -161,7 +172,7 @@ unpackFoldlUtf8# f e addr count = unpack 0# e where
         ch = indexCharArray# addr nh
 
 
--- Just like inlinePerformIO, but we inline it.
+-- Just like unsafePerformIO, but we inline it.
 {-# INLINE inlinePerformIO #-}
 inlinePerformIO :: IO a -> a
 inlinePerformIO (IO m) = case m realWorld# of (# _, r #)   -> r

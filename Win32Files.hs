@@ -1,4 +1,16 @@
-{-# OPTIONS_GHC -fvia-C #-}
+{-# OPTIONS_GHC -cpp -fvia-C #-}
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Win32Files
+-- Copyright   :  (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
+-- License     :  Public domain
+--
+-- Maintainer  :  Bulat.Ziganshin@gmail.com
+-- Stability   :  experimental
+-- Portability :  GHC/mingw32
+--
+-----------------------------------------------------------------------------
+
 module Win32Files where
 
 import Data.Bits
@@ -149,19 +161,30 @@ w_find_name   =  c_w_find_name   .>>=  peekCWFilePath
 w_find_size   =  c_w_find_size   .>>== i
 w_find_attrib =  c_w_find_attrib .>>== i
 w_find_isDir  =  w_find_attrib   .>>== (\a -> a.&.fILE_ATTRIBUTE_DIRECTORY /= 0)
-                                
+
 wfindfirst :: String -> Ptr CWFindData -> IO (Maybe Int)
 wfindfirst name p_find = do
   modifyIOError (`ioeSetFileName` name) $ do
   withCWFilePath name $ \ p_name -> do
-  (throwErrnoIfMinus1Retry "findfirst" $ c_wfindfirsti64 p_name p_find) >>== Just  -- to do: EMFILE - no more files
+  res <- c_wfindfirsti64 p_name p_find
+  case res of
+    -1 -> do err <- getErrno
+             if err `elem` [eMFILE, eNOENT]
+               then return Nothing  -- no files found
+               else throwErrno "findfirst"
+    _  -> return (Just res)
 foreign import ccall unsafe "Win32Files.h _wfindfirsti64"
   c_wfindfirsti64 :: CWFilePath -> Ptr CWFindData -> IO Int
 
 wfindnext :: Int -> Ptr CWFindData -> IO Bool
 wfindnext h p_find = do
-  res <- c_wfindnexti64 h p_find                                   -- to do: EMFILE - no more files
-  return (res/=0)
+  res <- c_wfindnexti64 h p_find
+  case res of
+    -1 -> do err <- getErrno
+             if err `elem` [eMFILE, eNOENT]
+               then return True  -- no more files
+               else throwErrno "findnext"
+    _  -> return False
 foreign import ccall unsafe "Win32Files.h _wfindnexti64"
   c_wfindnexti64 :: Int -> Ptr CWFindData -> IO Int
 
@@ -178,7 +201,7 @@ wfindfiles name action = do
   res <- wfindfirst name p_find
   case res of
     Nothing -> return ()
-    Just h ->  do repeat_untilM $ do
+    Just h ->  do repeat_until $ do
                     action p_find
                     wfindnext h p_find
                   findclose h

@@ -2,7 +2,7 @@
 
 #include "StdAfx.h"
 
-#include "../../../Common/Alloc.h"
+// #include "../../../Common/Alloc.h"
 #include "LZOutWindow.h"
 
 void CLZOutWindow::Init(bool solid)

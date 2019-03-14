@@ -56,8 +56,9 @@
 // 4. image width detection
 
 #include "../Compression.h"
+extern "C" {
 #include "mmdet.h"
-
+}
 
 // MAIN ALGORITHM ************************************************************************
 // The algorithm is straightforward - calculate compressed size
@@ -183,7 +184,7 @@ void Model::calc_results()
 
         for(int i=0;i<STATSIZE;i++)
             if (stats[N][i])
-                bits += stats[N][i] * log(total/stats[N][i])/log(2);
+                bits += stats[N][i] * log(double(total/stats[N][i]))/log(double(2));
     }
     // Total result including additional bits required for extension codes
     result = (long)(bits/8 + xbits/8);
@@ -488,6 +489,7 @@ Model& Model::rolz_run (int hashlog, int hash_row_width)
 Model& Model::lz77_run (int hashlog, int hash_row_width)
 {
     start_count(2,16,0,0);  if (bufsize<32)  abort();
+    int literals=0, matches=0;
     void *bufend = (char*)buf + bufsize - 8;
     UINT i, HashSize = 1<<hashlog, HashShift = 32-hashlog, HashMask = ~(hash_row_width-1);
     BYTE ** HTable = (BYTE**) malloc (sizeof(BYTE*) * HashSize);
@@ -548,9 +550,9 @@ default: // case 1
 }
 
         if (len<MINLEN)  {
-            stats[0][*p++]++; continue;
+            stats[0][*p++]++; literals++; continue;
         }
-        UINT dist = p-q;
+        UINT dist = p-q;  matches++;
 
 //            printf ("%3d %6d\n", len, dist);
         // Found match with a length 'len' and distance 'dist'
@@ -584,6 +586,7 @@ default:
 #endif
     }
     free (HTable);
+    printf ("   %5d %5d  ", literals, matches);
     calc_results();
     return *this;
 }
@@ -669,8 +672,11 @@ int autodetect_wav_header (void *buf, long size, int *is_float, int *num_chan, i
     return 1;  // detection OK
 }
 
-// Analyze data and return number of channels/wordsize/offset we should use.
-// channels[]/bitvalues[] are the variants of number of channels/wordsizes we should try
+
+// ****************************************************************************************
+// ** Analyze data and return number of channels/wordsize/offset we should use.
+// ** channels[]/bitvalues[] are the variants of number of channels/wordsizes we should try
+// ****************************************************************************************
 int autodetect_by_entropy (void *buf, int bufsize, int channels[], int bitvalues[], double min_entropy, int *is_float, int *num_chan, int *word_size, int *offset)
 {
     if (bufsize<500)  return 0;    // Not enough data for detection
@@ -726,6 +732,131 @@ int autodetect_by_entropy (void *buf, int bufsize, int channels[], int bitvalues
     }
 }
 
+
+// ****************************************************************************************
+// ** Analyze data to check for multimedia
+// ****************************************************************************************
+
+// Number of channels that multimedia file may have. Used for auto-detection when
+// header of any known file type doesn't exist or don't taken into account. This array is zero-ended
+static int channels[] = {1,2,3,4,0};
+// Number of bits per word that multimedia file may have. Also used for auto-detection
+static int bitvalues[] = {8,16,24,32,0};
+
+// Values used in fast detection mode
+static int fast_channels[] = {1,3,0}, fast_bitvalues[] = {8,16,0};
+
+// How many bytes to check, depending on speed mode and filesize
+int detect_mm_bytes (int mode, int filesize)
+{
+  return mymin (mode<=2? 64*kb : mymax(64*kb,mymin(filesize,1*mb)/2), filesize);
+}
+
+// Check whether buffer contains MM data
+int detect_mm (int mode, void *buf, int bufsize)
+{
+  int is_float, num_chan, word_size, offset;
+  int *use_channels  = mode<=2? fast_channels  : channels;
+  int *use_bitvalues = mode<=2? fast_bitvalues : bitvalues;
+  return autodetect_by_entropy (buf, bufsize, use_channels, use_bitvalues, 0.80, &is_float, &num_chan, &word_size, &offset);
+}
+
+// Check whether buffer contains header of MM file
+int detect_mm_header (int mode, void *buf, int bufsize)
+{
+  int is_float, num_chan, word_size, offset;
+  return autodetect_wav_header (buf, bufsize, &is_float, &num_chan, &word_size, &offset);
+}
+
+
+// ****************************************************************************************
+// ** Analyze data and return best guess of their type (binary, text, compressed...)
+// ****************************************************************************************
+int count_desc_order (const int *a, const int *b)   { return *b-*a; }
+
+void detect_datatype (BYTE *buf, int bufsize, char *type)
+{
+    // Вычисляем распределение частот символов и одновременно..
+    int count[256];  iterate(256, count[i]=0);
+    // ..ищем матчи с помощью простой LZ-схемы и определяем долю REPDIST кодов среди них
+    int matches=0, repdists=0, sumlen=0, dist[4]={0,0,0,0};
+#define TABLE_SIZE 16384
+#define hash(p)  (value16(p) % TABLE_SIZE)
+    BYTE **table = (BYTE**) calloc(TABLE_SIZE, sizeof(BYTE*));
+    if (bufsize>10) for (BYTE *p=buf; p<buf+bufsize-10; p++) {
+       BYTE *q = table[hash(p)];
+       if (q && value16(p)==value16(q)) {
+           if (p-q<256) {  // собираем статистику только по матчам с дистанцией <256
+               matches++;
+               int x=p-q;
+               for (int i=0; i<elements(dist); i++) {
+                   int y=dist[i];  dist[i]=x;  x=y;
+                   if (x==p-q)  {repdists++; break;}
+               }
+           }
+           // Пропускаем найденный матч, не забывая обновлять счётчик/поисковый хеш
+           BYTE *o=p;
+           while (value32(p)==value32(q)  &&  p<buf+bufsize-10)
+              count[p[0]]++, table[hash(p+0)]=p,
+              count[p[1]]++, table[hash(p+1)]=p+1,
+              count[p[2]]++, table[hash(p+2)]=p+2,
+              count[p[3]]++, table[hash(p+3)]=p+3,
+              p+=4, q+=4;
+           while (*p==*q  &&  p<buf+bufsize-10)  count[*p]++, table[hash(p)]=p, p++, q++;  count[*p]++;
+           if (o-q<256)  sumlen += p-o;
+       } else {
+           count[*p]++,  table[hash(p)] = p;    // матч не найден
+       }
+
+    }
+    free(table);
+#undef TABLE_SIZE
+#undef hash
+
+    // Сжатие order-0 моделью
+    double order0=0;
+    for (int i=0; i<256; i++)
+    {
+        if (count[i])
+            order0 += count[i] * log(double(bufsize/count[i]))/log(double(2)) / 8;
+    }
+
+    // Кол-во символов, занимающих 90% объёма текста
+    int sums=0, total=bufsize, normal_chars=256;
+    qsort (count, 256, sizeof(*count),
+           (int (*)(const void*, const void*)) count_desc_order);
+    for (int i=0; i<256; i++)
+    {
+        if (count[i] > bufsize*0.20)  {total-=count[i]; continue;}
+        sums += count[i];
+        if (sums > total*0.90)
+        {
+            normal_chars = i;
+            break;
+        }
+    }
+
+    // Тип данных: $compressed если не сжимается ни order-0 ни lz77.
+    //             $text если активных символов от 17 до 80, число повторов дистанций невелико и lz-матчи составляют хотя бы 10% данных
+    strcpy (type, buf==NULL                                 ? "$compressed $text" :  // list of data types this procedure is able to recognize
+
+                  order0 > 0.95*bufsize
+                    // && matches < bufsize/100
+                    && sumlen < 0.10*bufsize                ? "$compressed" :
+
+                  17<=normal_chars && normal_chars<=80
+                    // && matches < bufsize/6
+                    && repdists < 0.20*matches
+                    && sumlen   > 0.10*bufsize              ? "$text" :
+                                                              "default");
+    //if(!bufsize) printf ("\n");
+    //if(bufsize)  printf (" %8s %5d %5.2lf%% ", type, bufsize, textlike*100);
+    //if(normal)   printf ("    %5.0lf %5.0lf %5.2lf%% %5.2lf \n", double(normal), double(used_chars), rare*100, q);
+    //if(bufsize) printf (" %8s %d\n", type, normal_chars);
+    //if(bufsize)  printf (" %8s %5.2lf%% %5d %5.2lf%% %5.0lf %5.2lf %5.2lf%%\n", type, order0/bufsize*100, normal_chars, double(repdists+1)/(matches+1)*100, double(matches), double(sumlen)/(matches+1), double(sumlen)/(bufsize+1)*100);
+    //(printf("\n\n\nSTAT: normal_chars=%d, repdists=%d, matches=%d, sumlen=%d, bufsize=%d\n\n %*.*s\n", normal_chars, repdists, matches, sumlen, bufsize, bufsize, bufsize, buf), "default"));
+}
+
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 
@@ -733,7 +864,7 @@ int autodetect_by_entropy (void *buf, int bufsize, int channels[], int bitvalues
 #ifndef MMD_LIBRARY
 // DRIVER ************************************************************************
 // This demo program shows how to use MM detector and moreover
-// demonstartes more complex technique of gathering statistics
+// demonstrates more complex technique of gathering statistics
 // while processing file in small chunks
 
 // Вычисление времени работы алгоритма
@@ -770,14 +901,21 @@ int main (int argc, char **argv)
     // LZ compression modes testing
     int lz77_mode = 0;
 
+    // Filetype detection mode
+    int det_mode = 0;
+
+
     if (nameequ(argv[1], "-lz")) {
         argv++; argc--; lz_mode++;
     }
     if (nameequ(argv[1], "-lz77")) {
         argv++; argc--; lz77_mode++;
     }
+    if (nameequ(argv[1], "-det")) {
+        argv++; argc--; det_mode++;
+    }
     if (argc!=2) {
-        printf( "\n Usage: mmdet [-lz/-lz77] file");
+        printf( "\n Usage: mmdet [-lz/-lz77/-det] file");
         exit(1);
     }
     FILE *fin = fopen( argv[1], "rb" );
@@ -812,7 +950,7 @@ int main (int argc, char **argv)
     Model lz (buf, filesize);
     char title[100] = "";
 
-if (!lz_mode && !lz77_mode) {
+if (!lz_mode && !lz77_mode && !det_mode) {
 #if 1
     Model model (buf, filesize);
 
@@ -901,7 +1039,7 @@ if (!lz_mode && !lz77_mode) {
     //print_stats ("ROLZ, 16kb hash", lz.rolz_run (12,1));
     print_stats ("LZ77, 16kb hash", lz.lz77_run (12,1));
 
-    // Print WAV file header paramteres if such header present
+    // Print WAV file header parameters if such header present
     int is_float, num_chan, word_size, offset;
     if (autodetect_wav_header (buf, bytes, &is_float, &num_chan, &word_size, &offset))
         printf ("WAV header: %dbit%s * %d channel(s), offset %d\n", word_size, is_float? " float":"", num_chan, offset);
@@ -931,7 +1069,7 @@ else if (lz_mode)   // Run LZP/ROLZ/LZ77 models for comparison
         print_stats (title, lz.lz77_run (h,4));
     }
 }
-else             // Try LZ77 model with various hashsize and hashchain length
+else if (lz77_mode)   // Try LZ77 model with various hashsize and hashchain length
 {
     for (int l=1; l<=4; l*=2) {
         if (*title)  printf ("\n");
@@ -940,6 +1078,15 @@ else             // Try LZ77 model with various hashsize and hashchain length
             print_stats (title, lz.lz77_run (h,l));
         }
     }
+}
+else if (det_mode)   // Binary/text/compressed detection mode
+{
+    init_timer();
+    char result[100];
+    for (int i=0; i+100<filesize; i+=65536)
+        detect_datatype ((BYTE*)buf+i, mymin(65536,filesize-i), result);
+    //detect_datatype ((BYTE*)buf, filesize, result);
+    //printf("%.3lf sec", timer());
 }
     return 0;
 }

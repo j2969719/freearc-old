@@ -49,11 +49,11 @@ sint32 GRZip_ST4_Encode(uint8 * Input, sint32 Size, uint8 * Output)
   sint32    FBP,i;
   uint32    W;
 
-  sint32 *  Counter=(sint32 *)malloc(ST_MaxWord*sizeof(sint32));
+  sint32 *  Counter=(sint32 *)BigAlloc(ST_MaxWord*sizeof(sint32));
   if (Counter==NULL) return (GRZ_NOT_ENOUGH_MEMORY);
 
-  uint32 *  Context=(uint32 *)malloc(Size*sizeof(uint32));
-  if (Context==NULL) {free(Counter);return (GRZ_NOT_ENOUGH_MEMORY);}
+  uint32 *  Context=(uint32 *)BigAlloc(Size*sizeof(uint32));
+  if (Context==NULL) {BigFree(Counter);return (GRZ_NOT_ENOUGH_MEMORY);}
 
   memset    (Counter,0,ST_MaxWord*sizeof(sint32));
 
@@ -77,8 +77,8 @@ sint32 GRZip_ST4_Encode(uint8 * Input, sint32 Size, uint8 * Output)
   FBP=Counter[Context[FBP]>>16];
   for (;i>=0;i--) Output[--Counter[Context[i]>>16]]=Context[i]&0xFF;
 
-  free(Context);
-  free(Counter);
+  BigFree(Context);
+  BigFree(Counter);
 
   return FBP;
 }
@@ -93,14 +93,14 @@ sint32 GRZip_ST4_Decode(uint8 * Input, sint32 Size, sint32 FBP)
   sint32    LastSeen[ST_MaxByte],T[ST_MaxByte],S[ST_MaxByte];
   sint32    CStart,Sum,i,j;
 
-  sint32 *  Context2=(sint32 *)malloc(ST_MaxWord*sizeof(sint32));
+  sint32 *  Context2=(sint32 *)BigAlloc(ST_MaxWord*sizeof(sint32));
   if (Context2==NULL) return (GRZ_NOT_ENOUGH_MEMORY);
 
-  uint8  *  Flag=(uint8 *)malloc(((Size+8)>>3)*sizeof(uint8));
-  if (Flag==NULL) {free(Context2);return (GRZ_NOT_ENOUGH_MEMORY);}
+  uint8  *  Flag=(uint8 *)BigAlloc(((Size+8)>>3)*sizeof(uint8));
+  if (Flag==NULL) {BigFree(Context2);return (GRZ_NOT_ENOUGH_MEMORY);}
 
-  uint32 *  Table=(uint32 *)malloc((Size+1)*sizeof(uint32));
-  if (Table==NULL) {free(Flag);free(Context2);return (GRZ_NOT_ENOUGH_MEMORY);}
+  uint32 *  Table=(uint32 *)BigAlloc((Size+1)*sizeof(uint32));
+  if (Table==NULL) {BigFree(Flag);BigFree(Context2);return (GRZ_NOT_ENOUGH_MEMORY);}
 
   memset    (Context2,0,ST_MaxWord*sizeof(sint32));
   memset    (Flag,0,((Size+8)>>3)*sizeof(uint8));
@@ -146,8 +146,8 @@ sint32 GRZip_ST4_Decode(uint8 * Input, sint32 Size, sint32 FBP)
   }
   Table[Size]=ST_INDIRECT;
 
-  free(Context2);
-  free(Flag);
+  BigFree(Context2);
+  BigFree(Flag);
 
   for (j=FBP,Sum=Table[FBP],i=0;i<Size;i++)
     if (Sum&ST_INDIRECT)
@@ -161,7 +161,7 @@ sint32 GRZip_ST4_Decode(uint8 * Input, sint32 Size, sint32 FBP)
       Table[j]++; Sum=Table[j=Sum&(ST_INDIRECT-1)];
       Input[i]=Sum>>24;
     }
-  free(Table);
+  BigFree(Table);
   return GRZ_NO_ERROR;
 }
 

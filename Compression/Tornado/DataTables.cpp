@@ -1,6 +1,16 @@
 // (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
-// GPL'ed code for data tables preprocessing (substracting) which improves compression
+// (c) Joachim Henke
+// GPL'ed code for data tables preprocessing (subtracting) which improves compression
 #include "../Compression.h"
+
+// Maximum size of one table row at compression
+#define MAX_TABLE_ROW 64
+
+// Maximum size of one table row at decompression
+#define MAX_TABLE_ROW_AT_DECOMPRESSION 256
+
+// Pad required before and after decompression output buffer to support undiffing
+#define PAD_FOR_TABLES (MAX_TABLE_ROW_AT_DECOMPRESSION*2)
 
 
 // Utility part ******************************************************************************
@@ -9,46 +19,80 @@
 // (bytewise with carries starting from lower address, i.e. in LSB aka Intel byte order)
 static void diff_table (int N, BYTE *table_start, int table_len)
 {
-    for (BYTE *r = table_start + N*table_len; (r-=N) > table_start; )
-        for (int i=0,carry=0,newcarry; i<N; i++)
-            newcarry = r[i] < r[i-N]+carry,
-            r[i] -= r[i-N]+carry,
-            carry = newcarry;
+    byte *r = table_start;
+
+    switch (N)
+    {
+    case 2:
+        for (uint16 prev = value16(r), v; (r += 2) < table_start + N * table_len; prev = v)
+            v = value16(r),
+            setvalue16(r, v - prev);
+        break;
+    case 4:
+        for (uint32 prev = value32(r), v; (r += 4) < table_start + N * table_len; prev = v)
+            v = value32(r),
+            setvalue32(r, v - prev);
+        break;
+    default:
+        for (r += N * table_len; (r -= N) > table_start; )
+            for (int i=0,carry=0,newcarry; i<N; i++)
+                newcarry = r[i] < r[i-N]+carry,
+                r[i] -= r[i-N]+carry,
+                carry = newcarry;
+    }
 }
 
 // Process data table adding to each element contents of previous one
 static void undiff_table (int N, BYTE *table_start, int table_len)
 {
-    for (BYTE *r = table_start + N; r < table_start + N*table_len; r+=N)
-        for (int i=0,carry=0,temp; i<N; i++)
-            temp = r[i]+r[i-N]+carry,
-            r[i] = temp,
-            carry = temp/256;
+    byte *r = table_start;
+
+    switch (N)
+    {
+    case 2:
+        for (uint16 v = value16(r); (r += 2) < table_start + N * table_len; )
+            v += value16(r),
+            setvalue16(r, v);
+        break;
+    case 4:
+        for (uint32 v = value32(r); (r += 4) < table_start + N * table_len; )
+            v += value32(r),
+            setvalue32(r, v);
+        break;
+    default:
+        while ((r += N) < table_start + N * table_len)
+            for (int i=0,carry=0,temp; i<N; i++)
+                temp = r[i]+r[i-N]+carry,
+                r[i] = temp,
+                carry = temp/256;
+    }
 }
 
 
 // Compression part ******************************************************************************
 
+#ifndef FREEARC_DECOMPRESS_ONLY
 // Check the following data for presence of table which will be better compressed
 // after subtraction of subsequent elements
 // ¬ычитание начинаетс€ со следующего элемента чтобы сохранить валидными данные в match finders
 static uint64 table_count=0, table_sumlen=0;     // Total stats for sucessfully processed tables
-#define addptr(t,n)  ((int16*) ((byte*)(t) + (n)))
-static byte *last_checked[64][64];
-static bool check_for_data_table (int N, int &type, int &items, byte *p, byte *bufend, byte *&table_end, byte *buf, uint64 &offset)
+#define value16s(t)  ((int16) value16(t))
+static bool check_for_data_table (int N, int &type, int &items, byte *p, byte *bufend, byte *&table_end, byte *buf, uint64 &offset, byte *(&last_checked)[MAX_TABLE_ROW][MAX_TABLE_ROW])
 {
-    byte *&last = last_checked[N][(int)p%N];
+    CHECK (N<MAX_TABLE_ROW,  (s,"Fatal error: check_for_data_table() called with N=%d that is larger than maximum allowed %d", N, MAX_TABLE_ROW-1));
+    byte *&last = last_checked[N][(p-buf)%N];
     if (last > p)    return FALSE;
 
-    int16 *t=(int16*)p-1, *lastpoint;
+    byte *t = p - 2, *lastpoint;
     //printf ("\nStarted  %x    ", p-buf+offset);
-    int lensum=600, len=0, dir = *addptr(t,N) - *t < 0? -1:1, lenminus=0;
-    for (t=lastpoint=addptr(t,N); t+1<=(int16*)bufend; t = addptr(t,N)) {
-        int diff = *t - *addptr(t,-N);
-        double itemlb = logb(1 + abs(*t));
-        double difflb = logb(1 + abs(diff));
-             if (dir<0 && diff<0 && difflb < itemlb/1.1)  len++;
-        else if (dir>0 && diff>0 && difflb < itemlb/1.1)  len++;
+    int lensum=600, len=0, dir = value16s(t + N) - value16s(t) < 0? -1:1, lenminus=0;
+    for (t = lastpoint = t + N; t + 2 <= bufend; t += N) {
+        int diff = value16s(t) - value16s(t - N);
+        uint itemlb = lb(1 + abs(value16s(t)));
+        uint difflb = lb(1 + abs(diff));
+        itemlb -= itemlb > 10;
+             if (dir<0 && diff<0 && difflb < itemlb) len++;
+        else if (dir>0 && diff>0 && difflb < itemlb) len++;
         else if (diff==0) lenminus++;
         else {
             if (len>3)  lastpoint=t;
@@ -57,10 +101,10 @@ static bool check_for_data_table (int N, int &type, int &items, byte *p, byte *b
         }
     }
 
-    last = (byte*)t;
+    last = t;
 
-    if ((byte*)t-p > N*(40+lenminus)  &&  (byte*)lastpoint-p > mymax(N,20)) {
-        type = N; items = ((byte*)lastpoint-p)/type;
+    if (t-p > N*(40+lenminus) && lastpoint-p > mymax(N,20)) {
+        type = N; items = (lastpoint-p)/type;
         diff_table (type, p, items);
         table_end = p+type*items;
         table_count++;  table_sumlen += type*items;
@@ -71,6 +115,7 @@ static bool check_for_data_table (int N, int &type, int &items, byte *p, byte *b
 
     return FALSE;
 }
+#endif
 
 
 // Decompression part ******************************************************************************
@@ -83,8 +128,10 @@ struct DataTableEntry {int table_type; BYTE *table_start; int table_len;};
 struct DataTables
 {
    DataTableEntry   *tables, *curtable, *tables_end;   // Pointers to the start, cuurent entry and end of allocated DataTableEntries table
-   static const int  MAX_TABLE_TYPE = 256;
-   byte              base_data[MAX_TABLE_TYPE];  // Place for saving intermediate base element of table divided between two write chunks
+
+   int               base_data_bytes;
+   byte              base_data[MAX_TABLE_ROW_AT_DECOMPRESSION];  // Place for saving intermediate base element of table divided between two write chunks
+   byte              original[MAX_TABLE_ROW_AT_DECOMPRESSION];
 
    DataTables();
    ~DataTables()   {free(tables);}
@@ -98,7 +145,7 @@ struct DataTables
 
    enum OPERATION {DO_DIFF, DO_UNDIFF};
    // Either diff or undiff all tables in list until buffer point marked by write_end pointer
-   void process_tables (OPERATION op, BYTE *write_end);
+   void process_tables (OPERATION op, BYTE *write_start, BYTE *write_end);
 
    // Undiff contents of tables in current list, preparing data buffer to be saved to outstream
    void undiff_tables (BYTE *write_start, BYTE *write_end);
@@ -106,7 +153,7 @@ struct DataTables
    // Called after data was written. It diffs tables again so that their contents
    // may be used in subsequent LZ decompression. It also clears list of datatables,
    // leaving only last table if this table continues after write_end pointer
-   void diff_tables (BYTE *write_end);
+   void diff_tables (BYTE *write_start, BYTE *write_end);
 
    // Called when buffer shifts to new position relative to file -
    // list entries also need to be shifted
@@ -125,8 +172,8 @@ DataTables::DataTables()
 // Add description of one more datatable to the list
 void DataTables::add (int _table_type, BYTE *_table_start, int _table_len)
 {
-    CHECK (curtable<tables_end,          ("\nFatal error: DataTables::add() called without prior filled() check\n"));
-    CHECK (_table_type<=MAX_TABLE_TYPE,  ("\nFatal error: DataTables::add() called with _table_type=%d that is larger than maximum allowed %d\n", _table_type, MAX_TABLE_TYPE));
+    CHECK (curtable<tables_end,                          (s,"Fatal error: DataTables::add() called without prior filled() check"));
+    CHECK (_table_type<=MAX_TABLE_ROW_AT_DECOMPRESSION,  (s,"Fatal error: DataTables::add() called with _table_type=%d that is larger than maximum allowed %d", _table_type, MAX_TABLE_ROW_AT_DECOMPRESSION));
     curtable->table_type  = _table_type;
     curtable->table_start = _table_start;
     curtable->table_len   = _table_len;
@@ -142,12 +189,13 @@ bool DataTables::filled()
 
 enum OPERATION {DO_DIFF, DO_UNDIFF};
 // Either diff or undiff all tables in list until buffer point marked by write_end pointer
-void DataTables::process_tables (OPERATION op, BYTE *write_end)
+void DataTables::process_tables (OPERATION op, BYTE *write_start, BYTE *write_end)
 {
     for (DataTableEntry *p=tables; p<curtable; p++) {
-         //printf ("\n%d %x-%x, len=%d   ", p->table_type, table_start-outbuf, p->table_start-outbuf+p->table_len*p->table_type, p->table_len*p->table_type),
          // Truncate number of processed elements if table ends after output pointer
          int len = mymin (p->table_len, 1 + (write_end - p->table_start) / p->table_type);
+         debug (if (write_start)  printf ("\n%d %x-%x, len=%d   ", p->table_type, p->table_start-write_start, p->table_start-write_start+p->table_len*p->table_type, p->table_len));
+         debug (if (write_start && len!=p->table_len)  printf ("-> %d   ", len));
          if (op==DO_DIFF)   diff_table (p->table_type, p->table_start, len);
          else             undiff_table (p->table_type, p->table_start, len);
     }
@@ -160,21 +208,19 @@ void DataTables::undiff_tables (BYTE *write_start, BYTE *write_end)
     if (curtable>tables && tables[0].table_start < write_start)  {
         // Put correct base element (saved from previous write chunk) to the beginning of first table
         // for the duration of undiffing process but then restore original bytes
-        byte original[MAX_TABLE_TYPE];
-        int bytes = mymin (tables[0].table_type, write_start-tables[0].table_start);
-        memcpy (original,               tables[0].table_start,  bytes);
-        memcpy (tables[0].table_start,  base_data,              bytes);
-        process_tables (DO_UNDIFF, write_end);
-        memcpy (tables[0].table_start,  original,               bytes);
+        base_data_bytes = mymin (tables[0].table_type, write_start-tables[0].table_start);
+        memcpy (original,               tables[0].table_start,  base_data_bytes);
+        memcpy (tables[0].table_start,  base_data,              base_data_bytes);
+        process_tables (DO_UNDIFF, write_start, write_end);
     } else {
-        process_tables (DO_UNDIFF, write_end);
+        process_tables (DO_UNDIFF, write_start, write_end);
     }
 }
 
 // Called after data was written. It diffs tables again so that their contents
 // may be used in subsequent LZ decompression. It also clears list of datatables,
 // leaving only last table if this table continues after write_end pointer
-void DataTables::diff_tables (BYTE *write_end)
+void DataTables::diff_tables (BYTE *write_start, BYTE *write_end)
 {
     if (curtable > tables) {
         DataTableEntry p = curtable[-1];
@@ -190,15 +236,21 @@ void DataTables::diff_tables (BYTE *write_end)
             // Save base element contents of the table before diffing
             memcpy (base_data, p.table_start, p.table_type);
             // Diff buffer data in order to return them to their original state and empty the list
-            process_tables (DO_DIFF, write_end);
-            curtable = tables;
+            process_tables (DO_DIFF, NULL, write_end);
+            // Restore bytes at the beginning of first table
+            if (curtable>tables && tables[0].table_start < write_start)
+                memcpy (tables[0].table_start,  original, base_data_bytes);
             // Put unprocessed tail of last datatable into start of the list
+            curtable = tables;
             *curtable++ = p;
             return;
         }
     }
     // Default route - we don't need to keep tails, so just diff and empty the list
-    process_tables (DO_DIFF, write_end);
+    process_tables (DO_DIFF, NULL, write_end);
+    // Restore bytes at the beginning of first table
+    if (curtable>tables && tables[0].table_start < write_start)
+        memcpy (tables[0].table_start,  original, base_data_bytes);
     curtable = tables;
 }
 
@@ -206,14 +258,14 @@ void DataTables::diff_tables (BYTE *write_end)
 // list entries also need to be shifted
 void DataTables::shift (BYTE *old_pos, BYTE *new_pos)
 {
-    CHECK (old_pos > new_pos,    ("\nFatal error: DataTables::shift() was called with reversed arguments order\n"));
-    CHECK (curtable <= tables+1, ("\nFatal error: DataTables::shift() called when list of tables contains more than one entry\n"));
+    CHECK (old_pos > new_pos,    (s,"Fatal error: DataTables::shift() was called with reversed arguments order"));
+    CHECK (curtable <= tables+1, (s,"Fatal error: DataTables::shift() called when list of tables contains more than one entry"));
     for (DataTableEntry *p=tables; p<curtable; p++) {
         BYTE *old = p->table_start;
         p->table_start -= old_pos-new_pos;
         // Copy a few first bytes of table that belongs to previous write chunk into place
         // *before* buffer beginning (and therefore before new write chunk) -
-        // they are required for correct undiffing
+        // these bytes required for correct undiffing
         memcpy (p->table_start, old, new_pos - p->table_start);
     }
 }

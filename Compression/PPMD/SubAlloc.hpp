@@ -66,7 +66,8 @@ BOOL _STDCALL StartSubAllocator(UINT t)
 {
     if (SubAllocatorSize == t)              return TRUE;
     StopSubAllocator();
-    if ((HeapStart=new BYTE[t]) == NULL)    return FALSE;
+    HeapStart = (BYTE*) malloc(t);
+    if (HeapStart == NULL)                  return FALSE;
     SubAllocatorSize=t;                     return TRUE;
 }
 static inline void InitSubAllocator()

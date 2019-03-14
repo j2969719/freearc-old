@@ -16,6 +16,9 @@ module ArhiveStructure where
 import Prelude hiding (catch)
 import Control.Monad
 import Data.Word
+import Data.Maybe
+import Foreign.Ptr
+import Foreign.C.Types
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Pool
 import Foreign.Storable
@@ -25,10 +28,9 @@ import Errors
 import Files
 import qualified ByteStream
 import FileInfo
-import CompressionLib (decompressMem)
 import Compression
 import Encryption
-import Cmdline
+import Options
 
 -- |Сигнатура для поиска дескрипторов служебных блоков
 aSIGNATURE = make4byte 65 114 67 1 :: Word32
@@ -67,15 +69,15 @@ archiveReadBlockDescriptor archive arcpos buf bufsize = do
   right_crc  <- peekByteOff buf (bufsize - sizeOf (undefined::CRC))
   descriptor_crc <- calcCRC buf (bufsize - sizeOf (undefined::CRC))
   if (descriptor_crc/=right_crc)
-    then return$ Left$ BROKEN_ARCHIVE (archiveName archive) ("block descriptor at pos "++show arcpos++" is corrupt")
+    then return$ Left$ BROKEN_ARCHIVE (archiveName archive) ["0354 block descriptor at pos %1 is corrupted", show arcpos]
     else do
   -- Расшифруем содержимое дескриптора:
   -- сигнатуру, тип блока, использованный компрессор, размер в распакованном и упакованном виде, CRC распакованных данных
   (sign, block_type, compressor, origsize, compsize, crc)  <-  ByteStream.readMemory buf bufsize
   let pos   =  blDecodePosRelativeTo arcpos compsize  -- позиция в архиве начала блока
-      block =  ArchiveBlock archive block_type compressor pos origsize compsize crc undefined
+      block =  ArchiveBlock archive block_type compressor pos origsize compsize crc undefined (enc compressor)
   if (sign/=aSIGNATURE || pos<0)
-    then return$ Left$ BROKEN_ARCHIVE (archiveName archive) (block_name block++" is corrupted")
+    then return$ Left$ BROKEN_ARCHIVE (archiveName archive) ["0355 %1 is corrupted", block_name block]
     else return$ Right block
 
 {-# NOINLINE archiveWriteBlockDescriptor #-}
@@ -97,11 +99,11 @@ findBlocksInBrokenArchive arcname = do
   allocaBytes (aHUGE_BUFFER_SIZE+2*aSCAN_MAX) $ \buf -> do
   blocks <- withList $ scanArchiveSearchingDescriptors archive buf arcsize
   if null blocks
-    then registerError$ BROKEN_ARCHIVE arcname "archive directory not found"
+    then registerError$ BROKEN_ARCHIVE arcname ["0356 archive directory not found"]
     else do
   -- Возвратить нормальный FOOTER_BLOCK, если он нашёлся в архиве
   --if blType (head blocks) == FOOTER_BLOCK
-  --  then return (archive, (head blocks) {ftBlocks=reverse (tail blocks)})
+  --  then return (archive, (head blocks) {ftBlocks=reverse blocks})
   --  else do
   let pseudo_footer = FooterBlock
         { ftBlocks   = reverse blocks
@@ -156,7 +158,7 @@ scanMem archive base_pos found buf len = do
 -- Общий объём данных в блоке - size, но при этом нас интересуют только дескрипторы,
 -- начинающиеся в первых len байтах блока.
 archiveFindBlockDescriptor archive base_pos buf size len =
-  go ((size-sizeOf(aSIGNATURE)) `max` (len-1)) errormsg
+  go ((size-sizeOf(aSIGNATURE)) `max` (len-1)) defaultError
     where
   go pos err | pos<0     = return$ Left err
              | otherwise = do
@@ -173,7 +175,7 @@ archiveFindBlockDescriptor archive base_pos buf size len =
                    Right _   -> return res
          else go (pos-1) err
   -- Сообщение об ошибке, возращаемое если в блоке вообще не найдено ни одного дескритора
-  errormsg = BROKEN_ARCHIVE (archiveName archive) "archive signature was not found at the end of archive"
+  defaultError = BROKEN_ARCHIVE (archiveName archive) ["0357 archive signature not found at the end of archive"]
 
 {-# NOINLINE findBlocksInBrokenArchive #-}
 {-# NOINLINE scanArchiveSearchingDescriptors #-}
@@ -196,6 +198,7 @@ archiveWriteHeaderBlock (receiveBuf,sendBuf) = do
 ----------------------------------------------------------------------------------------------------
 
 -- |Записать RECOVERY блок
+archiveWriteRecoveryBlock :: (ByteStream.BufferData a) =>  Maybe a -> Ptr CChar -> Int -> (ByteStream.RecvBuf, ByteStream.SendBuf) -> IO ()
 archiveWriteRecoveryBlock moreinfo buf size (receiveBuf,sendBuf) = do
   stream <- ByteStream.create receiveBuf sendBuf (return ())
   case moreinfo of
@@ -219,17 +222,19 @@ data FooterBlock = FooterBlock
        }
 
 -- |Записать FOOTER_BLOCK
-archiveWriteFooterBlock control_blocks arcLocked arcComment arcRecovery arcpos (receiveBuf,sendBuf) = do
+archiveWriteFooterBlock control_blocks arcLocked arcComment (arcRecovery::String) arcpos (receiveBuf,sendBuf) = do
   stream <- ByteStream.create receiveBuf sendBuf (return ())
+  let utf8comment  =  ByteStream.toUTF8List arcComment
   ByteStream.write        stream (map (blockToTuple arcpos) control_blocks)   -- запишем описания управляющих блоков,
   ByteStream.write        stream arcLocked                                    -- ... признак закрытия архива от изменений
-  ByteStream.writeInteger stream (length arcComment)                          -- ... комментарий архива (кодируем как список, поскольку при этом явно кодируется длина и комментарий таким образом может содержать нулевые символы)
-  ByteStream.writeList    stream arcComment                                   --     -.-
+  ByteStream.writeInteger stream 0                                            -- ... комментарий архива в старом формате - отсутствует
   ByteStream.write        stream arcRecovery                                  -- ... объём recovery инормации
+  ByteStream.writeInteger stream (length utf8comment)                         -- ... комментарий архива (кодируем как список, поскольку при этом явно кодируется длина и комментарий таким образом может содержать нулевые символы)
+  ByteStream.writeList    stream utf8comment                                  --     -.-
   ByteStream.closeOut     stream
 
 -- |Прочитать информацию из FOOTER_BLOCK
-archiveReadFooterBlock block @ ArchiveBlock {
+archiveReadFooterBlock footer @ ArchiveBlock {
                                    blArchive  = archive
                                  , blType     = block_type
                                  , blPos      = pos
@@ -237,21 +242,23 @@ archiveReadFooterBlock block @ ArchiveBlock {
                                }
                        decryption_info = do
   when (block_type/=FOOTER_BLOCK) $
-    registerError$ BROKEN_ARCHIVE (archiveName archive) "last block of archive is not footer block"
+    registerError$ BROKEN_ARCHIVE (archiveName archive) ["0358 last block of archive is not footer block"]
   withPool $ \pool -> do   -- используем пул памяти, чтобы автоматически освободить выделенные буферы при выходе
-    (buf,size) <- archiveBlockReadAll pool decryption_info block  -- поместим в буфер распакованные данные блока
+    (buf,size) <- archiveBlockReadAll pool decryption_info footer  -- поместим в буфер распакованные данные блока
     stream <- ByteStream.openMemory buf size
     control_blocks <- ByteStream.read stream      -- прочитаем описания управляющих блоков,
     locked         <- ByteStream.read stream      -- ... признак закрытия архива от изменений
-    comment        <- ByteStream.readInteger stream >>= ByteStream.readList stream  -- ... и комментарий архива (читаем как список, поскольку при этом явно кодируется длина и комментарий таким образом может содержать нулевые символы)
+    oldComment     <- ByteStream.readInteger stream >>= ByteStream.readList stream >>== map (toEnum.i :: Word32 -> Char)  -- ... и комментарий архива (читаем как список, поскольку при этом явно кодируется длина и комментарий таким образом может содержать нулевые символы)
     isEOF          <- ByteStream.isEOFMemory stream  -- Старая версия программы не записывала информацию о recovery record
     recovery       <- not isEOF &&& ByteStream.read stream  -- ... настройку RECOVERY информации, добавляемой к архиву
+    isEOF          <- ByteStream.isEOFMemory stream
+    comment        <- not isEOF &&& (ByteStream.readInteger stream >>= ByteStream.readList stream >>== ByteStream.fromUTF8)  -- ... и комментарий архива (читаем как список, поскольку при этом явно кодируется длина и комментарий таким образом может содержать нулевые символы)
     ByteStream.closeIn stream
-    let blocks = map (tupleToBlock archive pos) control_blocks   -- сконструируем структуры ArchiveBlock из порчитаных данных
+    let blocks = map (tupleToBlock archive pos) control_blocks   -- сконструируем структуры ArchiveBlock из прочитаных данных
     return FooterBlock
-             { ftBlocks   = blocks
+             { ftBlocks   = blocks++[footer]
              , ftLocked   = locked
-             , ftComment  = comment
+             , ftComment  = comment ||| oldComment
              , ftRecovery = recovery
              , ftSFXSize  = minimum (map blPos blocks)   -- Размер SFX = позиции HEADER_BLOCK в архиве
              }
@@ -274,16 +281,20 @@ data ArchiveBlock = ArchiveBlock
        , blCompSize    :: !FileSize     -- размер блока в упакованном виде
        , blCRC         :: !CRC          -- CRC распакованных данных (только для служебных блоков)
        , blFiles       ::  Int          -- количество файлов (только для блоков данных)
+       , blIsEncrypted ::  Bool         -- блок зашифрован?
        }
 
 instance Eq ArchiveBlock where
   (==)  =  map2eq$ map2 (blPos, archiveName.blArchive)
 
+-- |Вспомогательная функция для вычисления поля blIsEncrypted по blCompressor
+enc = any isEncryption
+
 -- |Для хранения в архиве информации об архивных блоках. Позиция блока записывается в архив
 -- относительно `arcpos` - позиции в архиве того блока, в котором сохраняется эта информация
-blockToTuple              arcpos (ArchiveBlock _ t c p o s crc f) = (t,c,arcpos-p,o,s,crc)
-tupleToBlock     archive arcpos (t,c,p,o,s,crc) = (ArchiveBlock archive t c (arcpos-p) o s crc undefined)
-tupleToDataBlock archive arcpos   (c,p,o,s,f)   = (ArchiveBlock archive DATA_BLOCK c (arcpos-p) o s 0 f)
+blockToTuple              arcpos (ArchiveBlock _ t c p o s crc f e) = (t,c,arcpos-p,o,s,crc)
+tupleToBlock     archive arcpos (t,c,p,o,s,crc) = (ArchiveBlock archive t c (arcpos-p) o s crc undefined (enc c))
+tupleToDataBlock archive arcpos   (c,p,o,s,f)   = (ArchiveBlock archive DATA_BLOCK c (arcpos-p) o s 0 f (enc c))
 
 -- Отдельные функции для (де)кодирования позиции блока относительно другого места в архиве
 blEncodePosRelativeTo arcpos arcblock  =  arcpos - blPos arcblock
@@ -313,8 +324,8 @@ data BlockType = DESCR_BLOCK       -- ^Тэг дескриптора блока архива  (записывает
      deriving (Eq,Enum)
 
 instance ByteStream.BufferData BlockType  where
-  write buf a = ByteStream.writeInteger buf (fromEnum a)
-  read  buf   = ByteStream.readInteger  buf >>== toEnum
+  write buf = ByteStream.writeInteger buf . fromEnum
+  read  buf = ByteStream.readInteger  buf >>== toEnum
 
 -- Операции с блоками архива
 archiveBlockSeek    block pos       =  archiveSeek    (blArchive block) (blPos block + pos)
@@ -336,13 +347,13 @@ archiveBlockReadAll pool
   (origbuf, decompressed_size)  <-  decompressInMemory pool compressor decryption_info archive pos compsize origsize
   crc <- calcCRC origbuf origsize
   when (crc/=right_crc || decompressed_size/=origsize) $ do
-    registerError$ BROKEN_ARCHIVE (archiveName archive) (block_name block ++ " fails decompression")
+    registerError$ BROKEN_ARCHIVE (archiveName archive) ["0359 %1 failed decompression", block_name block]
   return (origbuf, origsize)
 
 -- |Выделить буфер и прочитать в него содержимое блока. Не проверяет CRC и не распаковывает данные!
 archiveBlockReadUnchecked pool block = do
   when (blCompressor block/=aNO_COMPRESSION) $ do
-    registerError$ BROKEN_ARCHIVE (archiveName$ blArchive block) (block_name block ++ " should be uncompressed")
+    registerError$ BROKEN_ARCHIVE (archiveName$ blArchive block) ["0360 %1 should be uncompressed", block_name block]
   archiveMallocReadBuf pool (blArchive block) (blPos block) (i$ blOrigSize block)
 
 -- |Выделить буфер и прочитать в него данные из архива
@@ -371,9 +382,11 @@ decompressInMemory mainPool compressor decryption_info archive pos compsize orig
     else do
   -- Дополнить алгоритмы шифрования ключами, необходимыми для расшифровки
   keyed_compressor <- generateDecryption compressor decryption_info
+  when (any isNothing keyed_compressor) $ do
+    registerError$ BAD_PASSWORD (archiveName archive) ""
   -- Прочитать исходный блок из архива
   compbuf <- archiveMallocReadBuf tempPool archive pos compsize
-  process compbuf compsize (reverse keyed_compressor)
+  process compbuf compsize (reverse (map fromJust keyed_compressor))
 
 
 {-# NOINLINE archiveBlockReadAll #-}

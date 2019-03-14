@@ -3,10 +3,23 @@
 #ifndef __WINDOWS_DEFS_H
 #define __WINDOWS_DEFS_H
 
-inline bool BOOLToBool(BOOL value)
-  { return (value != FALSE); }
+#include "../Common/MyWindows.h"
 
-inline bool LRESULTToBool(LRESULT value)
+#ifndef FREEARC_WIN
+#include <pthread.h>
+#include <errno.h>
+#define WINAPI
+#define WAIT_OBJECT_0   0
+#define WAIT_TIMEOUT    ETIMEDOUT
+#define INFINITE	0xFFFFFFFF
+#undef BOOL
+typedef int WINBOOL;
+typedef WINBOOL BOOL;
+typedef void *PVOID,*LPVOID;
+typedef void *HANDLE;
+#endif
+
+inline bool BOOLToBool(BOOL value)
   { return (value != FALSE); }
 
 inline BOOL BoolToBOOL(bool value)

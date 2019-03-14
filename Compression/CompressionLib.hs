@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -cpp -fno-monomorphism-restriction #-}
 ----------------------------------------------------------------------------------------------------
 ---- ”паковка и распаковка данных.                                                              ----
 ---- »нтерфейс с написанными на —и процедурами, выполн€ющими всю реальную работу.               ----
@@ -22,27 +23,15 @@ import Foreign.Ptr
 import System.IO.Unsafe
 
 ----------------------------------------------------------------------------------------------------
------ Error codes ----------------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------
-
-aFREEARC_OK                            =  0   --  ALL RIGHT
-aFREEARC_ERRCODE_GENERAL               = -1   --  Some error when (de)compressing
-aFREEARC_ERRCODE_INVALID_COMPRESSOR    = -2   --  Invalid compression method or parameters
-aFREEARC_ERRCODE_ONLY_DECOMPRESS       = -3   --  Program builded with FREEARC_DECOMPRESS_ONLY, so don't try to use compress
-aFREEARC_ERRCODE_OUTBLOCK_TOO_SMALL    = -4   --  Output block size in (de)compressMem is not enough for all output data
-aFREEARC_ERRCODE_NOT_ENOUGH_MEMORY     = -5   --  Can't allocate memory needed for (de)compression
-aFREEARC_ERRCODE_IO                    = -6   --  Error when reading or writing data
-aFREEARC_ERRCODE_BAD_COMPRESSED_DATA   = -7   --  Data can't be decompressed
-aFREEARC_ERRCODE_NOT_IMPLEMENTED       = -8   --  Requested feature isn't supported
-aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED = -9   --  Required part of data was already decompressed
-
-
-----------------------------------------------------------------------------------------------------
 ----- Main exported definitions --------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
 -- |Useful definitions for kilobytes, megabytes and so on
-b:kb:mb:gb:_  = iterate (1024*) 1 :: [Int]
+b  = 1
+kb = 1024*b
+mb = 1024*kb
+gb = 1024*mb
+tb = 1024*gb
 
 -- |Compress using callbacks
 compress             = runWithMethod c_compress
@@ -125,24 +114,6 @@ compressionService method what param dat callback = do
         return (ii res)
 
 ----------------------------------------------------------------------------------------------------
------ Encryption routines --------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------
-
-#ifndef FREEARC_NO_ENCRYPTION
--- |Query encryption method for some parameter
-encryptionGet = compressionGet
-
--- |Generates key based on password and salt using given number of hashing iterations
-pbkdf2Hmac :: String -> String -> Int -> Int -> String
-pbkdf2Hmac password salt iterations keySize = unsafePerformIO $
-  withCStringLen   password $ \(c_password, c_password_len) -> do
-    withCStringLen salt     $ \(c_salt,     c_salt_len) -> do
-    allocaBytes    keySize  $ \c_key -> do
-      c_Pbkdf2Hmac c_password (ii c_password_len) c_salt (ii c_salt_len) (ii iterations) c_key (ii keySize)
-      peekCStringLen (c_key, keySize)
-#endif
-
-----------------------------------------------------------------------------------------------------
 ----- Internal auxiliary functions -----------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
@@ -178,25 +149,50 @@ generalDoWithMethod mType c_action method = do
         0 -> peekCString c_out_method
         _ -> fail$ "Unsupported "++mType++" method or error in parameters: "++method
 
--- |Universal integral types conversion routine
-ii x = fromIntegral x
-
--- |Typeless pointer
-type VoidPtr = Ptr ()
-
 {-# NOINLINE run #-}
 {-# NOINLINE doWithMethod #-}
+
+----------------------------------------------------------------------------------------------------
+----- Error codes ----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+
+aFREEARC_OK                            =  0
+aFREEARC_ERRCODE_GENERAL               = -1
+aFREEARC_ERRCODE_INVALID_COMPRESSOR    = -2
+aFREEARC_ERRCODE_ONLY_DECOMPRESS       = -3
+aFREEARC_ERRCODE_OUTBLOCK_TOO_SMALL    = -4
+aFREEARC_ERRCODE_NOT_ENOUGH_MEMORY     = -5
+aFREEARC_ERRCODE_IO                    = -6
+aFREEARC_ERRCODE_BAD_COMPRESSED_DATA   = -7
+aFREEARC_ERRCODE_NOT_IMPLEMENTED       = -8
+aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED = -9
+aFREEARC_ERRCODE_OPERATION_TERMINATED  = -10
+
+compressionErrorMessage x
+  | x==aFREEARC_OK                            = "All OK"
+  | x==aFREEARC_ERRCODE_GENERAL               = "0365 general (de)compression error in %1"
+  | x==aFREEARC_ERRCODE_INVALID_COMPRESSOR    = "0366 invalid compression method or parameters in %1"
+  | x==aFREEARC_ERRCODE_ONLY_DECOMPRESS       = "program build with FREEARC_DECOMPRESS_ONLY, so don't try to use compress"
+  | x==aFREEARC_ERRCODE_OUTBLOCK_TOO_SMALL    = "output block size in (de)compressMem is not enough for all output data in %1"
+  | x==aFREEARC_ERRCODE_NOT_ENOUGH_MEMORY     = "0367 can't allocate memory required for (de)compression in %1"
+  | x==aFREEARC_ERRCODE_IO                    = "0368 I/O error in compression algorithm %1"
+  | x==aFREEARC_ERRCODE_BAD_COMPRESSED_DATA   = "0369 bad compressed data in %1"
+  | x==aFREEARC_ERRCODE_NOT_IMPLEMENTED       = "requested feature isn't supported in %1"
+  | x==aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED = "required part of data was already decompressed"
+  | x==aFREEARC_ERRCODE_OPERATION_TERMINATED  = "operation terminated by user"
+  | otherwise                                 = "unknown (de)compression error "++show x++" in %1"
+
 
 ----------------------------------------------------------------------------------------------------
 ----- High-level compression/decompression routines working with callbacks -------------------------
 ----------------------------------------------------------------------------------------------------
 
 -- |Compress using callbacks
-foreign import ccall threadsafe  "Compression.h compress"
+foreign import ccall threadsafe  "Compression.h Compress"
    c_compress             :: CMethod -> FunPtr CALLBACK_FUNC -> FunPtr CALLBACK_FUNC -> IO Int
 
 -- |Decompress using callbacks
-foreign import ccall threadsafe  "Compression.h decompress"
+foreign import ccall threadsafe  "Compression.h Decompress"
    c_decompress           :: CMethod -> FunPtr CALLBACK_FUNC -> FunPtr CALLBACK_FUNC -> IO Int
 
 -- |Compress using callbacks and save method name in compressed output
@@ -239,6 +235,10 @@ foreign import ccall unsafe  "Compression.h  GetCompressionThreads"
 foreign import ccall unsafe  "Compression.h  SetCompressionThreads"
    setCompressionThreads :: Int -> IO ()
 
+-- |Clear external compressors table
+foreign import ccall unsafe  "Compression.h  ClearExternalCompressorsTable"
+   clearExternalCompressorsTable  :: IO ()
+
 -- |Adds new external compresion method to the table
 foreign import ccall unsafe  "External/C_External.h  AddExternalCompressor"
    c_AddExternalCompressor   :: CString -> IO Int
@@ -271,77 +271,52 @@ foreign import ccall unsafe  "Compression.h LimitDecompressionMem" c_LimitDecomp
 foreign import ccall unsafe  "Compression.h LimitDictionary"       c_LimitDictionary       :: CMethod -> MemSize -> CMethod -> IO Int
 foreign import ccall unsafe  "Compression.h LimitBlockSize"        c_LimitBlockSize        :: CMethod -> MemSize -> CMethod -> IO Int
 
-----------------------------------------------------------------------------------------------------
------ Encryption/PRNG routines ---------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------
-
-#ifndef FREEARC_NO_ENCRYPTION
--- |Generates key based on password and salt using given number of hashing iterations
-foreign import ccall unsafe  "Compression.h  Pbkdf2Hmac"
-   c_Pbkdf2Hmac :: Ptr CChar -> CInt -> Ptr CChar -> CInt -> CInt -> Ptr CChar -> CInt -> IO ()
-
--- PRNG
-foreign import ccall unsafe  "Compression.h  fortuna_size"
-   prng_size :: CInt
-foreign import ccall unsafe  "Compression.h  fortuna_start"
-   prng_start :: Ptr CChar -> IO CInt
-foreign import ccall unsafe  "Compression.h  fortuna_add_entropy"
-   prng_add_entropy :: Ptr CChar -> CULong -> Ptr CChar -> IO CInt
-foreign import ccall unsafe  "Compression.h  fortuna_ready"
-   prng_ready :: Ptr CChar -> IO CInt
-foreign import ccall unsafe  "Compression.h  fortuna_read"
-   prng_read :: Ptr CChar -> CULong -> Ptr CChar -> IO CULong
-#endif
 
 ----------------------------------------------------------------------------------------------------
 ----- Direct calls to (de)compression routines -----------------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
+#if 0
 -- |PPMD compression
 foreign import ccall threadsafe  "PPMD/C_PPMD.h ppmd_compress"
-   ppmd_compress   :: Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   ppmd_compress   :: Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |PPMD decompression
 foreign import ccall threadsafe  "PPMD/C_PPMD.h ppmd_decompress"
-   ppmd_decompress :: Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   ppmd_decompress :: Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |LZP compression
 foreign import ccall threadsafe  "LZP/C_LZP.h lzp_compress"
-   lzp_compress    :: Int -> Int -> Int -> Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   lzp_compress    :: Int -> Int -> Int -> Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |LZP decompression
 foreign import ccall threadsafe  "LZP/C_LZP.h lzp_decompress"
-   lzp_decompress  :: Int -> Int -> Int -> Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   lzp_decompress  :: Int -> Int -> Int -> Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |LZMA compression
 foreign import ccall threadsafe  "LZMA/C_LZMA.h lzma_compress"
-   lzma_compress   :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   lzma_compress   :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |LZMA decompression
 foreign import ccall threadsafe  "LZMA/C_LZMA.h lzma_decompress"
-   lzma_decompress :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
-
--- |BCJ-x86 preprocessing - encoder
-foreign import ccall threadsafe  "LZMA/C_BCJ.h bcj_x86_compress"
-   bcj_x86_compress    :: FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
-
--- |BCJ-x86 preprocessing - decoder
-foreign import ccall threadsafe  "LZMA/C_BCJ.h bcj_x86_decompress"
-   bcj_x86_decompress  :: FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   lzma_decompress :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |GRZip compression
 foreign import ccall threadsafe  "GRZip/C_GRZip.h grzip_compress"
-   grzip_compress  :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   grzip_compress  :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |GRZip decompression
 foreign import ccall threadsafe  "GRZip/C_GRZip.h grzip_decompress"
-   grzip_decompress:: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr INOUT_FUNC -> FunPtr INOUT_FUNC -> IO Int
+   grzip_decompress:: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
+#endif
 
 
--- |I/O callback function type
-type INOUT_FUNC  =  Ptr CChar -> Int -> IO Int
-foreign import ccall threadsafe "wrapper"
-   mkInOutFunc :: INOUT_FUNC -> IO (FunPtr INOUT_FUNC)
+----------------------------------------------------------------------------------------------------
+----- Types and wrappers ---------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+
+-- |Boolean flag set when we need fastest buffer-to-buffer compression
+foreign import ccall "Compression.h &" compress_all_at_once :: Ptr CInt
 
 -- |General callback function type
 type CALLBACK_FUNC  =  CString -> Ptr CChar -> CInt -> VoidPtr -> IO CInt
@@ -362,4 +337,13 @@ type Parameter = String
 
 -- |Memory sizes
 type MemSize = CUInt
+
+-- |Unlimited memory usage
+aUNLIMITED_MEMORY = maxBound::MemSize
+
+-- |Typeless pointer
+type VoidPtr = Ptr ()
+
+-- |Universal integral types conversion routine
+ii x = fromIntegral x
 

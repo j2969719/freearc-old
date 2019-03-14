@@ -131,7 +131,7 @@
                                                     \
   uint32* Model_Log2RLE_1;                          \
                                                     \
-  Model_Log2RLE_1=(uint32*)malloc(ARI_MaxByte*(GRZ_Log2MaxBlockSize+1)*sizeof(uint32));\
+  Model_Log2RLE_1=(uint32*)BigAlloc(ARI_MaxByte*(GRZ_Log2MaxBlockSize+1)*sizeof(uint32));\
   if (Model_Log2RLE_1==NULL) return (GRZ_NOT_ENOUGH_MEMORY);\
                                                     \
   sint32 i,j,CtxRLE=0,CtxL0=0,CtxL1=0,CtxL2;        \
@@ -221,7 +221,7 @@ sint32 GRZip_MTF_Ari_Encode(uint8* Input,sint32 Size,uint8* Output)
 
     if (Output>=OutputEnd)
     {
-      free(Model_Log2RLE_1);
+      BigFree(Model_Log2RLE_1);
       return (GRZ_NOT_COMPRESSIBLE);
     }
 
@@ -377,7 +377,7 @@ sint32 GRZip_MTF_Ari_Encode(uint8* Input,sint32 Size,uint8* Output)
     CtxL2=(CtxL2<<1)|1;
   }
 
-  free(Model_Log2RLE_1);
+  BigFree(Model_Log2RLE_1);
   Low+=(Range>>=1); ARI_ShiftLow(); ARI_ShiftLow();
   ARI_ShiftLow(); ARI_ShiftLow(); ARI_ShiftLow();
   return (Output+Size-OutputEnd-24);
@@ -560,7 +560,7 @@ sint32 GRZip_MTF_Ari_Decode(uint8* Input,uint8* Output)
     while (RunSize--) *Output++=Char;
 
   }
-  free(Model_Log2RLE_1);
+  BigFree(Model_Log2RLE_1);
   return (Output-SOutput);
 }
 

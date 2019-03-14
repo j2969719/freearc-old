@@ -1,7 +1,7 @@
 #include "../Compression.h"
 
-int dict_compress   (MemSize BlockSize, int MinCompression, int MinWeakChars, int MinLargeCnt, int MinMediumCnt, int MinSmallCnt, int MinRatio, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
-int dict_decompress (MemSize BlockSize, int MinCompression, int MinWeakChars, int MinLargeCnt, int MinMediumCnt, int MinSmallCnt, int MinRatio, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+int dict_compress   (MemSize BlockSize, int MinCompression, int MinWeakChars, int MinLargeCnt, int MinMediumCnt, int MinSmallCnt, int MinRatio, CALLBACK_FUNC *callback, void *auxdata);
+int dict_decompress (MemSize BlockSize, int MinCompression, int MinWeakChars, int MinLargeCnt, int MinMediumCnt, int MinSmallCnt, int MinRatio, CALLBACK_FUNC *callback, void *auxdata);
 
 
 #ifdef __cplusplus
@@ -23,16 +23,16 @@ public:
   DICT_METHOD();
 
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DICT)
   virtual void ShowCompressionMethod (char *buf);
 
   // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
   virtual MemSize GetCompressionMem     (void)         {return BlockSize*2;}
-  virtual MemSize GetDecompressionMem   (void)         {return BlockSize*2;}
+  virtual MemSize GetDecompressionMem   (void)         {return 1*mb /*BlockSize*2*/;}
   virtual MemSize GetDictionary         (void)         {return BlockSize;}
   virtual MemSize GetBlockSize          (void)         {return BlockSize;}
   virtual void    SetCompressionMem     (MemSize mem)  {if (mem>0)   BlockSize = mem/2;}

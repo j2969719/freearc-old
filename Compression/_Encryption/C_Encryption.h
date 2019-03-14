@@ -4,9 +4,8 @@
 #define MAXKEYSIZE 64
 
 enum TEncrypt {ENCRYPT, DECRYPT};
-typedef int io_func (/*void* param,*/ void* buf, int size);  // Тип функции чтения/записи данных
 int docrypt (enum TEncrypt DoEncryption, int cipher, int mode, BYTE *key, int keysize, int rounds, BYTE *iv,
-             CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+             CALLBACK_FUNC *callback, void *auxdata);
 
 
 #ifdef __cplusplus
@@ -33,9 +32,9 @@ public:
   // Универсальный метод, отвечает на запросы "encryption?", "KeySize" и "IVSize"
   virtual int doit (char *what, int param, void *data, CALLBACK_FUNC *callback);
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_ENCRYPTION)
   virtual void ShowCompressionMethod (char *buf);

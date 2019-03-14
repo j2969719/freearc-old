@@ -11,9 +11,10 @@
 // #define COMPRESS_MF_BT
 // #define COMPRESS_MF_BT4
 
-#if !defined(COMPRESS_MF_BT) && !defined(COMPRESS_MF_HC)
+#if !defined(COMPRESS_MF_BT) && !defined(COMPRESS_MF_HC) && !defined(COMPRESS_MF_HT)
 #define COMPRESS_MF_BT
 #define COMPRESS_MF_HC
+#define COMPRESS_MF_HT
 #endif
 
 #ifdef COMPRESS_MF_BT
@@ -37,6 +38,10 @@
 #include "../LZ/HashChain/HC4.h"
 #endif
 
+#ifdef COMPRESS_MF_HT
+#include "../LZ/HashChain/HT4.h"
+#endif
+
 #ifdef COMPRESS_MF_MT
 #include "../LZ/MT/MT.h"
 #endif
@@ -46,22 +51,6 @@ namespace NLZMA {
 
 const int kDefaultDictionaryLogSize = 22;
 const UInt32 kNumFastBytesDefault = 0x20;
-
-enum
-{
-  kBT2,
-  kBT3,
-  kBT4,
-  kHC4
-};
-
-static const char *kMatchFinderIDs[] =
-{
-  "BT2",
-  "BT3",
-  "BT4",
-  "HC4"
-};
 
 Byte g_FastPos[1 << 11];
 
@@ -227,6 +216,8 @@ CEncoder::CEncoder():
   _numLiteralContextBits(3),
   _dictionarySize(1 << kDefaultDictionaryLogSize),
   _dictionarySizePrev(UInt32(-1)),
+  _hashSize(0),
+  _hashSizePrev(UInt32(-1)),
   _numFastBytesPrev(UInt32(-1)),
   _matchFinderCycles(0),
   _matchFinderIndex(kBT4),
@@ -240,9 +231,13 @@ CEncoder::CEncoder():
   _fastMode = false;
 }
 
+// Output buffer size
+uint RangeEncoderBufferSize (uint dict)
+{return compress_all_at_once? dict+(dict/8) : BUFFER_SIZE;}
+
 HRESULT CEncoder::Create()
 {
-  if (!_rangeEncoder.Create(BUFFER_SIZE))
+  if (!_rangeEncoder.Create (RangeEncoderBufferSize (_dictionarySize)))
     return E_OUTOFMEMORY;
   if (!_matchFinder)
   {
@@ -287,12 +282,22 @@ HRESULT CEncoder::Create()
         break;
       }
       #endif
+
+      #ifdef COMPRESS_MF_HT
+      case kHT4:
+      {
+        NHT4::CMatchFinder *mfSpec = new NHT4::CMatchFinder;
+        setMfPasses = mfSpec;
+        _matchFinder = mfSpec;
+        break;
+      }
+      #endif
     }
     if (_matchFinder == 0)
       return E_OUTOFMEMORY;
 
     #ifdef COMPRESS_MF_MT
-    if (_multiThread && !(_fastMode && (_matchFinderIndex == kHC4)))
+    if (_multiThread && !(_fastMode && (_matchFinderIndex == kHC4  ||  _matchFinderIndex == kHT4)))
     {
       CMatchFinderMT *mfSpec = new CMatchFinderMT;
       if (mfSpec == 0)
@@ -308,25 +313,19 @@ HRESULT CEncoder::Create()
   if (!_literalEncoder.Create(_numLiteralPosStateBits, _numLiteralContextBits))
     return E_OUTOFMEMORY;
 
-  if (_dictionarySize == _dictionarySizePrev && _numFastBytesPrev == _numFastBytes)
+  if (_dictionarySize == _dictionarySizePrev && _hashSize == _hashSizePrev && _numFastBytesPrev == _numFastBytes)
     return S_OK;
-  RINOK(_matchFinder->Create(_dictionarySize, kNumOpts, _numFastBytes, kMatchMaxLen + 1)); // actually it's + _numFastBytes - _numFastBytes
+  RINOK(_matchFinder->Create(_dictionarySize, _hashSize, kNumOpts, _numFastBytes, kMatchMaxLen + 1)); // actually it's + _numFastBytes - _numFastBytes
   if (_matchFinderCycles != 0 && setMfPasses != 0)
     setMfPasses->SetNumPasses(_matchFinderCycles);
   _dictionarySizePrev = _dictionarySize;
-  _numFastBytesPrev = _numFastBytes;
+  _hashSizePrev       = _hashSize;
+  _numFastBytesPrev   = _numFastBytes;
   return S_OK;
 }
 
-static int FindMatchFinder(const char *s)
-{
-  for (int m = 0; m < (int)(sizeof(kMatchFinderIDs) / sizeof(kMatchFinderIDs[0])); m++)
-    if (!strcasecmp(kMatchFinderIDs[m], s))
-      return m;
-  return -1;
-}
-
 HRESULT CEncoder::SetupProperties( UInt32 dictionarySize,
+                                   UInt32 hashSize,
                                    UInt32 posStateBits,
                                    UInt32 litContextBits,
                                    UInt32 litPosBits,
@@ -340,6 +339,7 @@ HRESULT CEncoder::SetupProperties( UInt32 dictionarySize,
   if(numFastBytes < 2 || numFastBytes > kMatchMaxLen)
     return E_INVALIDARG;
   _numFastBytes = numFastBytes;
+  _hashSize     = hashSize;
 
   _fastMode = (algorithm == 0);
   // _maxMode  = (algorithm >= 2);
@@ -365,9 +365,9 @@ HRESULT CEncoder::SetupProperties( UInt32 dictionarySize,
   _multiThread = multiThread;
 #endif
 
-  const int kDicLogSizeMaxCompress = 28;
-  if (dictionarySize < UInt32(1 << kDicLogSizeMin) ||
-      dictionarySize > UInt32(1 << kDicLogSizeMaxCompress))
+  const int kDicLogSizeMaxCompress = 31;
+  if (dictionarySize < (UInt32(1) << kDicLogSizeMin) ||
+      dictionarySize > (UInt32(1) << kDicLogSizeMaxCompress))
     return E_INVALIDARG;
   _dictionarySize = dictionarySize;
   UInt32 dicLogSize;
@@ -1099,15 +1099,19 @@ HRESULT CEncoder::GetOptimumFast(UInt32 position, UInt32 &backRes, UInt32 &lenRe
       lenMain = matchDistances[numDistancePairs - 2];
       backMain = matchDistances[numDistancePairs - 1];
     }
-    if (lenMain == 2 && backMain >= 0x80)
+    // Отбросим матч, если дистанция слишком велика для такой длины
+    static const int maxDist[] = {0, 0, 128, 2048, 64<<10, 2<<20, 12<<20};
+    if (lenMain < sizeof(maxDist)/sizeof(*maxDist)
+    	&& backMain >= maxDist[lenMain])
       lenMain = 1;
   }
 
+  // Если нашёлся подходящий REPDIST, то используем его при определённых условиях
   if (repLens[repMaxIndex] >= 2)
   {
-    if (repLens[repMaxIndex] + 1 >= lenMain ||
-        repLens[repMaxIndex] + 2 >= lenMain && (backMain > (1 << 9)) ||
-        repLens[repMaxIndex] + 3 >= lenMain && (backMain > (1 << 15)))
+    if (repLens[repMaxIndex] + 1 >= lenMain ||                                   //  или  replen+1 >= len
+        repLens[repMaxIndex] + 2 >= lenMain && (backMain > (1 << 9)) ||          //  или  replen+2 >= len  &&  dist > 512
+        repLens[repMaxIndex] + 3 >= lenMain && (backMain > (1 << 15)))           //  или  replen+3 >= len  &&  dist > 32k
     {
       backRes = repMaxIndex;
       lenRes = repLens[repMaxIndex];
@@ -1144,7 +1148,10 @@ HRESULT CEncoder::GetOptimumFast(UInt32 position, UInt32 &backRes, UInt32 &lenRe
       }
       UInt32 len;
       for (len = 2; len < numAvailableBytes && data[len] == data[(size_t)len - backOffset]; len++);
-      if (len + 1 >= lenMain)
+      if (len + 1 >= lenMain ||                                   //  или  replen+1 >= len
+          len + 2 >= lenMain && (backMain > (1 << 9)) ||          //  или  replen+2 >= len  &&  dist > 512
+          len + 3 >= lenMain && (backMain > (1 << 15)))           //  или  replen+3 >= len  &&  dist > 32k
+//      if (len + 1 >= lenMain)
       {
         _longestMatchWasFound = true;
         backRes = UInt32(-1);
@@ -1161,8 +1168,7 @@ HRESULT CEncoder::GetOptimumFast(UInt32 position, UInt32 &backRes, UInt32 &lenRe
   return S_OK;
 }
 
-/* Fastest match finder - non-lazy and w/o checking matches at REPDISTances
-
+// Fastest match finder - non-lazy and w/o checking matches at REPDISTances
 HRESULT CEncoder::GetOptimumFastest(UInt32 position, UInt32 &backRes, UInt32 &lenRes)
 {
   UInt32 lenMain, numDistancePairs;
@@ -1177,7 +1183,6 @@ HRESULT CEncoder::GetOptimumFastest(UInt32 position, UInt32 &backRes, UInt32 &le
     _longestMatchWasFound = false;
   }
 
-  const Byte *data = _matchFinder->GetPointerToCurrentPos() - 1;
   UInt32 numAvailableBytes = _matchFinder->GetNumAvailableBytes() + 1;
   if (numAvailableBytes > kMatchMaxLen)
     numAvailableBytes = kMatchMaxLen;
@@ -1200,7 +1205,7 @@ HRESULT CEncoder::GetOptimumFastest(UInt32 position, UInt32 &backRes, UInt32 &le
   lenRes = 1;
   return S_OK;
 }
-*/
+
 
 HRESULT CEncoder::Flush(UInt32 nowPos)
 {

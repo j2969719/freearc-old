@@ -231,6 +231,9 @@ int print_timings = 0;
 int use_plain_dictionary = 0;
 
 
+#ifndef FREEARC_DECOMPRESS_ONLY
+
+
 // СТРУКТУРЫ ДАННЫХ **********************************************************************
 count_t char_counts[UCHAR_MAX+1];   // Счётчики встречаемости отдельных сисмволов в исходном тексте
 
@@ -335,11 +338,11 @@ int common_prefix_length (Word *a, Word *b)
 }
 
 // Функция сравнения для сортировки слов по убыванию частоты
-int count_desc_order (const Word *a, const Word *b)   { return b->count - a->count; }
+int __cdecl count_desc_order (const Word *a, const Word *b)   { return b->count - a->count; }
 
 #ifdef DEBUG
 // Функция сравнения для сортировки слов по убыванию частоты актуального использования
-int use_count_desc_order (const Word *a, const Word *b)   { return b->use_count - a->use_count; }
+int __cdecl use_count_desc_order (const Word *a, const Word *b)   { return b->use_count - a->use_count; }
 #endif
 
 // Функция лексикографического сравнения слов. Слово, являющееся префиксом другого, считается меньшим
@@ -666,7 +669,7 @@ int phase3 (int MinWeakChars, int *nodes)
 {
     // Отсортируем выжившие слова в порядке убывания частоты употребления
     qsort( FirstWord, LastWord-FirstWord, sizeof(Word),
-           (int (*)(const void*, const void*)) count_desc_order);
+           (int (__cdecl *)(const void*, const void*)) count_desc_order);
 
     // Отсортируем символы в порядке возрастания частоты употребления
     char_stats chars[UCHAR_MAX+1];
@@ -676,7 +679,7 @@ int phase3 (int MinWeakChars, int *nodes)
         debug (verbose>1 && printf( "Freq %02x: %d\n", c, char_counts[c]) );
     }
     qsort( chars, UCHAR_MAX+1, sizeof(char_stats),
-           (int (*)(const void*, const void*)) char_count_asc_order);
+           (int (__cdecl *)(const void*, const void*)) char_count_asc_order);
 
     // Определим, сколько слов можно закодировать однобайтовыми символами
     int n=0;
@@ -718,9 +721,9 @@ int phase4 (int nodes)
     // Отсортируем отдельно одно- и двухбайтовые слова в лексикографическом порядке
     // для улучшения степени сжатия самого словаря
     qsort( FirstWord, nodes, sizeof(Word),
-           (int (*)(const void*, const void*)) lexicographical_order);  // NB! Быстрее будет patricia-qsort
+           (int (__cdecl *)(const void*, const void*)) lexicographical_order);  // NB! Быстрее будет patricia-qsort
     qsort( TwoByteWords, LastWord-FirstWord-nodes, sizeof(Word),
-           (int (*)(const void*, const void*)) lexicographical_order);  // NB! Быстрее будет patricia-qsort
+           (int (__cdecl *)(const void*, const void*)) lexicographical_order);  // NB! Быстрее будет patricia-qsort
 
     // Первый цикл - назначить однобайтовые коды наиболее полезным словам
     int c;
@@ -763,7 +766,7 @@ int phase4 (int nodes)
     // Избавимся от слов, так и не получивших коды:
     //   Для этого отсортируем слова в порядке убывания частоты
     qsort( FirstWord, LastWord-FirstWord, sizeof(Word),
-           (int (*)(const void*, const void*)) count_desc_order);
+           (int (__cdecl *)(const void*, const void*)) count_desc_order);
     //   И найдём последнее слово с ненулевой частотой
     for (p = FirstWord; p<LastWord && p->count; p++) {
         debug (p->chr2 == RESERVED_CHAR?  sumcnt1 += p->count : sumcnt2 += p->count);
@@ -777,11 +780,13 @@ int phase4 (int nodes)
 
 #define put_byte(c)      (*outptr++ = (c))
 
+#endif // FREEARC_DECOMPRESS_ONLY
 #define dict2(i,j)       (dict2_var [i*(UCHAR_MAX+1) + j])
 #define dict_len(i)      (dict[i]? dict[i]->len : 0)
 #define dict_ptr(i)      (dict[i]->ptr)
 #define dict2_len(i,j)   (dict2(i,j)? dict2(i,j)->len : 0)
 #define dict2_ptr(i,j)   (dict2(i,j)->ptr)
+#ifndef FREEARC_DECOMPRESS_ONLY
 
 // Выделить память под выходной буфер и записать словарь в его начало
 int phase5 (byte **outbuf, unsigned *outsize, unsigned bufsize)
@@ -937,7 +942,7 @@ int phase6 ()
     // из 7 пробелов и табуляции, мы в последней записи из нашей хеш-цепочки (соответствующей
     // 7 пробелам) будем иметь ссылку на представление 5-пробельного слова)
     qsort( FirstWord, LastWord-FirstWord, sizeof(Word),
-           (int (*)(const void*, const void*)) lexicographical_order);  // NB! Быстрее будет patricia-qsort
+           (int (__cdecl *)(const void*, const void*)) lexicographical_order);  // NB! Быстрее будет patricia-qsort
 
     // Статистика: напечатать список слов в лексикографическом порядке
     for (Word *p = FirstWord; p<LastWord; p++) {
@@ -1091,7 +1096,7 @@ int phase7 (byte *buf, unsigned bufsize, byte *outbuf, unsigned *outsize)
 #ifdef DEBUG
     // Отладочная статистика: частота использования слов при кодировании, в порядке её убывания
     debug (qsort( FirstWord, LastWord-FirstWord, sizeof(Word),
-                  (int (*)(const void*, const void*)) use_count_desc_order));
+                  (int (__cdecl *)(const void*, const void*)) use_count_desc_order));
     int short_count=0, long_count=0;
     for (Word *p = FirstWord; p<LastWord; p++) {
         if (p->chr2 == RESERVED_CHAR)
@@ -1154,6 +1159,7 @@ int DictEncode (byte *buf, unsigned bufsize, byte **outbuf, unsigned *outsize, i
     return 0;  // All right
 }
 
+#endif // FREEARC_DECOMPRESS_ONLY
 
 
 // РАСПАКОВКА *****************************************************************************
@@ -1281,7 +1287,7 @@ done:
 // ХОЗЧАСТЬ ************************************************************************
 #include <windows.h>
 #include <io.h>
-#include "../Standalone.h"
+#include "../Common.cpp"
 
 // Вывести время выполнения очередного шага алгоритма и запомнить название следующего шага
 void stat1 (char *nextmsg)
@@ -1390,7 +1396,7 @@ int main (int argc, char **argv)
     }
 
     // Прочитать входные данные
-    unsigned bytes = read (fin, buf, bufsize);
+    unsigned bytes = file_read (fin, buf, bufsize);
     if (bytes != bufsize) {
         printf( "\n Can't read entire input file");
         exit(5);
@@ -1421,8 +1427,8 @@ int main (int argc, char **argv)
             printf( "\n Can't open %s for write\n", argv[2]);
             exit(3);
         }
-        if (!unpack)  write (fout, &bufsize, sizeof(bufsize));  // Добавим размер исходного файла в начало закодированных данных
-        write (fout, outbuf, outsize);
+        if (!unpack)  file_write (fout, &bufsize, sizeof(bufsize));  // Добавим размер исходного файла в начало закодированных данных
+        file_write (fout, outbuf, outsize);
     }
 
     return 0;

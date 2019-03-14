@@ -4,19 +4,28 @@
 ----   * сортировки списка файлов, найденных на диске                                         ------
 ----   * разбиения списка файлов на группы, образующие солид-блоки                            ------
 ----   * слияния списков файлов с одновременным удалением в них дубликатов                    ------
+----   * определения типов файлов по содержимому                                              ------
 ----------------------------------------------------------------------------------------------------
 module ArhiveFileList where
 
 import Data.HashTable as Hash
+import Data.Ix
 import Data.List
 import Data.Maybe
+import System.IO
 import System.IO.Unsafe
+import Foreign
+import Foreign.C
+import Foreign.Marshal.Alloc
 
 import Utils
 import Files
+import Charsets         (i18n)
+import Errors
 import FileInfo
 import Compression
-import Cmdline
+import Options
+import UI               (debugLog0, uiScanning, uiCorrectTotal)
 import ArhiveStructure
 import ArhiveDirectory
 
@@ -109,7 +118,7 @@ reorder files = do
     let near_size (name1,size1) (name2,size2)  =  name1==name2 &&
                (if size1 <= i(16*kb)
                  then size1==size2
-                 else size1 `inRange` (size2 `div` 2, size2*2))
+                 else size1.$inRange (size2 `div` 2, size2*2))
     -- Первый хеш - по совпадению расширения и размера, второй - по совпадению имени и близости размера
     hash1 <- Hash.new (==)      (\(ext,size)  -> i$ filenameHash size ext)
     hash2 <- Hash.new near_size (\(name,size) ->    filenameHash 0 (myUnpackStr name))
@@ -301,8 +310,9 @@ data_compressor command (file:_) | fiSpecialFile fi       = aNO_COMPRESSION
 -- ограничивается размером блока в алгоритме сжатия.
 -- Наконец, каталоги и файлы, сжимаемые фейковыми компрессорами (nodata/crconly),
 -- на отдельные солид-блоки не разбиваются.
-splitToSolidBlocks command filelist  =  (dirs &&& [dirs]) ++ groupOn cfArcBlock solidBlocksToKeep
-                                        ++ concatMap splitOneType  (splitByType filesToSplit)
+splitToSolidBlocks command filelist  =  (dirs &&& [(aNO_COMPRESSION,dirs)])
+                                     ++ map (keyval (cfCompressor.head)) (groupOn cfArcBlock solidBlocksToKeep)
+                                     ++ concatMap splitOneType (splitByType filesToSplit)
   where
     -- Каталоги - отдельным блоком
     (dirs,files)  =  partition (fiSpecialFile.cfFileInfo) filelist
@@ -312,31 +322,31 @@ splitToSolidBlocks command filelist  =  (dirs &&& [dirs]) ++ groupOn cfArcBlock 
 
     -- Разбить список по типам файлов ($binary, $text...).
     -- При этом файлы, уже сжатые фейковыми алгоритмами, должны получить прежний тип (т.е. алгоритм сжатия)
-    splitByType filelist  =  map concat groups
+    splitByType filelist  =  map concatSnds groups
       where
         (fake,normal) = partition isCompressedFake filelist
-        normalGroups  = partitionList (opt_types_count command) (opt_find_type command . cfFileInfo) normal
-        -- Фейковые файлы разбиваются на группы по используемым алгоритмам сжатия
-        fakeGroups    = sort_and_groupOn cfCompressor fake
+        normalGroups  = mapFsts (snd.(opt_data_compressor command!!)) $ splitFileTypes command normal
+        -- Фейковые файлы разбиваются на группы по используемым алгоритмам сжатия.
+        fakeGroups    = map (keyval (cfCompressor.head)) $ sort_and_groupOn cfCompressor fake
         -- ... и эти группы объединяются с группами нормальных файлов, которые предстоит сжать теми же алгоритмами
-        groups        = sort_and_groupOn (data_compressor command) (fakeGroups++filter (not.null) normalGroups)
+        groups        = sort_and_groupOn fst (fakeGroups++normalGroups)
 
-    -- Разбить на солид-блоки список файлов одного типа (то есть сжимаемых одним алгоритмом)
-    splitOneType files | isFakeCompressor compressor = [files]  -- Для фейковых компрессоров нет смысла разбивать блок на части
-                       | compressor==aNO_COMPRESSION = [files]  -- Для не-сжатия в этом тоже нет смысла
-                       | otherwise =
-        splitBy (opt_group_data command .$ addBlockSizeCrit) (opt_recompress command) files
+    -- Разбить на солид-блоки список файлов, сжимаемых заданным алгоритмом
+    splitOneType (compressor,files) =
+        -- Для фейковых компрессоров или -m0 нет смысла разбивать блок на части
+        if isFakeCompressor compressor || compressor==aNO_COMPRESSION
+        then [(compressor,files)]
+        else files.$ splitBy (opt_group_data command .$ addBlockSizeCrit) (opt_recompress command)
+                  .$ map (\x->(compressor,x))
       where
-        -- Упаковщик, используемый для файлов этого типа (т.е. бинарных или текстовых)
-        compressor = data_compressor command files
         -- Для цепочек алгоритмов, начинающихся с TTA/MM/JPG, отключить солид-сжатие
         -- Для цепочек алгоритмов, начинающихся с DICT - ограничить солид-блок размером блока DICT
-        -- Для остальных блочных алгоритмов (grzip, lzp) alone - размером блока в алгоритме сжатия
+        -- Для остальных блочных алгоритмов (grzip, lzp) alone - размером блока в алгоритме сжатия.
         addBlockSizeCrit = case compressor of
-            algorithm:_ | makeNonSolid  algorithm          ->  const [GroupNone]
-            algorithm:_ | isDICT_Method algorithm          ->  ([GroupByBlockSize $ freearcGetBlockSize algorithm]++)
-            [algorithm] | freearcGetBlockSize algorithm>0  ->  ([GroupByBlockSize $ freearcGetBlockSize algorithm]++)
-            _                                              ->  id
+            algorithm:_ | makeNonSolid  algorithm     ->  const [GroupNone]
+            algorithm:_ | isDICT_Method algorithm     ->  ([GroupByBlockSize $ getBlockSize algorithm]++)
+            [algorithm] | getBlockSize algorithm > 0  ->  ([GroupByBlockSize $ getBlockSize algorithm]++)
+            _                                         ->  id
 
 -- |Необходимо ли поместить файлы, сжимаемые этим мультимедийным алгоритмом,
 -- в отдельные solid-блоки? Исключение может быть сделано только в случае,
@@ -376,21 +386,25 @@ splitBy crits recompress files = splitByLen (computeLen) files where
 splitLen  GroupNone              = const 1
 splitLen  GroupByExt             = length.head.groupOn (fpLCExtension.fiFilteredName.cfFileInfo)
 splitLen (GroupBySize      size) = (1+)      . groupLen (fiSize.cfFileInfo) (+) (<i size)
-splitLen (GroupByBlockSize size) = atLeast 1 . groupLen (fiSize.cfFileInfo) (+) (<i size)
+splitLen (GroupByBlockSize size) = atLeast 1 . groupLen (fiSize.cfFileInfo) (+) (<special(i size))
 splitLen (GroupByNumber       n) = atLeast 1 . const n
 splitLen  GroupAll               = const maxBound
 
--- |Длина минимальной группы файлов, позволенной при заданном критерии (вдвое меньше номинала)
+-- |Длина минимальной группы файлов, позволенной при заданном критерии (вдвое меньше номинала, втрое - для блочных компрессоров)
 splitLenMin (GroupBySize      size) = splitLen (GroupBySize      (size `div` 2))
-splitLenMin (GroupByBlockSize size) = splitLen (GroupByBlockSize (size `div` 2))
+splitLenMin (GroupByBlockSize size) = splitLen (GroupByBlockSize (size `div` 3))
 splitLenMin (GroupByNumber       n) = splitLen (GroupByNumber    (n    `div` 2))
 splitLenMin x                       = splitLen x
 
--- |Длина максимальной группы файлов, позволенной при заданном критерии (в 1.5 раза больше номинала)
+-- |Длина максимальной группы файлов, позволенной при заданном критерии (в 1.5 раза больше номинала, за исключением блочных компрессоров)
 splitLenMax (GroupBySize      size) = splitLen (GroupBySize      (size+(size `div` 2)))
-splitLenMax (GroupByBlockSize size) = splitLen (GroupByBlockSize (size+(size `div` 2)))
+splitLenMax (GroupByBlockSize size) = splitLen (GroupByBlockSize (size))
 splitLenMax (GroupByNumber       n) = splitLen (GroupByNumber    (n   +(n    `div` 2)))
 splitLenMax x                       = splitLen x
+
+-- |Временно: специальное преобразование чтобы увеличить скорость сжатия -m2t на многоядерных машинах
+special size | size>8*mb = size
+             | otherwise = 4*size
 
 
 ----------------------------------------------------------------------------------------------------
@@ -423,3 +437,198 @@ findSolidBlock min max = fmap (+min)                       -- компенсировать 'dr
                        . tails
                        . drop min
 
+
+----------------------------------------------------------------------------------------------------
+---- Определение типов файлов по содержимому -------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+{-
++не забыть про упакованные файлы
++ОШИБКА: бинарный a.c -> возвращается "?" и он упаковывается как текст
+  "?" означает не text/compressed, поэтому $text/$compressed должны сбрасываться в "?",
+    остальные - сохранять тип.
+    несколько разных типов - разбивать на группы или (если они и так слишком малы) паковать как binary
++$compressed -> $incompressible в mmdet*2, #$incompressible=rep+tor
++новый алгоритм:
+   0. detect различает только text, compressed и прочее; поэтому
+   1. $text (и $compressed) нужно условно исключить из arc.groups,
+         так что эти типы будут определяться только при text+text+text или compressed+compressed+compressed
+   2. при несовпадении типов (text+default+default) использовать default тип
++решены проблемы
+   some.lib = text+default+default, в результате чего её сжатие происходит как $binary вместо $obj
+   $text arc ["default","default","default"]
++$compressed = [rep+]tor в -m2x..-m4  (отсутствует в -m5/-m5x и выше)
++отключаем если в списке компрессоров нет спецалгоритмов для $text/$compressed
++Не работает: -mx: выбирать lzma/ppmd на основании реального сжатия.
+-ma - управление автодетектом. -ma+, -ma-. -ma9 = наиболее тщательный автодектект
++проверять начало+середину+конец файла! .doc?
++бить данные на большие куски, делать больше проверок (2мб,5) и при их расхождении рекурсивно разбивать группу на меньшие части
++Ruby & Dev-Cpp(*.map) - сжатие восстановлено; C:\Base\Doc\Java\tutorial - вдвое быстрее благодаря $compressed
++проверять на MM файлы из групп $wav/$bmp
++файлы >64kb - детектить кусками по 32-64 кб; взять побольше кусков чтобы определить истинную сущность файла
++файлы с бинарной + текстовой частью - разрешать до 8% бинарную часть
++должно быть 1*default + 1*$text => default (считать до 20%)
+
+1. детектить текстово-бинарные файлы (у текстов - плавный переход контекста?)
+4. одинаковые файлы должны быть зарезаны с помощью lzma/rep/lzp
+5. сбои на *.rgb, тексты с таблицами, so/lib без repdist
+настраивать параметры проверки в зависимости от степени сжатия.
+utf-8: проверить распознание и сжатие на русских/англ. текстах
+"sort_and_groupOn fst" заменить на что-то получше (типа partitionList) чтобы детектинг типов файлов происходил по мере упаковки
+  [ filter "binary" xs, filter "text" xs, filter "!binary!text" xs]
+файлы типа readme.* и makefile.* можно соединять вместе.. (разбивать по расширениям только $default)
+несовпадение типов часто означает, что случайно были объединены файлы разных типов
+файлы без расширений, наверно, нужно анализировать тщательней
+графика? в skype.exe распознаётся как текст :(
+файлы нулевого размера здесь не должны появляться?
+binary, text, compressed - in order to overlap binary compression and text files reading
+  сжимать сначала группы крупных файлов..
+-}
+
+aGROUP_SIZE = 2*mb       -- общий список файлов разбивается на куски этого размера, для каждого куска мы сначала пытаемся определить общий тип
+aCHUNKS = 5              -- кол-во проб, которые делаются для определения типа файлов
+aCHUNK_SIZE = 64*kb      -- размер каждой пробы
+
+
+splitFileTypes command  -- Определить типы файлов по arc.groups
+  | quick_and_dirty = deleteIf (null.snd) . zip [0..] . partitionList (opt_types_count command) (cfType command)
+                      -- Разбить на группы по расширениям и макс. 2 мб на группу и определить типы файлов по содержимому
+  | otherwise       = unsafePerformIO . concatMapM groupType . splitBy [GroupByExt, GroupByBlockSize aGROUP_SIZE] True
+--splitFileTypes = map (unsafePerformIO.groupType) . splitBy [GroupByExt, GroupByBlockSize (500*kb)] True   -- разбивает на группы *лениво*, по мере необходимости
+ where                           -- todo: добавить разбивку по группам
+
+  -- Если автодетект этому алгоритму не поможет
+  quick_and_dirty  =  detect_level <= 1                                    -- Автодетект отключен
+                      || not (types `contains_one_of` detectable_types)    -- Скрипач не нужен :D
+    where (types,compressors) = unzip (opt_data_compressor command)
+
+  -- Уровень дотошности автодетекта (по умолчанию соответствует уровню сжатия)
+  detect_level = opt_autodetect command .$i
+
+
+  -- Определить тип одного (скорей всего, достаточно большого) файла
+  groupType [file] = do
+    let defaultType = getDefaultType file             -- тип файла по arc.groups
+        filesize = fiSize$ cfFileInfo file            -- размер файла
+        chunks = filesize `div` aCHUNK_SIZE + 1       -- на сколько блоков *можно* разделить файл
+        n = if chunks < aCHUNKS  then chunks          -- количество проверяемых блоков
+                                 else sqrt (i$ aCHUNKS * chunks) .$round
+        blocksize = min aCHUNK_SIZE (filesize `div` n)  -- размер проверяемых блоков
+        step = (filesize-n*blocksize) `div` n    -- промежутки между проверяемыми блоками (их размер подобран так, чтобы распределить n блоков по blocksize байт равномерно по файлу)
+    fmap maybeToList $ whenJustM (check defaultType (i blocksize) (take (i n) [0, blocksize+step ..]) file) $ \dataTypes -> do
+    let typ = chooseType dataTypes defaultType
+    --debugLog0$ show$ (fpBasename.fiDiskName.cfFileInfo) file
+    debugLog0$ "  "++(fst$ opt_data_compressor command!!typ)++" "++(fpBasename.fiDiskName.cfFileInfo) file++"("++show n++") "++show dataTypes; myFlushStdout
+    msg <- i18n"0248 Analyzed %1 files"
+    uiScanning msg [file]
+    return (typ,[file])
+
+  -- Определить тип (предположительно однородной) группы файлов
+  groupType files@(file:_) = do
+    let defaultType = getDefaultType file
+        -- Список групп файлов и по одному файлу из каждой группы, который будет протестирован
+        (fileGroups, filesToTry)
+           -- Если список достаточно мал - рассмотрим каждый файл как отдельную группу
+           | len<=aCHUNKS  =  (map (:[]) files, files)
+           -- Иначе - разобьём список файлов на aCHUNKS частей, равных по суммарному размеру файлов
+           -- и в каждой группе отберём для тестирования самый большой файл
+           | otherwise     =  (files.$ splitByLen (splitLen$ GroupBySize$ totallen `div` aCHUNKS)
+                              ,fileGroups.$ map (maxOn (fiSize.cfFileInfo)))
+        -- Длина списка и суммарный размер файлов в нём
+        len = length files
+        totallen = sum$ map (fiSize.cfFileInfo) files
+    -- Определим типы выбранных файлов и "суммарный" тип (если файл не может быть открыт, то его группа получает тип "default")
+    dataTypes <- concatMapM (check defaultType aCHUNK_SIZE [0] .>>== fromMaybe ["default"]) filesToTry
+    let typ = chooseType dataTypes defaultType
+    --debugLog0$ show$ map (fpBasename.fiDiskName.cfFileInfo) files
+    debugLog0$ "  "++(if isAll (==) dataTypes  then fst$ opt_data_compressor command!!typ  else "?")++" "++show (map (fpBasename.fiDiskName.cfFileInfo) filesToTry)++" "++show dataTypes; myFlushStdout
+    -- Если типы файлов определились по разному, то дадим каждой подгруппе право на самоопределение
+    if not (isAll (==) dataTypes)
+      then concatMapM groupType fileGroups
+      else do msg <- i18n"0248 Analyzed %1 files"
+              uiScanning msg files
+              return [(typ,files)]
+
+
+  -- Тип файла ($bmp/$obj/...), определённый по arc.groups. Файлы, типы которых мы умеем
+  -- определять автоматически ($text/$compressed), получают по умолчанию тип $binary
+  getDefaultType file  =  if typ=="" || typ `elem` detectable_types  then "$binary"  else typ
+    where typ  =  fst(opt_data_compressor command!!cfType command file)
+
+  -- Определить тип данных исходя из результатов проб и типа по arc.groups
+  chooseType dataTypes defaultType =
+         (best `elemIndex` map fst (opt_data_compressor command)) `defaultVal` 0
+    where best = bestType dataTypes .$changeTo [("default", defaultType)]
+
+  -- Определить правильный тип данных по нескольким пробам
+  -- (если они [почти] все дали одинаковый результат - возвратить его, иначе - "default")
+  bestType dataTypes@(_:_)
+    | x>[]  &&  isAll (==) x
+      && (lenx==total ||                          -- если весь список состоит из x
+          total>=aCHUNKS && lenx==total-1  ||     -- или весь список минус один элемент и список достаточно велик
+          lenx*12 >= total*11                     -- или 92% списка
+         )           =  head x         where x     = filter (/="default") dataTypes
+                                             lenx  = length x
+                                             total = length dataTypes
+  bestType _         =  "default"
+
+
+  -- Проверить куски по blocksize байт в файле file, начинающиеся на позициях positions
+  -- (для файлов, копируемых из входного архива, вместо этого используется отгадывание типа файла по использованному компрессору)
+  check defaultType blocksize positions file
+    | isCompressedFile file  =  if defaultType `elem` typesByCompressor
+                                  then return$ Just [(typeByCompressor.blCompressor.cfArcBlock) file]
+                                  else return$ Just [defaultType]
+
+    | otherwise = do let filename = (fpFullname.fiDiskName.cfFileInfo) file
+                         onFail   = uiCorrectTotal (-1) (-fiSize (cfFileInfo file))
+                     bracketCtrlBreakMaybe "fileClose:splitFileTypes" (tryOpen filename) onFail fileClose $ \f -> do
+                     -- Первым делом проверим файл на MM
+                     mm <- detectMM file f defaultType
+                     if mm then return [defaultType]  else do
+                     -- Вторым делом - проверка на $text/$compressed
+                     foreach positions (detectType f blocksize)
+
+  -- Запросить у detect_datatype() список типов данных, которые он умеет распознавать
+  detectable_types = words $ unsafePerformIO $ do
+    allocaBytes 1000 $ \c_filetype -> do
+    detect_datatype nullPtr 0 c_filetype
+    peekCString c_filetype
+
+  -- Прочитать из файла f данные, начинающиеся с позиции pos и длиной size,
+  -- и определить их тип вызовом сишной функции detect_datatype()
+  detectType f size pos = do
+    withChunk f pos size $ \buf len -> do
+    allocaBytes 100 $ \c_filetype -> do
+    detect_datatype buf len c_filetype
+    peekCString c_filetype
+
+  -- Проверка на MM файл
+  detectMM file f defaultType =
+    if not(isMMType defaultType)  then return False  else do
+      let filesize = clipToMaxInt$ fiSize$ cfFileInfo file                 -- размер файла, усечённый до 2 гб
+      isMmHeader <- withChunk f 0 (1024 `min` filesize) $ \buf len -> do   -- прочитаем 1 кб из начала файла
+        detect_mm_header detect_level buf len >>== (/=0)                   --   проверим наличие в нём заголовка гарантированного MM файла
+      if isMmHeader then return True else do                               -- если заголовок найден, то возвращаем True, иначе
+      bytes <- detect_mm_bytes detect_level filesize                       -- сколько байт проверять
+      withChunk f ((filesize-bytes) `div` 2) bytes $ \buf len -> do        -- прочитаем кусок рекомендованной длины из середины файла
+        detect_mm detect_level buf len >>== (/=0)                          --   и проверим его на данные MM-типа
+
+  -- Прочитать из файла f с позиции pos данные длиной size и выполнить над ними action
+  withChunk f pos size action = do
+    allocaBytes (i size) $ \buf -> do
+    fileSeek f (i pos)
+    len <- fileReadBuf f buf (i size)
+    action buf (i len)
+
+
+foreign import ccall safe "Compression/MM/C_MM.h"
+  detect_datatype :: Ptr CChar -> CInt -> Ptr CChar -> IO ()
+
+foreign import ccall safe "Compression/MM/C_MM.h"
+  detect_mm_bytes :: CInt -> CInt -> IO CInt
+
+foreign import ccall safe "Compression/MM/C_MM.h"
+  detect_mm :: CInt -> Ptr CChar -> CInt -> IO CInt
+
+foreign import ccall safe "Compression/MM/C_MM.h"
+  detect_mm_header :: CInt -> Ptr CChar -> CInt -> IO CInt

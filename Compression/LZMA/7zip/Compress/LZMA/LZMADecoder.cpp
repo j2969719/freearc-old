@@ -266,6 +266,10 @@ STDMETHODIMP CDecoder::Code(ISequentialInStream *inStream,
   LZMA_TRY_END
 }
 
+// Input buffer size
+uint RangeDecoderBufferSize (uint dict)
+{return compress_all_at_once? dict : BUFFER_SIZE;}
+
 HRESULT CDecoder::SetupProperties( UInt32 dictionarySize, UInt32 pb, UInt32 lc, UInt32 lp)
 {
   if (pb > NLength::kNumPosStatesBitsMax)
@@ -281,7 +285,7 @@ HRESULT CDecoder::SetupProperties( UInt32 dictionarySize, UInt32 pb, UInt32 lc, 
     return E_OUTOFMEMORY;
   if (!_literalDecoder.Create(lp, lc))
     return E_OUTOFMEMORY;
-  if (!_rangeDecoder.Create(BUFFER_SIZE))
+  if (!_rangeDecoder.Create (RangeDecoderBufferSize (dictionarySize)))
     return E_OUTOFMEMORY;
   return S_OK;
 }

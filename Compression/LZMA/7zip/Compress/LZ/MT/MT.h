@@ -26,7 +26,7 @@ class CMatchFinderMT:
   STDMETHOD_(UInt32, GetMatchLen)(Int32 index, UInt32 distance, UInt32 limit);
   STDMETHOD_(UInt32, GetNumAvailableBytes)();
   STDMETHOD_(const Byte *, GetPointerToCurrentPos)();
-  STDMETHOD(Create)(UInt32 sizeHistory, UInt32 keepAddBufferBefore,
+  STDMETHOD(Create)(UInt32 sizeHistory, UInt32 hashSize, UInt32 keepAddBufferBefore,
       UInt32 matchMaxLen, UInt32 keepAddBufferAfter);
   STDMETHOD(GetMatches)(UInt32 *distances);
   STDMETHOD(Skip)(UInt32 num);

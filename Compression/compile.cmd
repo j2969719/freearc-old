@@ -29,6 +29,9 @@
 @cd External
 @make
 @cd ..
+@cd CLS
+@make
+@cd ..
 @cd _Encryption
 @make
 @cd ..

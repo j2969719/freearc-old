@@ -178,6 +178,46 @@ Compression speed on incompressible data:
   -l32   8 mb/sec
 lrzip    8 mb/sec
 
+
+** REP со словарём больше размера ОЗУ**************************************************************
+
+кстати, раз уж разговор вертится вокруг rep с большими словарями. по умолчанию
+в нём используется скажем 1гб для самих данных и вчетверо меньше - для индекса.
+хранить историю данных приходится только потому, что простенький 4-байтный хеш,
+который вычисляется от этих 512 байт - ненадёжен в смысле коллизий. теперь
+представьте себе, что мы храним вместо него 16-байтный cryptographically strong
+hash - типа md5. тогда историю можно вычеркнуть нафиг. более того, то что
+хеш-таблица занимает четверть от объёма индексированных данных - это
+необязательно. если хранить такой хеш для каждого 256-байтного блока данных, то
+это гарантирует нам нахождение всех матчей длины от 511 (поскольку любой такой
+матч включает как минимум один полный 256-байтный блок, начинающийся с
+256-байтной границы). т.е. для поиска строк длины 511+ c N-гб историей
+достаточно памяти в N/16 гб
+
+проблемы возникнут только при распаковке :D  если при упаковке старые данные
+нам и не нужны - достаточно иметь 100% уверенность в их совпадении, то при
+распаковке нам как-никак надо их копировать со старого места :D  если считать,
+что мы все эти данные будем хранить на диске вместо ОЗУ, то копирование каждой
+строки потребует операции чтения с диска, накладные расходы на которую
+практически равны disk seek time - т.е. 10 мс для винта и 1 мс для очень
+хорошей флешки
+
+представим себе, что мы хотим обеспечить скорость распаковки скажем 1 мб/с. это
+означает, что каждые 10 мс мы должны распаковывать как минимум 10 кб, что в
+свою очередь гарантировано только если у нас rep кодирует только совпадения
+длины 10кб+
+
+скажем, если остановиться на кодировании строк длины 4кб+, то для сжатия
+потребуется N/128 гб памяти (т.е. твои 18 гиг можно прошерстить, используя
+всего 160 мег озу) и скорость распаковки будет ограничена 400 кб/с. вот только
+винт жалко :D
+
+Ghost, попробуй для интереса - как меняется сжатие твоих данных при переходе от
+rep:512 (по умолчанию) к rep:4096? с дальнейшей обработкой lzma и без оной.
+понятно, это лишь прикидка, поскольку реально rep сейчас окучивать большие
+дистанции не умеет :(  может, мне это дело добавить на быструю руку, без
+возможности распаковки...
+
 */
 
 
@@ -200,15 +240,13 @@ void stat1 (char *nextmsg, int Size);
 //   2   детальная информация о процессе
 static int verbose = 0;
 
-// Печатать время выполнения каждого шага алгоритма
-static int print_timings = 0;
 #endif
 
 
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ *********************************************************************
 
 // Возведение в степень
-static unsigned power (unsigned base, unsigned n)
+inline static unsigned power (unsigned base, unsigned n)
 {
     int result;
     for (result=1; n != 0; result *= base, n--);
@@ -217,7 +255,7 @@ static unsigned power (unsigned base, unsigned n)
 
 // Наибольшая степень base, не превосходящая sqrt(n),
 // например sqrtb(36,2) = 4
-static unsigned sqrtb (unsigned n, unsigned base = 2)
+inline static unsigned sqrtb (unsigned n, unsigned base = 2)
 {
     int result;
     for (result=1; (n/=base*base) != 0; result *= base);
@@ -241,7 +279,7 @@ static inline byte* find_match_end (byte* p, byte* q, byte* end)
 // Копирует данные из буфера в буфер, идя в порядке возрастания адресов
 // (это важно, поскольку буфера могут пересекаться и в этом случае нужно
 // размножить существующие данные)
-static inline void copymem (byte* p, byte* q, unsigned len)
+static inline void memcpy_lz_match (byte* p, byte* q, unsigned len)
 {
     if (len)
     do *p++ = *q++;
@@ -263,10 +301,11 @@ struct Buffer
     byte*  p;                   // текущий указатель чтения/записи внутри этого буфера
     byte*  end;                 // адрес после конца прочитанных/записанных данных
     byte*  bufend;              // конец выделенного буфера
+    byte   smallbuf[16];        // маленький буфер, используемый для записи отдельных значений
     int    len()                { return mymax(p,end)-buf; }
-    Buffer (int size)           { buf=p=end= (byte*) malloc(size); bufend=buf+size;}
-    void   free ()              { ::free(buf); buf=p=end=NULL; }
-    void   put32(int x)         { *(int32*)p = x; p+= sizeof(int32); }
+    Buffer (int size)           { buf=p=end= size<sizeof(smallbuf)? smallbuf : (byte*) BigAlloc(size);  bufend=buf+size;}
+    void   free ()              { if (bufend>buf+sizeof(smallbuf))  BigFree(buf);  buf=p=end=NULL; }
+    void   put32(int x)         { *(int32*)p = x; p+= sizeof(int32); }  // only for FREEARC_INTEL_BYTE_ORDER!
     void   put(void *b, int n)  { memcpy(p,b,n); p+= n; }
 // Для чтения данных
     void   rewind()             { end=mymax(p,end); p=buf; }
@@ -305,9 +344,20 @@ struct Buffer
 #define PRIME          153191           /* or any other prime number */
 #define POWER_PRIME_L  power(PRIME,L)
 
-int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+const int MAX_READ = 8*mb;  // Макс. объём входных данных, читаемых за раз
+
+
+// Вычислить количество элементов хеша
+MemSize CalcHashSize (MemSize HashBits, MemSize BlockSize, MemSize k)
 {
-    // НАСТРОЙКА ПАРАМЕТРОВ АЛГОРИТМА
+    // Размер хеша должен соответствовать количеству значений. которые мы хотим в него занести, но не превышать четверти от размера буфера / объёма входных данных (Size/16*sizeof(int)==Size/4)
+    return HashBits>0? (1<<HashBits) : roundup_to_power_of(BlockSize/3*2,2) / mymax(k,16);
+}
+
+#ifndef FREEARC_DECOMPRESS_ONLY
+int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata)
+{
+    // НАСТРОЙКА ПАРАМЕТРОВ АЛГОРИТМА  (копия в REP_METHOD::GetCompressionMem!)
     if (SmallestLen>MinMatchLen)  SmallestLen=MinMatchLen;
     int L = roundup_to_power_of (SmallestLen/2, 2);  // Размер блоков, КС которых заносится в хеш
     int k = sqrtb(L*2), k1=k-1, test=mymin(k*Amplifier,L), cPOWER_PRIME_L = POWER_PRIME_L;
@@ -316,9 +366,12 @@ int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int B
 #ifdef DEBUG
     int matches=0, total=0, lit=0;
 #endif
-    byte *buf = (byte*) malloc(BlockSize);   // Буфер, куда будут помещаться входные данные
+    byte *buf = (byte*) BigAlloc(BlockSize);   // Буфер, куда будут помещаться входные данные
     if (buf==NULL)  return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;    // Error: not enough memory
     FOPEN();
+
+    int bsize = (mymin(BlockSize,MAX_READ)/SmallestLen+1) * sizeof(int32);    // Макс. объём данных, который может быть записан в буфер длин или смещений
+    Buffer lens(bsize), offsets(bsize), datalens(bsize), dataOffsets(bsize);  // Буфера для отдельного хранения длин, смещений совпадений, длин несжатых блоков и самих этих блоков. Эта группировка позволяет увеличить конечную степень сжатия
 
     // Каждая итерация этого цикла читает, обрабатывает и записывает один блок данных
     // размером в min(1/8 буфера,8мб). Это обеспечивает поведение типа sliding window,
@@ -326,25 +379,24 @@ int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int B
     for (int FirstTime=1; ; FirstTime=0) {
 
         // ЧТЕНИЕ ВХОДНЫХ ДАННЫХ
-        int Size = callback ("read", buf+Base, mymin (BlockSize-Base, mymin (BlockSize/8, 8*mb)), auxdata);
+        int Size = callback ("read", buf+Base, mymin (BlockSize-Base, FirstTime? MAX_READ : mymin (BlockSize/8, MAX_READ)), auxdata);
         if (Size < 0)  {errcode=Size; goto finished;}   // Error: can't read input data
         if (FirstTime) {
-            HashSize = HashBits>0? (1<<HashBits) : roundup_to_power_of(BlockSize,2) / mymax(k,16); // Размер хеша должен соответствовать количеству значений. которые мы хотим в него занести, но не превышать четверти от размера буфера / объёма входных данных (Size/16*sizeof(int)==Size/4)
+            HashSize = CalcHashSize (HashBits, BlockSize, k);
             HashMask = HashSize-1;
-            hasharr  = (int *) calloc (HashSize, sizeof(int));
+            hasharr  = (int *) BigAlloc (HashSize * sizeof(int));
             if (HashSize && hasharr==NULL)  {errcode=FREEARC_ERRCODE_NOT_ENOUGH_MEMORY; goto finished;}   // Error: not enough memory
+            memset (hasharr, 0, HashSize * sizeof(int));
             debug (verbose>0 && MinMatchLen==SmallestLen && printf(" Buf %d mb, MinLen %d, Hash %d mb, Amplifier %d\n", ((Size-1)>>20)+1, MinMatchLen, (HashSize*sizeof(int))>>20, test/k));
             debug (verbose>0 && MinMatchLen!=SmallestLen && printf(" Buf %d mb, MinLen %d, Barrier %d, Smallest Len %d, Hash %d mb, Amplifier %d\n", ((Size-1)>>20)+1, MinMatchLen, Barrier, SmallestLen, (HashSize*sizeof(int))>>20, test/k));
             Put32 (BlockSize);   // Запишем размер словаря в выходной поток
-            stat1 ("Compression",0);
         }
         if (Size == 0) break;  // No more input data
         debug (verbose>0 && printf(" Bytes read: %u\n", Size));
         if (Base==0)  {   // В первый раз или после перехода через границу буфера
             hash=0;  for (int i=0; i < mymin(L,Size); i++)  update_hash (0, buf[i]);  // Начальное значение hash - КС от первых L байт буфера
         }
-        int literals=0, bsize = (Size/SmallestLen+1) * sizeof(int32);    // Макс. объём данных, который может быть записан в буфер длин или смещений
-        Buffer lens(bsize), offsets(bsize), datalens(bsize), dataOffsets(bsize);  // Буфера для отдельного хранения длин, смещений совпадений, длин несжатых блоков и самих этих блоков. Эта группировка позволяет увеличить конечную степень сжатия
+        int literals=0; lens.empty(), offsets.empty(), datalens.empty(), dataOffsets.empty();  // Очистить буфера
 
         // ОСНОВНОЙ ЦИКЛ, НАХОДЯЩИЙ ПОВТОРЯЮЩИЕСЯ СТРОКИ ВО ВХОДНЫХ ДАННЫХ
         for (int i=last_i; i+L*2 < Base+Size; last_i=i) {   // Обрабатываем по L байт за одну итерацию цикла + надо иметь L байт lookahead
@@ -395,22 +447,25 @@ int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int B
 
         // ВЫВОД СЖАТЫХ ДАННЫХ В ВЫХОДНОЙ ПОТОК И ПОДГОТОВКА К ОБРАБОТКЕ СЛЕДУЮЩЕЙ ПОРЦИИ ДАННЫХ
         Base += Size;
-        if (Base==BlockSize) {  // Если происходит переход через границу буфера
-            // Записать в выходные буфера остаток данных после последнего найденного совпадения
-            dataOffsets.put32 (last_match);        // Адрес остатка данных
-               datalens.put32 (Base-last_match);   // Длина остатка данных
-            literals += Base-last_match;
-            Base=last_match=last_i=0;  // Да! Начать заполнять буфер с начала!
+        if (Base==BlockSize)  last_i=Base;       // Закодировать все данные до конца буфера
+        if (last_match > last_i) {               // Если последний матч кончается в ещё не проиндексированной области
+          datalens.put32 (0);                    //   Ничего кодировать не надо, но datalens должен всё равно быть ровно на одну запись длиннее lens/offsets
         } else {
-            if (lens.len()==0)  goto skip_output;  // There is no data to write, so let's skip this block entirely
-            datalens.put32 (0);  // Чтобы количество записей в буфере datalens в любом случае было ровно на одну больше, чем в lens/offsets
+          // Записать в выходные буфера остаток данных от последнего найденного совпадения до последней проиндексированной поиции
+          dataOffsets.put32 (last_match);          // Адрес остатка данных
+             datalens.put32 (last_i-last_match);   // Длина остатка данных
+          literals  += last_i-last_match;
+          last_match = last_i;
+        }
+        if (Base==BlockSize) {       // Если происходит переход через границу буфера
+          Base=last_match=last_i=0;  //   Да! Начать заполнять буфер с начала!
         }
         // Записать размер сжатых данных и количество найденных совпадений в буфер
-       {int outsize = sizeof(int32)*2+lens.len()+offsets.len()+datalens.len()+literals;
+        int outsize = sizeof(int32)*2+lens.len()+offsets.len()+datalens.len()+literals;
         QUASIWRITE (outsize);
-        Buffer header(2*sizeof(int32));  header.put32 (outsize-sizeof(int32));  header.put32 (lens.len()/sizeof(int32));
+        Put32 (outsize-sizeof(int32));
+        Put32 (lens.len()/sizeof(int32));
         // Вывести содержимое буферов и несжатые данные в выходной поток
-        FWRITE (  header.buf,   header.len());
         FWRITE (    lens.buf,     lens.len());
         FWRITE ( offsets.buf,  offsets.len());
         FWRITE (datalens.buf, datalens.len());
@@ -419,51 +474,56 @@ int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int B
             FWRITE (buf + dataOffsets.get32(), datalens.get32());
         }
         FFLUSH();
-        header.free();
         // Отладочная статистика
-        debug (verbose>0 && printf(" Total %d bytes in %d matches (%d + %d = %d)\n", total, matches, header.len()+lens.len()+offsets.len()+datalens.len(), lit, header.len()+lens.len()+offsets.len()+datalens.len()+lit));
-        stat1 ("Compression", Size);}
-     skip_output: lens.free(); offsets.free(); datalens.free(); dataOffsets.free();
+        debug (verbose>0 && printf(" Total %d bytes in %d matches (%d + %d = %d)\n", total, matches, sizeof(int32)*2+lens.len()+offsets.len()+datalens.len(), lit, sizeof(int32)*2+lens.len()+offsets.len()+datalens.len()+lit));
     }
 
     // Записать финальный блок, содержащий несжавшийся остаток данных, и 0 - признак конца данных
    {int datalen = Base-last_match;
-    Put32 (sizeof(int32)*2 + datalen);
-    Put32 (0);                    // 0 matches in this block
-    Put32 (datalen);              // Длина остатка данных
-    FWRITE (buf+last_match, datalen); // Сами эти данные
-    Put32 (0);}                   // EOF flag (see below)
+    Put32 (sizeof(int32)*2 + datalen);  // Длина сжатого блока
+    Put32 (0);                          //   0 matches in this block
+    Put32 (datalen);                    //   Длина остатка данных
+    FWRITE (buf+last_match, datalen);   //   Сами эти данные
+    Put32 (0);}                         //   EOF flag (see below)
 finished:
     FCLOSE();
-    free(hasharr);
-    free(buf);
-    return errcode;
+    BigFree(hasharr);
+    BigFree(buf);
+    lens.free(); offsets.free(); datalens.free(); dataOffsets.free();
+    return errcode>=0? 0 : errcode;
 }
+#endif // FREEARC_DECOMPRESS_ONLY
 
-
-#define ReturnErrorCode(n)  { free(data0); free(buf0); return (n); }
 
 // Classical LZ77 decoder with sliding window
-int rep_decompress (unsigned BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int rep_decompress (unsigned BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata)
 {
-    // Фактический размер буфера сохранён во входных данных
-    if (callback ("read", &BlockSize, sizeof(int32), auxdata) != sizeof(int32))   return FREEARC_ERRCODE_IO;  // Error: can't read input data
-    byte *data = (byte*) malloc (BlockSize), *data0=data;
-    if (data==NULL)  return -1;                             // Error: not enough memory
-    stat1 ("Decompression",0);
+    int errcode, bufsize, ComprSize; byte *data0=NULL, *data, *buf0=NULL;
+
+    // Фактический размер словаря сохранён во входных данных
+    READ4(BlockSize);
+    data = data0 = (byte*) BigAlloc (BlockSize);
+
+    // Буфер, куда будут помещаться входные данные
+    bufsize = mymin(BlockSize,MAX_READ)+1024;
+    buf0 = (byte*) BigAlloc (bufsize);
+    if (data0==NULL || buf0==NULL)  ReturnErrorCode (FREEARC_ERRCODE_NOT_ENOUGH_MEMORY);
 
     // Цикл, каждая итерация которого обрабатывает один блок сжатых данных
     for (byte *last_data=data; ; last_data=data) {
 
         // Прочитаем один блок сжатых данных
-        int32 ComprSize;
-        if (callback ("read", &ComprSize, sizeof(int32), auxdata) != sizeof(int32))   return FREEARC_ERRCODE_IO;  // Error: can't read input data
+        READ4(ComprSize);
         if (ComprSize == 0)  break;    // EOF flag (see above)
 
-        byte *buf = (byte*) malloc(ComprSize), *buf0=buf;   // Буфер, куда будут помещены входные данные
-        if (buf==NULL)           ReturnErrorCode (FREEARC_ERRCODE_NOT_ENOUGH_MEMORY);       // Error: not enough memory
-        int Size = callback ("read", buf, ComprSize, auxdata);
-        if (Size != ComprSize)   ReturnErrorCode (FREEARC_ERRCODE_IO);       // Error: can't read input data
+        if (ComprSize > bufsize)
+        {
+            BigFree(buf0); bufsize=ComprSize; buf0 = (byte*) BigAlloc(bufsize);
+            if (buf0==NULL)  ReturnErrorCode (FREEARC_ERRCODE_NOT_ENOUGH_MEMORY);       // Error: not enough memory
+        }
+        byte *buf = buf0;
+
+        READ(buf, ComprSize);
 
         // Заголовок блока содержит размер таблиц lens/offsets/datalens; затем идут сами эти таблицы и наконец несжавшиеся данные
         int         num = *(int32*)buf;  buf += sizeof(int32);           // Количество совпадений (= количеству записей в таблицах lens/offsets/datalens)
@@ -477,140 +537,22 @@ int rep_decompress (unsigned BlockSize, int MinCompression, int MinMatchLen, int
             debug (verbose>1 && printf ("Match %d %d %d\n", -offsets[i], data-data0, lens[i]));
             // Если смещение попадает за начало буфера, то вычесть из него BlockSize, чтобы "обернуться" вокруг границы буфера
             int offset = offsets[i] <= data-data0 ?  offsets[i] : offsets[i]-BlockSize;
-            copymem (data, data-offset, lens[i]);  data += lens[i];
+            memcpy_lz_match (data, data-offset, lens[i]);  data += lens[i];
         }
         // Плюс ещё один блок несжавшихся данных в самом конце (возможно, нулевой длины)
         memcpy (data, buf, datalens[num]);  buf += datalens[num];  data += datalens[num];
 
         // Вывод распакованных данных, печать отладочной статистики и подготовка к следующей итерации цикла
-        int x = callback ("write", last_data, data-last_data, auxdata);  if (x<0)  ReturnErrorCode(x);
+        WRITE(last_data, data-last_data);
         debug (verbose>0 && printf( " Decompressed: %u => %u bytes\n", ComprSize+sizeof(int32), data-last_data) );
-        stat1 ("Decompression", data-last_data);
-        if (data==data0+BlockSize)  data=data0;
-        free(buf0);
+        if (data==data0+BlockSize)  data=data0;   // оборачивание через границу буфера может произойти только в конце блока
         // NB! check that buf==buf0+Size, data==data0+UncomprSize, and add buffer overflowing checks inside cycle
     }
-    free(data0);
-    return FREEARC_OK;
+    errcode = FREEARC_OK;
+finished:
+    BigFree(data0);  BigFree(buf0);  return errcode;
 }
 
-
-#ifndef REP_LIBRARY
-// ХОЗЧАСТЬ ************************************************************************
-#include "../Standalone.h"
-
-// Вывести время выполнения очередного шага алгоритма и запомнить название следующего шага
-void stat1 (char *nextmsg, int Size)
-{
-    if (! print_timings) return;
-
-    static char *msg = NULL;
-    static clock_t StartClock, PreviousClock;
-
-    if (msg == NULL) {
-        StartClock = clock();
-    } else {
-        double seconds = (clock()-PreviousClock) / (double)CLOCKS_PER_SEC;
-        printf( "%s: %.3lf seconds, speed %.3lf mb/sec\n", msg, seconds, Size/seconds/1000/1000);
-        if (nextmsg==NULL) {
-            double seconds = (clock()-StartClock) / (double)CLOCKS_PER_SEC;
-            printf( "Total %.3lf seconds, speed %.3lf mb/sec\n", seconds, Size/seconds/1000/1000);
-        }
-    }
-
-    msg = nextmsg;
-    PreviousClock = clock();
-}
-
-FILE *fin, *fout;
-int readFILE (/*void* param,*/ void* buf, int size)
-{
-    //FILE *fin = (FILE*)param;
-    return  read (fin, buf, size);
-}
-
-int writeFILE (/*void* param,*/ void* buf, int size)
-{
-    //FILE *fout = (FILE*)param;
-    if (fout)  write (fout, buf, size);
-    return 0;
-}
-
-// Разбор командной строки и вызов rep_compress/rep_decompress с соответствующими параметрами
-int main (int argc, char **argv)
-{
-    // Распаковка вместо упаковки?
-    int unpack = 0;
-
-    int bufsize=1<<27, mincompr=100, minlen=512, small_len=0, barrier=8<<20, hashbits=0, amplifier=1;
-
-    while (argv[1] && argv[1][0] == '-') {
-        switch( tolower(argv[1][1]) ) {
-            case 'v':   verbose++;                   break;
-            case 't':   print_timings++;             break;
-            case 'd':   if (argv[1][2])  barrier=atoi(argv[1]+2);  else unpack++;  break;
-            case 'b':   bufsize   = atoi(argv[1]+2)*(1<<20); break;
-            case 'l':   minlen    = atoi(argv[1]+2); break;
-            case 's':   small_len = atoi(argv[1]+2); break;
-            case 'h':   hashbits  = atoi(argv[1]+2); break;
-            case 'a':   amplifier = atoi(argv[1]+2); break;
-            default :   printf( "\n Unknown option '%s'\n", argv[1]);
-                        exit(1);
-        }
-        argv++, argc--;
-    }
-    if (!small_len)  small_len = minlen;
-
-    // Кроме опций, в командной строке должно быть ровно 1 или 2 аргумента
-    // (входной и опционально выходной файлы)
-    if (argc != 2  &&  argc != 3) {
-        printf( "\n Usage: rep [options] original-file [packed-file]");
-        printf( "\n   -bN --  use N mb for sliding window (recommended: half of total RAM)");
-        printf( "\n   -lN --  minimal match len");
-        printf( "\n   -dN --  barrier for smaller matches");
-        printf( "\n   -sN --  minimal match len after barrier");
-        printf( "\n   -hN --  hash bits");
-        printf( "\n   -aN --  coefficient of search \"amplification\"");
-#ifdef DEBUG
-        printf( "\n   -v  --  increment verbosity level (0 - default, 2 - maximum)");
-#else
-        printf( "\n   -v  --  verbosity level (you should recompile program with -DDEBUG to enable this option)");
-#endif
-        printf( "\n   -t  --  print operation timings");
-        printf( "\n" );
-        printf( "\n For decompress: rep -d [-v -t] packed-file [unpacked-file]");
-        printf( "\n" );
-        exit(2);
-    }
-
-    // Открыть входной файл
-    fin = fopen (argv[1], "rb");
-    if (fin == NULL) {
-        printf( "\n Can't open %s for read\n", argv[1]);
-        exit(3);
-    }
-
-    // Открыть выходной файл, если он задан в командной строке
-    fout = NULL;
-    if (argc == 3) {
-        fout = fopen (argv[2], "wb");
-        if (fout == NULL) {
-            printf( "\n Can't open %s for write\n", argv[2]);
-            exit(4);
-        }
-    }
-
-    if (!unpack) {
-        rep_compress   (bufsize, mincompr, minlen, barrier, small_len, hashbits, amplifier, readFILE, fin, writeFILE, fout);
-    } else {
-        rep_decompress (bufsize, mincompr, minlen, barrier, small_len, hashbits, amplifier, readFILE, fin, writeFILE, fout);
-    }
-
-    fclose(fin);  if (fout)  fclose(fout);
-    return 0;
-}
-
-#endif
 
 /* to do:
 +1. sliding window, In() function to read data

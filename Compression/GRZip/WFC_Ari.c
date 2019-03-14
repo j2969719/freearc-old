@@ -67,7 +67,7 @@
 #define WFC_Pos12              2048
 
 #define WFC_Init()                                    \
-  uint8 * WFCBuf=(uint8 *)malloc(Size);               \
+  uint8 * WFCBuf=(uint8 *)BigAlloc(Size);               \
   if (WFCBuf==NULL) return (GRZ_NOT_ENOUGH_MEMORY);   \
                                                       \
   sint32  WFC_List[WFC_MaxByte+1];                    \
@@ -83,7 +83,7 @@
   }                                                   \
   CharWeight[WFC_MaxByte]=-1;                         \
 
-#define WFC_Finish()  free(WFCBuf);                   \
+#define WFC_Finish()  BigFree(WFCBuf);                   \
 
 #define Update_Weight0(c)                             \
 {                                                     \
@@ -216,7 +216,7 @@
                                                     \
   WFC_Init()                                        \
                                                     \
-  Model_Log2RLE_1=(uint32*)malloc(ARI_MaxByte*(GRZ_Log2MaxBlockSize+1)*sizeof(uint32));\
+  Model_Log2RLE_1=(uint32*)BigAlloc(ARI_MaxByte*(GRZ_Log2MaxBlockSize+1)*sizeof(uint32));\
   if (Model_Log2RLE_1==NULL) {WFC_Finish();return (GRZ_NOT_ENOUGH_MEMORY);}\
                                                     \
   Model_L0_0[0]=Model_L0_0[1]=1;                    \
@@ -302,7 +302,7 @@ sint32 GRZip_WFC_Ari_Encode(uint8* Input,sint32 Size,uint8* Output)
     if (Output>=OutputEnd)
     {
       WFC_Finish();
-      free(Model_Log2RLE_1);
+      BigFree(Model_Log2RLE_1);
       return (GRZ_NOT_COMPRESSIBLE);
     }
 
@@ -466,7 +466,7 @@ sint32 GRZip_WFC_Ari_Encode(uint8* Input,sint32 Size,uint8* Output)
     CtxL2=(CtxL2<<1)|1;
   }
   WFC_Finish();
-  free(Model_Log2RLE_1);
+  BigFree(Model_Log2RLE_1);
   Low+=(Range>>=1); ARI_ShiftLow(); ARI_ShiftLow();
   ARI_ShiftLow(); ARI_ShiftLow(); ARI_ShiftLow();
   return (Output+Size-OutputEnd-24);
@@ -662,7 +662,7 @@ sint32 GRZip_WFC_Ari_Decode(uint8* Input,uint32 Size,uint8* Output)
 
   }
   WFC_Finish();
-  free(Model_Log2RLE_1);
+  BigFree(Model_Log2RLE_1);
   return (Output-SOutput);
 }
 

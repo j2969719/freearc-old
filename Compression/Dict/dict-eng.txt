@@ -1,0 +1,135 @@
+/*
+
+DICT - word replacing algorithm. Construction of the dictionary is done
+at runtime, the dictionary used is prepended to
+encoded data
+
+Macros that control the compilation:
+PPMD_VERSION - to create a version of the program, aimed at better compression with PPM algorithms
+DEBUG - collect statistics printed by -v option
+DICT_LIBRARY - does not include the main() and other functions necessary for standalone program
+
+To-do list:
++ Experiment with GOOD_WORD
++ Use rare characters (though for "exe, doc, etc. " it does not work )
++ To reduce the requirements for the words in "fast mode" (NB! Do so parameterized)
++ dictionary / coding Statistics
++ 7 times faster FindWord
++ Fixed the bugs like empty dictionary
++ Try words [a-z]+ - doesn't work!
++ Scan data - to use the hash with a guarantee of finding a word (as in coding)
++ Sort the dictionary to increase its compression ratio (separate 1 - and 2-byte lines)
++ Coding dictionary: separation of words and how many letters from the last word repeat
++ -DDICT_LIBRARY - don't define main() function
+- DictDecode() - use the read / write functions to work using a fixed amount of memory
+- Quit if found too few words, too little `weak chars` and in other borderline cases
+- Setting the parameters for selection of words, depending on the input data (ghc-src - VERY_GOOD_CNT=8000, rus - option_fast ...)
+- Encoding of the dictionary: the ends of words
+- exe: we love any chars!
+- Make all the variables local and use malloc()
+- Use the chr+' ' to encode the stolen chr - impossible
+
+
+Algorithm
+
+1. To pass the file, creating a list of words:
+* Hash table of the 4-byte elements notes word's counter (2 bytes), and the hash of its parent (2 bytes more)
+* Parent's hash is used to detect collisions, on a collision up to 13 re-hashings is done
+* For every word look up its count in the table:
+counter=0 -> add a word to create a list of words and counter:=1
+counter<5 -> counter++
+otherwise -> add to the word the next letter of the input text and repeat the loop
+* Upon exiting the loop begin it again with next two-letter word of the input text
+
+2. Traverse the list of words and pass counters of single-child words to their children (these words are easily identified
+by counter having the minimum possible value), based on the assumption that these
+counters counted occurences of the same children, before their birth.
+Then get on the list of words with the end in the beginning (first to handle derivatives, longer
+words) and the counters that are too rare, to pass counts to their parents. Counters are extracted from the hash table
+created on the first step
+
+3. Now we have a list of most common words with counts and the frequency of individual characters
+receiving the text that is easy to collect among other things in the first phase.
+By sorting both lists on frequencies, we will easily find out which characters can be used for
+encoding words and which words will be coded with one byte, and which with two-letter abbreviations
+
+4. Assign codes to words
+
+5. Output the dictionary to the output stream
+
+6. Build a small hash table of all of the used words and their partial beginnings.
+This hash should allow us to scan the text until the end of word and to determine its code.
+As the number of words <10k and their total length <100k, then the hash(table) should fully fit
+in the processor cache
+
+7. Encode text, using the hash
+
+
+How to prevent the emergence of PHANTOM WORDS WITH FREQUENCY 4?
+
+1. To pass on a list of words from the beginning to the end. If a parent has a minimum frequency
+which a word with child might have, it means that the current word - its
+only child and it's reasonable to assume that all instances of parental word
+were in fact the current word. In this case, pick up her (? pass count to the child?) and mark as "phantom frequency".
+as a result of all the phantom frequency should get passed to the most long words from the
+branch (IMPLEMENTED AS PART OF PHASE 2)
+
+2. Alternatively - to scan the file for the second time, counting the frequency of known words,
+but without creating new ones
+
+
+DISTRIBUTION OF WORDS BETWEEN single- and double-letter codes
+
+1. Give single-letter codes to most frequent words, irrespective of their length (implemented)
+2. Pass codes of too rare characters to words (implemented)
+
+
+Write text of single-letter WORDS at the beginning of the file, Double-letter - where they are used for the FIRST TIME
+
+0x11 0x12 abcde .... 0x11 0x12 (encodes the word abcde). And write _length_ of all the words at the beginning of the file
+
+
+USE FOR CHECKING OF WORDS (MIN_VISITS_TO_HAVE_SON, ALLOW_TO_EXTEND_WORD, GOOD_WORD)
+PROBABILITIES of characters and character combinations that can be gathered in PRELIMINARY PASS
+
+For example, ALLOW_TO_EXTEND_WORD (c1, c2) = True, if the probability of occurrence of c2 after c1 <10%
+In general, the principle of anti-context modelling should work - to remember what is really unusual
+
+
+IMPROVING THE COMPRESSION
+
+1. Extra pass to collect the real statistics (optimization of the dictionary while mitigating criterion GOOD_WORD)
+2. When forming the words, take into account the probability p0[-1], p0[0], p[-1], p[0] and cnt/cnt0 ratio
+to avoid words like "yteString" to the maximum extent possible
+3. If there is word 'Message' among Good_Words, reduce the count for the word 'essage' by four times
+(provided that there is no more than 2 words like '?essage'). This will do away tons of garbage
+4. For binary files: use more characters (now, the criterion there is word_count>10*char_count) (implemented)
+
+
+IMPROVING SPEED
+
+1. Step 4 bytes at a time, start words search from 2 bytes (implemented)
+2. After the collision seek a match in the CPU cache-line (16/32 bytes). Makes no sense - the number of hash collisions do not exceed 10-20%
+3. Have "abc", "abcd", "abcde" in the same line of CPU cache, and only after its exhaustion do a full update_hash()
+4. Bring back binary search, but do it only after a 1-2-4-byte indexing. In order
+to make it precise, it is necessary to compare the input text with both words, between which the word
+occured, and from closest by the number of letters, go back on his chain of prefix words.
+Separate binary search array from a full array of information according to words, to allow
+it without soap(?), climb in the cache memory (10K words - 40kb plus 100Kb of its text)
+
+
+DECREASING OF MEMORY USAGE
+
+1. The number of words created is 50-100 times smaller than the size of the file. Per every word, there must be
+16 bytes in the array FirstWord and 4 bytes in hash table scan_hash, but at the latter it is desirable to have
+a 4-fold reserve of elements to ensure high performance.
+Total is 32 bytes per word, equal to 1/32 of the input data,
+will take as much memory as the entire input file. In addition, in case of non-typical files
+It is desirable to have the opportunity to create a greater number of words
+2. Hash table can be reduced by half (implemented), the structure of Word reduced to 9 bytes (byte len, byte3 hash, byte hash0_high, cnt_t count)
+Total is 17 bytes per word (instead of 32), with 10-20% degradation of the final performance
+3. FirstWord - use the list of blocks, instead of fixed-size table
+4. If you add in the hash table only words of even (or a multiple of 4) length,
+its number can be reduced by half (or by 4 times).
+
+*/

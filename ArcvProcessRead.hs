@@ -19,8 +19,8 @@ import Process
 import Errors
 import FileInfo
 import Compression
-import Cmdline
-import Statistics
+import Options
+import UI
 import ArhiveStructure
 import ArhiveDirectory
 import ArhiveFileList
@@ -29,7 +29,8 @@ import ArcvProcessExtract
 
 -- |Инструкции, посылаемые процессом чтения входных данных процессу упаковки
 data Instruction
-  =   DebugLog String                         --   Вывод отладочного сообщения
+  =   DebugLog  String                        --   Вывод отладочного сообщения с отметкой времени
+  |   DebugLog0 String                        --                               без отметки
   |   CompressData BlockType Compressor Compressor Bool
                                               --   Начало блока архива
   |     FileStart FileInfo                    --     Начало очередного файла
@@ -54,8 +55,12 @@ notTheEnd  _       = True
 --   распаковывает данные из входных архивов.
 create_archive_structure_AND_read_files_PROCESS command archive oldarc files processDir arcComment writeRecoveryBlocks results backdoor pipe = do
   initPos <- archiveGetPos archive
-  -- Создадим процесс для распаковки файлов из входных архивов
-  decompress_pipe <- runAsyncP$ decompress_PROCESS command doNothing
+  -- При возникновении ошибки установим флаг для прерывания работы c_compress()
+  handleCtrlBreak "operationTerminated =: True" (operationTerminated =: True) $ do
+  -- Создадим процесс для распаковки файлов из входных архивов и гарантируем его корректное завершение
+  bracket (runAsyncP$ decompress_PROCESS command doNothing)
+          ( \decompress_pipe -> do sendP decompress_pipe Nothing; joinP decompress_pipe)
+          $ \decompress_pipe -> do
   -- Создадим кеш для упреждающего чтения архивируемых файлов
   withPool $ \pool -> do
   bufOps <- makeFileCache (opt_cache command) pool pipe
@@ -69,8 +74,6 @@ create_archive_structure_AND_read_files_PROCESS command archive oldarc files pro
   -- Заархивируем данные, разбивая файлы по dir-блокам
   directory_blocks <- foreach (splitToDirBlocks command files)
                               (createDirBlock archive processDir decompress_pipe params)
-                      -- При возникновении ошибки установим флаг для прерывания работы c_compress()
-                      `catch` (\e -> do programTerminated =: True; throwIO e)
 
   -- Запишем финальный блок (FOOTER_BLOCK), содержащий каталог служебных блоков архива и комментарий архива
   let write_footer_block blocks arcRecovery = do
@@ -81,9 +84,6 @@ create_archive_structure_AND_read_files_PROCESS command archive oldarc files pro
           return ()
   write_footer_block (header_block:directory_blocks) ""
 
-  -- Завершим работу подпроцесса распаковки
-  sendP decompress_pipe Nothing
-  joinP decompress_pipe
   -- Напечатаем статистику выполнения команды и сохраним её для возврата в вызывающую процедуру
   uiDoneArchive  >>=  writeIORef results
 
@@ -112,20 +112,19 @@ createDirBlock archive processDir decompress_pipe params@(command,bufOps,pipe,ba
 
 
 -- |Создать солид-блок, содержащий данные из переданных файлов
-createSolidBlock command processDir bufOps pipe decompress_pipe files = do
+createSolidBlock command processDir bufOps pipe decompress_pipe (orig_compressor,files) = do
   let -- Выберем алгоритм сжатия для этого солид-блока
-      -- и уменьшим словари его алгоритмов, ежели они больше объёма данных в блоке;
-      compressor = if copy_solid_block
-                     then cfCompressor (head files)
-                     else data_compressor command files
-                          .$compressionLimitDictionary (clipToMaxInt$ roundMem$ totalBytes+512)
-      -- Реально используемый компрессор отличается от записываемого в заголовок блока
-      -- вызовами "tempfile", вставленными между слишком прожорливыми алгоритмами
-      real_compressor = compressor.$compressionLimitMemoryUsage freearcGetCompressionMem (opt_limit_compression_memory command)
+      -- и уменьшим словари его алгоритмов, ежели они больше объёма данных в блоке
+      -- (+1%+512 потому что фильтры типа delta могут увеличить объём данных):
+      compressor | copy_solid_block = cfCompressor (head files)
+                 | otherwise        = orig_compressor.$limitDictionary (clipToMaxMemSize$ roundMemUp$ totalBytes+(totalBytes `div` 100)+512)
       -- Общий объём файлов в солид-блоке
       totalBytes = sum$ map (fiSize.cfFileInfo) files
       -- True, если это целый солид-блок из входного архива, который можно скопировать без изменений
       copy_solid_block = not(opt_recompress command)  &&  isWholeSolidBlock files
+  -- Ограничить компрессор объёмом свободной памяти и значением -lc
+  real_compressor <- limit_compressor command compressor
+  opt_testMalloc command &&& testMalloc
 
   -- Сжать солид-блок данных и отослать в следующий процесс список помещённых в него файлов
   unless (null files) $ do
@@ -136,7 +135,7 @@ createSolidBlock command processDir bufOps pipe decompress_pipe files = do
              sendP pipe (CopySolidBlock files)
              return$ map fileWithCRC files
            -- Если используется --nodata, то обойти чтение входных файлов
-           else if (compressor==[aFAKE_COMPRESSION]) then do
+           else if isReallyFakeCompressor compressor then do
              sendP pipe (FakeFiles files)
              return$ map fileWithCRC files
            -- Обычное чтение файлов для всех прочих (более типичных) случаев
@@ -151,11 +150,11 @@ printDebugInfo command pipe files totalBytes copy_solid_block compressor real_co
   --print (clipToMaxInt totalBytes, compressor)
   --print$ map (diskName.cfFileInfo) files   -- debugging tool :)
   when (opt_debug command) $ do
-    sendP pipe$ DebugLog$ "Compressing "++show_files3(length files)++" of "++show_bytes3 totalBytes
-    sendP pipe$ DebugLog$ if copy_solid_block then "  Copying "++join_compressor compressor  else "  Using "++join_compressor real_compressor
+    sendP pipe$ DebugLog$  "Compressing "++show_files3(length files)++" of "++show_bytes3 totalBytes
+    sendP pipe$ DebugLog0$ if copy_solid_block then "  Copying "++join_compressor compressor  else "  Using "++join_compressor real_compressor
     unless (copy_solid_block) $ do
-      sendP pipe$ DebugLog$ "  Memory for compression "++showMem (calcMem freearcGetCompressionMem   real_compressor)
-                                   ++", decompression "++showMem (calcMem freearcGetDecompressionMem real_compressor)
+      sendP pipe$ DebugLog0$ "  Memory for compression "++showMem (getCompressionMem   real_compressor)
+                                    ++", decompression "++showMem (getDecompressionMem real_compressor)
 
 
 ---------------------------------------------------------------------------------------------------
@@ -174,6 +173,7 @@ read_file _ pipe (receiveBuf, sendBuf) _ (DiskFile old_fi) = do
   let correctTotals files bytes  =  when (files/=0 || bytes/=0) (sendP pipe (CorrectTotals files bytes)) >> return Nothing
   -- Проверяем возможность открыть файл - он может быть залочен или его за это время могли элементарно стереть :)
   tryOpen (diskName old_fi)  >>=  maybe (correctTotals (-1) (-fiSize old_fi))  (\file -> do
+  ensureCtrlBreak "fileClose:read_file" (fileClose file) $ do  -- Гарантируем закрытие файла
   -- Перечитаем информацию о файле на случай, если он успел измениться
   rereadFileInfo old_fi file >>=  maybe (correctTotals (-1) (-fiSize old_fi))  (\fi -> do
   correctTotals 0 (fiSize fi - fiSize old_fi) -- Откорректируем показания UI, если размер файла успел измениться
@@ -187,7 +187,6 @@ read_file _ pipe (receiveBuf, sendBuf) _ (DiskFile old_fi) = do
           then readFile newcrc $! bytes+i len    -- Обновим счётчик прочитанных байт
           else return (finishCRC newcrc, bytes)  -- Выйдем из цикла, если файл окончился
   (crc,bytesRead) <- readFile aINIT_CRC 0     -- Прочитаем файл, получив его CRC и размер
-  fileClose file
   correctTotals 0 (bytesRead - fiSize fi)     -- Откорректируем показания UI, если размер файла отличается от возвращённого getFileInfo
   return$ Just$ FileWithCRC crc FILE_ON_DISK fi{fiSize=bytesRead} ))
 
@@ -221,14 +220,18 @@ read_file _ pipe (receiveBuf, sendBuf) decompress_pipe compressed_file = do
 -- для получения свободного буфера из кеша и освобождения использованного буфера, соответственно
 makeFileCache cache_size pool pipe = do
   -- Размер буферов, на которые будет разбит весь кеш
-  let onebuf | cache_size>=aLARGE_BUFFER_SIZE*16  =  aLARGE_BUFFER_SIZE
-             | otherwise                          =  aBUFFER_SIZE
+  let bufsize | cache_size>=aLARGE_BUFFER_SIZE*16  =  aLARGE_BUFFER_SIZE
+              | otherwise                          =  aBUFFER_SIZE
   -- Выделить память под кеш и натравить memoryAllocator на выделенный блок памяти
   heap                     <-  pooledMallocBytes pool cache_size
-  (getBlock, shrinkBlock)  <-  memoryAllocator   heap cache_size onebuf 256 (receive_backP pipe)
-  let -- Операции получения свободного буфера и отправления заполненного буфера следующему процессу
-      receiveBuf            =  do buf <- getBlock; return (buf, onebuf)
+  (getBlock, shrinkBlock)  <-  memoryAllocator   heap cache_size bufsize 256 (receive_backP pipe)
+  let -- Операция получения свободного буфера
+      receiveBuf            =  do buf <- getBlock
+                                  failOnTerminated
+                                  return (buf, bufsize)
+      -- Операция отправления заполненного буфера следующему процессу
       sendBuf buf size len  =  do shrinkBlock buf len
+                                  failOnTerminated
                                   when (len>0)$  do sendP pipe (DataChunk buf len)
   return (receiveBuf, sendBuf)
 

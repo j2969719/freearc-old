@@ -1,8 +1,9 @@
 // Multimedia preprocessing filter
 #include "../Compression.h"
+#include "mmdet.h"
 
-int mm_compress   (int skip_header, int is_float, int num_chan, int byte_size, int offset, int reorder, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
-int mm_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+int mm_compress   (int skip_header, int is_float, int num_chan, int byte_size, int offset, int reorder, CALLBACK_FUNC *callback, void *auxdata);
+int mm_decompress (CALLBACK_FUNC *callback, void *auxdata);
 
 
 #ifdef __cplusplus
@@ -25,9 +26,9 @@ public:
   MM_METHOD();
 
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_TTA)
   virtual void ShowCompressionMethod (char *buf);

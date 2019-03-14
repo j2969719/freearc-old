@@ -274,17 +274,17 @@ sint32 GRZip_StrongBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
   sint32    i,h;
   uint32    W;
 
-  uint32 *  Group=(uint32 *)malloc((Size+1)*sizeof(uint32));
+  uint32 *  Group=(uint32 *)BigAlloc((Size+1)*sizeof(uint32));
   if (Group==NULL) return (GRZ_NOT_ENOUGH_MEMORY);
 
-  sint32 *  Index=(sint32 *)malloc((Size+1)*sizeof(sint32));
-  if (Index==NULL) {free(Group);return (GRZ_NOT_ENOUGH_MEMORY);}
+  sint32 *  Index=(sint32 *)BigAlloc((Size+1)*sizeof(sint32));
+  if (Index==NULL) {BigFree(Group);return (GRZ_NOT_ENOUGH_MEMORY);}
 
-  sint32 *  Buckets=(sint32 *)malloc((BWT_MaxWord+1)*sizeof(sint32));
-  if (Buckets==NULL) {free(Index);free(Group);return (GRZ_NOT_ENOUGH_MEMORY);}
+  sint32 *  Buckets=(sint32 *)BigAlloc((BWT_MaxWord+1)*sizeof(sint32));
+  if (Buckets==NULL) {BigFree(Index);BigFree(Group);return (GRZ_NOT_ENOUGH_MEMORY);}
 
-  sint32 *  BGroups=(sint32 *)malloc((StrongBWT_TSortStackSize+3)*sizeof(sint32));
-  if (BGroups==NULL) {free(Buckets);free(Index);free(Group);return (GRZ_NOT_ENOUGH_MEMORY);}
+  sint32 *  BGroups=(sint32 *)BigAlloc((StrongBWT_TSortStackSize+3)*sizeof(sint32));
+  if (BGroups==NULL) {BigFree(Buckets);BigFree(Index);BigFree(Group);return (GRZ_NOT_ENOUGH_MEMORY);}
 
   memset(Buckets,0,(BWT_MaxWord+1)*sizeof(sint32));
 
@@ -380,7 +380,7 @@ sint32 GRZip_StrongBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
     BigDone[S]=1;h++;
   }
 
-  free(Buckets);free(BGroups);
+  BigFree(Buckets);BigFree(BGroups);
 
   LB=Group[0]>>24;
   W= Group[0]&0xFFFFFF;
@@ -394,7 +394,7 @@ sint32 GRZip_StrongBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
       Output[Ps-1]=LB;
     LB=c;
   }
-  free(Index);free(Group);
+  BigFree(Index);BigFree(Group);
   return W;
 }
 
@@ -406,7 +406,7 @@ sint32 GRZip_StrongBWT_Decode(uint8 * Input,sint32 Size,sint32 FBP)
   sint32 i;
   uint32 Sum;
 
-  uint32 * T=(uint32 *)malloc((Size+1)*sizeof(uint32));
+  uint32 * T=(uint32 *)BigAlloc((Size+1)*sizeof(uint32));
   if (T==NULL) return (GRZ_NOT_ENOUGH_MEMORY);
 
   memset(Count,0,BWT_MaxByte*sizeof(uint32));
@@ -433,7 +433,7 @@ sint32 GRZip_StrongBWT_Decode(uint8 * Input,sint32 Size,sint32 FBP)
     Input[i]=c;
   }
 
-  free(T);
+  BigFree(T);
   return GRZ_NO_ERROR;
 }
 
@@ -798,11 +798,11 @@ sint32 GRZip_FastBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
   uint8    Winner[FastBWT_NumGroups-1];
   uint32 * PtrHash[FastBWT_NumGroups];
 
-  sint32 * BigBucket=(sint32 *)malloc(BWT_MaxWord*sizeof(sint32));
+  sint32 * BigBucket=(sint32 *)BigAlloc(BWT_MaxWord*sizeof(sint32));
   if (BigBucket==NULL) return (GRZ_NOT_ENOUGH_MEMORY);
 
-  sint32 * Index=(sint32 *)malloc((Size+1)*sizeof(sint32));
-  if (Index==NULL) {free(BigBucket);return (GRZ_NOT_ENOUGH_MEMORY);}
+  sint32 * Index=(sint32 *)BigAlloc((Size+1)*sizeof(sint32));
+  if (Index==NULL) {BigFree(BigBucket);return (GRZ_NOT_ENOUGH_MEMORY);}
 
   sint32   GroupSize=Size/FastBWT_NumGroups;
 
@@ -845,14 +845,14 @@ sint32 GRZip_FastBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
         FastBWT_ShellSortDeph2(Index,Input,Lo,Hi,Size,&AML);
     if (AML<0)
     {
-      free(BigBucket);
-      free(Index);
+      BigFree(BigBucket);
+      BigFree(Index);
       return (GRZ_FAST_BWT_FAILS);
     }
     Lo=Hi+1;
   }
 
-  free(BigBucket);
+  BigFree(BigBucket);
 
   for (i=FastBWT_NumGroups-2;i>=0;i--)
   {
@@ -899,7 +899,7 @@ sint32 GRZip_FastBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
     for (j=i+Min;i<j;)
     {
       TreeReBuild(SmallBucketLo,SmallBucketHi,PtrHash,Winner,Input,Size,&AML);
-      if (AML<0) {free(Index); return (GRZ_FAST_BWT_FAILS);}
+      if (AML<0) {BigFree(Index); return (GRZ_FAST_BWT_FAILS);}
       for (;(i<j)&&(Output[i]==0xFF);i++)
       {
         uint8 GNum = Winner[FastBWT_NumGroups-2];
@@ -913,7 +913,7 @@ sint32 GRZip_FastBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
         if (i<Ptr) Output[Ptr]=(GNum+FastBWT_NumGroups-1)&(FastBWT_NumGroups-1);
 
         TreeUpdateFast(PtrHash,Winner,Input,Size,GNum,&AML);
-        if (AML<0) {free(Index); return (GRZ_FAST_BWT_FAILS);}
+        if (AML<0) {BigFree(Index); return (GRZ_FAST_BWT_FAILS);}
       }
       for (;(i<j)&&(Output[i]!=0xFF);i++)
       {
@@ -932,7 +932,7 @@ sint32 GRZip_FastBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
   for (;i<Size;i++)
     {
       TreeReBuild(SmallBucketLo,SmallBucketHi,PtrHash,Winner,Input,Size,&AML);
-      if (AML<0) {free(Index); return (GRZ_FAST_BWT_FAILS);}
+      if (AML<0) {BigFree(Index); return (GRZ_FAST_BWT_FAILS);}
       uint8 GNum = Winner[FastBWT_NumGroups-2];
       uint32 Indx= SmallBucketLo[GNum]++;
       uint32 Ptr = Index[Indx];
@@ -940,7 +940,7 @@ sint32 GRZip_FastBWT_Encode(uint8 * Input,sint32 Size,uint8 * Output)
       if ((Ptr&0xFFFFFF)==Size-1) Cum=i;
       PtrHash[GNum] =(uint32 *)(Input+(Index[Indx+1]&0xFFFFFF)-3);
    }
-  free(Index);
+  BigFree(Index);
   if (AML<0) return (GRZ_FAST_BWT_FAILS); else return (Cum);
 }
 
@@ -955,7 +955,7 @@ sint32 GRZip_FastBWT_Decode(uint8 * Input,sint32 Size,sint32 FBP)
   sint32 i;
   uint32 Sum;
 
-  uint32 * T=(uint32 *)malloc(Size*sizeof(uint32));
+  uint32 * T=(uint32 *)BigAlloc(Size*sizeof(uint32));
   if (T==NULL) return (GRZ_NOT_ENOUGH_MEMORY);
 
   memset(Count,0,BWT_MaxByte*sizeof(uint32));
@@ -976,7 +976,7 @@ sint32 GRZip_FastBWT_Decode(uint8 * Input,sint32 Size,sint32 FBP)
     Input[i]=c;
   }
 
-  free(T);
+  BigFree(T);
   return GRZ_NO_ERROR;
 }
 
@@ -1021,17 +1021,17 @@ sint32 GRZip_BWT_Encode(uint8 * Input,sint32 Size,uint8 * Output,sint32 FastMode
   }
   if (Input==Output)
   {
-    uint8 * Buf=(uint8 *)malloc(Size);
+    uint8 * Buf=(uint8 *)BigAlloc(Size);
     if (Buf==NULL) return (GRZ_NOT_ENOUGH_MEMORY);
     GRZip_BWT_FastBWT_Init(Input,Size);
     sint32 Result=GRZip_FastBWT_Encode(Input+FastBWT_NumOverShoot,Size,Buf);
     if ((Result!=GRZ_FAST_BWT_FAILS)&&(Result!=GRZ_NOT_ENOUGH_MEMORY))
     {
       memcpy(Output,Buf,Size);
-      free(Buf);
+      BigFree(Buf);
       return (Result);
     }
-    free(Buf);
+    BigFree(Buf);
     GRZip_BWT_FastBWT_Done(Input,Size);
     if (Result==GRZ_NOT_ENOUGH_MEMORY) return (Result);
     Result=GRZip_StrongBWT_Encode(Input,Size,Output);

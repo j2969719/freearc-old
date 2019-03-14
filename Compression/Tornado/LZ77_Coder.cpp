@@ -1,5 +1,6 @@
-// GPL'ed code for byte/bit/huffman/arithmetic encoders for LZ77 output
 // (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
+// (c) Joachim Henke
+// GPL'ed code for byte/bit/huffman/arithmetic encoders for LZ77 output
 
 
 // These len/dist codes are used to encode EOF and other special cases
@@ -20,7 +21,7 @@ struct LZ77_ByteCoder : OutputByteStream
     int chars, matches2, matches3, matches4;
 
     // Init and finish encoder
-    LZ77_ByteCoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad);
+    LZ77_ByteCoder (int coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad);
     void finish();
 
     void shift_occurs() {}   // Called after shifting buffer contents to the beginning
@@ -32,7 +33,8 @@ struct LZ77_ByteCoder : OutputByteStream
         if ((flagbit<<=2) == 0) {   // 1u<<32 for 64-bit systems
             debug (printf (" flags %x\n", flags));
             // Flags are filled now, save the old value and start a new one
-            *(uint32*)get_anchor()=flags, flags=0, flagbit=1;
+            setvalue32(get_anchor(), flags);
+            flags=0, flagbit=1;
             set_anchor(output), output+=4;
         }
 
@@ -65,11 +67,11 @@ struct LZ77_ByteCoder : OutputByteStream
     // Send info about diffed table. type=1..4 and len is number of table elements
     void encode_table (int type, int len)
     {
-        CHECK( 0, ("\nFatal error: encode_table() isn't implemented in this coder\n"));
+        CHECK( 0, (s,"Fatal error: encode_table() isn't implemented in this coder"));
     }
 };
 
-LZ77_ByteCoder::LZ77_ByteCoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad)
+LZ77_ByteCoder::LZ77_ByteCoder (int coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad)
     : OutputByteStream (callback, auxdata, chunk, pad)
 {
     chars = matches2 = matches3 = matches4 = 0;
@@ -85,7 +87,7 @@ void LZ77_ByteCoder::finish()
     printf ("\rLiterals %d, matches %d = %d + %d + %d                   \n",
         chars/1000, (matches2+matches3+matches4)/1000, matches2/1000, matches3/1000, matches4/1000);
 #endif
-    *(uint32*)get_anchor() = flags;
+    setvalue32(get_anchor(), flags);
     OutputByteStream::finish();
 }
 
@@ -98,7 +100,7 @@ struct LZ77_ByteDecoder : InputByteStream
     uint     flagpos;
 
     // Init decoder
-    LZ77_ByteDecoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata) : InputByteStream(callback, auxdata)  {flagpos=1;}
+    LZ77_ByteDecoder (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize) : InputByteStream(callback, auxdata, bufsize)  {flagpos=1;}
 
     // Decode next element and return true if it's a literal
     uint is_literal (void)
@@ -244,7 +246,7 @@ DistanceCoder::DistanceCoder (uint _extra_bits[], uint extra_bits_size) : VLE (0
     for ( ; dist < 512; code++) {
         xextra_bits[code] = _extra_bits[code];
         xbase_value[code] = dist << 8;
-        CHECK( _extra_bits[code] >= 8, ("\nFatal error: DistanceCoder::_extra_bits[%d] = %d is lower than minimum allowed value 8\n", code, _extra_bits[code]));
+        CHECK( _extra_bits[code] >= 8, (s,"Fatal error: DistanceCoder::_extra_bits[%d] = %d is lower than minimum allowed value 8", code, _extra_bits[code]));
         for (uint n = 0; n < (1<<(_extra_bits[code]-8)); n++) {
             xcode[512 + dist++] = (uchar)code;
         }
@@ -253,7 +255,7 @@ DistanceCoder::DistanceCoder (uint _extra_bits[], uint extra_bits_size) : VLE (0
     for ( ; code < extra_bits_size; code++) {  // distances up to 1G
         xextra_bits[code] = _extra_bits[code];
         xbase_value[code] = dist << 16;
-        CHECK( _extra_bits[code] >= 16, ("\nFatal error: DistanceCoder::_extra_bits[%d] = %d is lower than minimum allowed value 8\n", code, _extra_bits[code]));
+        CHECK( _extra_bits[code] >= 16, (s,"Fatal error: DistanceCoder::_extra_bits[%d] = %d is lower than minimum allowed value 8", code, _extra_bits[code]));
         for (uint n = 0; n < (1<<(_extra_bits[code]-16)); n++) {
             if (1024+dist >= elements(xcode))  break;
             xcode[1024 + dist++] = (uchar)code;
@@ -272,7 +274,7 @@ struct LZ77_BitCoder : OutputBitStream
 #endif
 
     // Init and finish encoder
-    LZ77_BitCoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad);
+    LZ77_BitCoder (int coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad);
     void finish();
 
     void shift_occurs() {}   // Called after shifting buffer contents to the beginning
@@ -314,11 +316,11 @@ struct LZ77_BitCoder : OutputBitStream
     // Send info about diffed table. type=1..4 and len is number of table elements
     void encode_table (int type, int len)
     {
-        CHECK( 0, ("\nFatal error: encode_table() isn't implemented in this coder\n"));
+        CHECK( 0, (s,"Fatal error: encode_table() isn't implemented in this coder"));
     }
 };
 
-LZ77_BitCoder::LZ77_BitCoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad)
+LZ77_BitCoder::LZ77_BitCoder (int coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad)
     : OutputBitStream (callback, auxdata, chunk, pad)
 {
 #ifdef STAT
@@ -346,7 +348,7 @@ void LZ77_BitCoder::finish()
 struct LZ77_BitDecoder : InputBitStream
 {
     // Init decoder
-    LZ77_BitDecoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata) : InputBitStream(callback, auxdata) {};
+    LZ77_BitDecoder (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize) : InputBitStream(callback, auxdata, bufsize) {};
 
     uint x;  // Temporary value used for storing first 9 bits of code
 
@@ -390,7 +392,7 @@ const int LEN_CODES  = elements(extra_lbits2);
 const int EOB_CODE = 256 + LEN_CODES*DIST_CODES;
 // Another code - copy char at repdist0 distance
 const int REPCHAR = EOB_CODE + 1;
-// On more code - repeat both length & distance
+// One more code - repeat both length & distance
 const int REPBOTH = EOB_CODE + 2;
 // Total amount of codes, including 7 spare ones
 const int CODES   = EOB_CODE + 10;
@@ -406,7 +408,7 @@ struct LZ77_Coder : public Coder
     int prevdist3, prevdist2, prevdist1, prevdist0;  // last distances encoded so far
 
     // Init and finish encoder
-    LZ77_Coder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad);
+    LZ77_Coder (int coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad);
     void finish();
 
     // Called after shifting buffer contents to the beginning
@@ -450,6 +452,7 @@ struct LZ77_Coder : public Coder
         // Also invalidates prevdist0 because it should contain only real distances, otherwise check for REPCHAR may crash
         if (len>100) {
             if (len>IMPOSSIBLE_LEN) {
+                debug (printf (" TABLE: %d*%d\n", len-IMPOSSIBLE_LEN, dist));
                 prevdist0=-1;
                 if (len<=IMPOSSIBLE_LEN+4)  len -= IMPOSSIBLE_LEN-100;
             } else {
@@ -479,7 +482,7 @@ struct LZ77_Coder : public Coder
 };
 
 template <class Coder>
-LZ77_Coder<Coder> :: LZ77_Coder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad) :
+LZ77_Coder<Coder> :: LZ77_Coder (int coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad) :
     Coder (callback, auxdata, chunk, pad, CODES)
 {
 #ifdef STAT
@@ -517,7 +520,7 @@ template <class Decoder>
 struct LZ77_Decoder : Decoder
 {
     // Init decoder
-    LZ77_Decoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata) : Decoder (callback, auxdata, CODES)
+    LZ77_Decoder (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize) : Decoder (callback, auxdata, bufsize, CODES)
     {
         iterate_var(i,REPDIST_CODES)  prevdists[i]=0;
         prevdist = prevdists+REPDIST_CODES;
@@ -578,3 +581,118 @@ struct LZ77_Decoder : Decoder
     }
 };
 
+
+// Dynamic coder (selects at run-time between byte/bit/huffman/ari coders) ************************
+struct LZ77_DynamicCoder
+{
+    bool support_tables;
+    int coder;
+    LZ77_ByteCoder                         coder1;
+    LZ77_BitCoder                          coder2;
+    LZ77_Coder<HuffmanEncoder<EOB_CODE> >  coder3;
+    LZ77_Coder<ArithCoder<EOB_CODE> >      coder4;
+
+    // Init and finish encoder
+    LZ77_DynamicCoder (int _coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad);
+    void finish()
+    {
+        switch (coder)
+        {
+        case 1: return coder1.finish();
+        case 2: return coder2.finish();
+        case 3: return coder3.finish();
+        case 4: return coder4.finish();
+        }
+    }
+
+    void shift_occurs()
+    {
+        switch (coder)
+        {
+        case 1: return coder1.shift_occurs();
+        case 2: return coder2.shift_occurs();
+        case 3: return coder3.shift_occurs();
+        case 4: return coder4.shift_occurs();
+        }
+    }
+
+    // Writes match/literal into output. Returns 0 - literal encoded, 1 - match encoded
+    int encode (int len, byte *current, byte *match, const int MINLEN)
+    {
+        switch (coder)
+        {
+        case 1: return coder1.encode (len, current, match, MINLEN);
+        case 2: return coder2.encode (len, current, match, MINLEN);
+        case 3: return coder3.encode (len, current, match, MINLEN);
+        case 4: return coder4.encode (len, current, match, MINLEN);
+        }
+    }
+
+    // Send info about diffed table. type=1..4 and len is number of table elements
+    void encode_table (int type, int len);
+
+    int error()
+    {
+        switch (coder)
+        {
+        case 1: return coder1.error();
+        case 2: return coder2.error();
+        case 3: return coder3.error();
+        case 4: return coder4.error();
+        }
+    }
+
+    void put8 (uint c)
+    {
+        switch (coder)
+        {
+        case 1: return coder1.put8(c);
+        case 2: return coder2.put8(c);
+        case 3: return coder3.put8(c);
+        case 4: return coder4.put8(c);
+        }
+    }
+
+    void put32 (uint c)
+    {
+        switch (coder)
+        {
+        case 1: return coder1.put32(c);
+        case 2: return coder2.put32(c);
+        case 3: return coder3.put32(c);
+        case 4: return coder4.put32(c);
+        }
+    }
+
+    void flush()
+    {
+        switch (coder)
+        {
+        case 1: return coder1.flush();
+        case 2: return coder2.flush();
+        case 3: return coder3.flush();
+        case 4: return coder4.flush();
+        }
+    }
+};
+
+LZ77_DynamicCoder::LZ77_DynamicCoder (int _coder, CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad):
+    coder1 (_coder, callback, auxdata, _coder==1? chunk : 0, pad),
+    coder2 (_coder, callback, auxdata, _coder==2? chunk : 0, pad),
+    coder3 (_coder, callback, auxdata, _coder==3? chunk : 0, pad),
+    coder4 (_coder, callback, auxdata, _coder==4? chunk : 0, pad)
+{
+    coder = _coder;
+    support_tables = (coder>=3);
+}
+
+void LZ77_DynamicCoder::encode_table (int type, int len)
+{
+    switch (coder)
+    {
+    case 1: return coder1.encode_table (type, len);
+    case 2: return coder2.encode_table (type, len);
+    case 3: return coder3.encode_table (type, len);
+    case 4: return coder4.encode_table (type, len);
+    }
+}

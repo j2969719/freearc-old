@@ -5,54 +5,57 @@ extern "C" {
 }
 
 
-int external_program (bool IsCompressing, CALLBACK_FUNC *callback, VOID_FUNC *auxdata, char *infile, char *outfile, char *cmd, char *name, int MinCompression, double *addtime)
+int external_program (bool IsCompressing, CALLBACK_FUNC *callback, void *auxdata, char *infile, char *outfile, char *cmd, char *name, int MinCompression, double *addtime)
 {
-    BYTE* Buf = (BYTE*) malloc(LARGE_BUFFER_SIZE);  // буфер, используемый для чтения/записи данных
-    int x;                                          // код, возвращённый последней операцией чтения/записи
-
-    // TRUE, если в начало сжатого потока записывается 0/1 - данные несжаты/сжаты
-    bool useHeader = !strequ(name,"tempfile");
+    BYTE* Buf = (BYTE*) BigAlloc(LARGE_BUFFER_SIZE);  // буфер, используемый для чтения/записи данных
+    if (!Buf)  {return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;}
+    int x;                                            // код, возвращённый последней операцией чтения/записи
+    int ExitCode = 0;                                 // код возврата внешней программы
+    bool useHeader = !strequ(name,"tempfile");        // TRUE, если в начало сжатого потока записывается 0/1 - данные несжаты/сжаты
 
     // Перепишем входные данные во временный файл
     remove (infile);
-    remove (outfile);
     FILE *f = NULL;
-    int bytes = 0;
+    uint64 bytes = 0;
     BYTE runCmd = 1;
     if (!IsCompressing && useHeader)  checked_read (&runCmd, 1);
     while ( (x = callback ("read", Buf, LARGE_BUFFER_SIZE, auxdata)) > 0 )
     {
         if (f==NULL)  {f = fopen (infile, "wb");  // Не открываем файл пока не прочтём хоть сколько-нибудь данных (для решения проблем с перепаковкой солид-блоков)
+        	       if (!f)  {x=FREEARC_ERRCODE_IO; break;}
                        registerTemporaryFile (infile,f);}
-        if (runCmd!=0 && runCmd!=1) {            // Для совместимости со старыми версиями FreeArc, которые не добавляли 1 перед сжатыми данными (убрать из FreeArc 0.50!)
+        if (runCmd!=0 && runCmd!=1) {            // Для совместимости со старыми версиями FreeArc, которые не добавляли 1 перед сжатыми данными (убрать из FreeArc 0.80!)
             outfile = "data7777";
-            write (f, &runCmd, 1);   bytes+=1;
-            runCmd=1;
+            bytes += 1;
+            if (file_write(f,&runCmd,1) != 1)   {x=FREEARC_ERRCODE_IO; break;}
+            runCmd = 1;
         }
-        write (f, Buf, x);   bytes+=x;
+        bytes += x;
+        if (file_write(f,Buf,x) != x)           {x=FREEARC_ERRCODE_IO; break;}
     }
-    FreeAndNil(Buf);
+    BigFree(Buf);  Buf = NULL;
     unregisterTemporaryFile (infile);
-    fclose (f);
-    if (x)  {remove (infile); return x;}   // Если при чтении произошла ошибка - выходим
-
+    fclose (f);    f = NULL;
+    if (x)  {remove (infile); return x;}   // Если при чтении/записи произошла ошибка - выходим
 
     // Если cmd пусто - диск используется просто для буферизации данных перед дальнейшим сжатием.
     // Если runCmd==0 - данные были скопированы без сжатия
+    remove (outfile);
     registerTemporaryFile (infile);
     registerTemporaryFile (outfile);
     if (*cmd && runCmd) {
-        printf ("\n%s %d bytes with ", IsCompressing? "Compressing":"Unpacking", bytes);
-        double time0 = getGlobalTime();
-        system (cmd);
-        if (addtime)  *addtime += getGlobalTime() - time0;
+    	char temp[30];
+        printf ("\n%s %s bytes with %s\n", IsCompressing? "Compressing":"Unpacking", show3(bytes,temp), cmd);
+        double time0 = GetGlobalTime();
+        ExitCode = system (cmd);
+        printf ("\nErrorlevel=%d\n", ExitCode);
+        if (addtime)  *addtime += GetGlobalTime() - time0;
     } else {
         rename (infile, outfile);
     }
 
-
-    // Прочитаем выходные данные из временного файла
-    f = fopen (outfile, "rb" );
+    // Откроем выходной файл, если команда завершилась успешно и его можно открыть
+    if(ExitCode==0)    f = fopen (outfile, "rb" );
     if (f) {
         registerTemporaryFile (outfile,f);
         unregisterTemporaryFile (infile);
@@ -63,16 +66,20 @@ int external_program (bool IsCompressing, CALLBACK_FUNC *callback, VOID_FUNC *au
         unregisterTemporaryFile (outfile);
         unregisterTemporaryFile (infile);
         if (IsCompressing && !useHeader)    {remove (infile); return FREEARC_ERRCODE_GENERAL;}
-        outfile = infile;
+        remove (outfile);
+        if (!IsCompressing)                 {remove (infile); return FREEARC_ERRCODE_INVALID_COMPRESSOR;}
+        rename (infile, outfile);
         f = fopen (outfile, "rb" );
-        if (!f)                             {remove (outfile); return FREEARC_ERRCODE_GENERAL;}
+        if (!f)                             {remove (infile); remove (outfile); return FREEARC_ERRCODE_IO;}
         registerTemporaryFile (outfile,f);
         BYTE uncompressed[1] = {0};
         if (IsCompressing)                  checked_write(uncompressed,1);
     }
+
+    // Прочитаем выходные данные из файла
     QUASIWRITE (get_flen(f));
-    Buf = (BYTE*) malloc(LARGE_BUFFER_SIZE);
-    while ((x = read (f, Buf, LARGE_BUFFER_SIZE)) > 0)
+    Buf = (BYTE*) BigAlloc(LARGE_BUFFER_SIZE);
+    while ((x = file_read (f, Buf, LARGE_BUFFER_SIZE)) > 0)
     {
         checked_write (Buf, x);
     }
@@ -80,21 +87,8 @@ finished:
     unregisterTemporaryFile (outfile);
     fclose (f);
     remove (outfile);
-    FreeAndNil(Buf);
+    BigFree(Buf);
     return x;         // 0, если всё в порядке, и код ошибки иначе
-}
-
-
-#ifndef FREEARC_DECOMPRESS_ONLY
-int external_compress (char *name, char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, VOID_FUNC *auxdata, double *addtime)
-{
-    return external_program (TRUE, callback, auxdata, datafile, packedfile, packcmd, name, 0, addtime);
-}
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
-
-int external_decompress (char *name, char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, VOID_FUNC *auxdata, double *addtime)
-{
-    return external_program (FALSE, callback, auxdata, packedfile, datafile, unpackcmd, name, 0, addtime);
 }
 
 
@@ -102,18 +96,84 @@ int external_decompress (char *name, char *packcmd, char *unpackcmd, char *dataf
 /* Реализация класса EXTERNAL_METHOD               */
 /*-------------------------------------------------*/
 
-// Функция распаковки
-int EXTERNAL_METHOD::decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+char *prepare_cmd (EXTERNAL_METHOD *p, char *cmd)
 {
-    return external_decompress (name, packcmd, unpackcmd, datafile, packedfile, callback, auxdata, &addtime);
+    // Replace "{options}" or "{-option }" in packcmd with string like "-m48 -r1 " (for "pmm:m48:r1" method string)
+    char *OPTIONS_STR = "{options}",  *OPTION_STR = "option";
+    char OPTIONS_START = '{',  OPTIONS_END = '}';
+
+    // Params of option template in cmd line
+    char before[MAX_METHOD_STRLEN] = "-";
+    char after[MAX_METHOD_STRLEN]  =  " ";
+    char *replaced = strstr (cmd, OPTIONS_STR);
+    int  how_many  = strlen (OPTIONS_STR);
+
+    // If there is no "{options}" in cmd - look for "{...option...}"
+    if (!replaced)
+    {
+        // search for '{'
+        for (char *p1 = cmd; *p1; p1++)
+        {
+            if (*p1 == OPTIONS_START)
+            {
+                // search for '}'
+                char *p2 = p1, *p12 = NULL;
+                for (; *p2; p2++)
+                {
+                    if (*p2 == OPTIONS_END)  break;
+                    if (start_with(p2, OPTION_STR))  p12 = p2;
+                }
+                // if we have "option" inside of "{...}"
+                if (*p2==OPTIONS_END && p12)
+                {
+                    // Save strings before and after "option" and how many chars in cmd to replace
+                    strncopy (before, p1+1, p12-p1-1 + 1);
+                    strncopy (after,  p12+strlen(OPTION_STR), p2-p12-strlen(OPTION_STR) + 1);
+                    replaced = p1;
+                    how_many = p2-p1+1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // If we found any option template in cmd
+    if (replaced)
+    {
+        // Collect in param_str options in cmd format
+        char param_str[MAX_METHOD_STRLEN] = "";
+        for (char **opt = p->options; *opt; opt++)
+        {
+            strcat (param_str, before);
+            strcat (param_str, *opt);
+            strcat (param_str, after);
+        }
+        // Finally replace template with collected or default options
+        cmd = str_replace_n (cmd, replaced, how_many, *p->options? param_str : p->defaultopt);
+    }
+
+    return cmd;
+}
+
+
+// Функция распаковки
+int EXTERNAL_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
+{
+    char *cmd = prepare_cmd (this, unpackcmd);
+    int result = external_program (FALSE, callback, auxdata, packedfile, datafile, cmd, name, 0, &addtime);
+    if (cmd != unpackcmd)  delete cmd;
+    return result;
 }
 
 #ifndef FREEARC_DECOMPRESS_ONLY
 
 // Функция упаковки
-int EXTERNAL_METHOD::compress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int EXTERNAL_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
-    return external_compress (name, packcmd, unpackcmd, datafile, packedfile, callback, auxdata, &addtime);
+    char *cmd = prepare_cmd (this, packcmd);
+    int result = external_program (TRUE, callback, auxdata, datafile, packedfile, cmd, name, 0, &addtime);
+    if (cmd != packcmd)  delete cmd;
+    return result;
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_EXTERNAL)
@@ -125,16 +185,21 @@ void EXTERNAL_METHOD::ShowCompressionMethod (char *buf)
         sprintf (buf, "pmm:%d:%s%s", order, MemStr, MRMethod==2? ":r2": (MRMethod==0? ":r0":""));
     } else {
         strcpy (buf, name);
+        for (char** opt=options; *opt; opt++)
+        {
+            strcat(buf, ":");
+            strcat(buf, *opt);
+        }
     }
 }
 
 // Изменить потребность в памяти, заодно оттюнинговав order
 void EXTERNAL_METHOD::SetCompressionMem (MemSize _mem)
 {
-  if (can_set_mem && _mem>0) {
-    order  +=  int (trunc (log(double(_mem)/cmem) / log(2) * 4));
-    cmem=dmem=_mem;
-  }
+    if (can_set_mem && _mem>0) {
+        order  +=  int (trunc (log(double(_mem)/cmem) / log(2) * 4));
+        cmem=dmem=_mem;
+    }
 }
 
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)
@@ -210,11 +275,18 @@ COMPRESSION_METHOD* parse_EXTERNAL (char** parameters, void *method_template)
 {
   if (strequ (parameters[0], ((EXTERNAL_METHOD*)method_template)->name)) {
     // Если название метода (нулевой параметр) соответствует названию проверяемого EXTERNAL метода, то разберём остальные параметры
-
     EXTERNAL_METHOD *p = new EXTERNAL_METHOD (*(EXTERNAL_METHOD*)method_template);
-    int error = 0;  // Признак того, что при разборе параметров произошла ошибка
-    // ... Но никаких параметров пока что и нет :)
-    if (error)  {delete p; return NULL;}  // Ошибка при парсинге параметров метода
+
+    // Копируем параметры метода внутрь нашего объекта
+    char **param = parameters+1, **opt = p->options, *place = p->option_strings;
+    while (*param)
+    {
+      strcpy (place, *param++);
+      *opt++ = place;
+      place += strlen(place)+1;
+    }
+    *opt++ = NULL;
+
     return p;
   } else {
     return NULL;   // Это не метод EXTERNAL
@@ -225,7 +297,7 @@ COMPRESSION_METHOD* parse_EXTERNAL (char** parameters, void *method_template)
 // Добавить в таблицу методов сжатия описанный пользователем в arc.ini внешний упаковщик.
 // params содержит описание упаковщика из arc.ini. Возвращает 1, если описание корректно.
 // Пример описания:
-//   [External compressor:ccm123,ccmx123,ccm125,ccmx125]
+//   [External compressor: ccm123, ccmx123, ccm125, ccmx125]
 //   mem = 276
 //   packcmd   = {compressor} c $$arcdatafile$$.tmp $$arcpackedfile$$.tmp
 //   unpackcmd = {compressor} d $$arcpackedfile$$.tmp $$arcdatafile$$.tmp
@@ -256,7 +328,7 @@ int AddExternalCompressor (char *params)
     EXTERNAL_METHOD *version  =  new EXTERNAL_METHOD[versions_count];
     for (int i=0; i<versions_count; i++) {
         // Инициализируем шаблон EXTERNAL_METHOD именем очередной версии и параметрами по умолчанию
-        version[i].name           = version_name[i];
+        version[i].name           = trim_spaces(version_name[i]);
         version[i].MinCompression = 100;
         version[i].can_set_mem    = FALSE;
         version[i].cmem           = 0;
@@ -265,6 +337,7 @@ int AddExternalCompressor (char *params)
         version[i].packedfile     = "$$arcpackedfile$$.tmp";
         version[i].packcmd        = "";
         version[i].unpackcmd      = "";
+        version[i].defaultopt     = "";
     }
 
 
@@ -302,6 +375,7 @@ int AddExternalCompressor (char *params)
             else if (strequ (left, "unpackcmd"))   version[i].unpackcmd   = subst (strdup_msg(right), "{compressor}", version[i].name);
             else if (strequ (left, "datafile"))    version[i].datafile    = subst (strdup_msg(right), "{compressor}", version[i].name);
             else if (strequ (left, "packedfile"))  version[i].packedfile  = subst (strdup_msg(right), "{compressor}", version[i].name);
+            else if (strequ (left, "default"))     version[i].defaultopt  = subst (strdup_msg(right), "{compressor}", version[i].name);
             else                                   error=1;
 
             if (error)  return 0;
@@ -314,11 +388,10 @@ int AddExternalCompressor (char *params)
     // о том, какие команды нужно вызывать для его реализации, через какие файлы
     // передавать данные и т.д.
     for (int i=0; i<versions_count; i++) {
-        AddCompressionMethod2 (parse_EXTERNAL, &version[i]);
+        AddExternalCompressionMethod (parse_EXTERNAL, &version[i]);
     }
     return 1;
 }
-
 
 // Псевдо-метод сжатия, записывающий все получаемые им данные в файл, и затем считывающий его.
 // Автоматически вставляется между жрущими много памяти алгоритмами, например REP и LZMA

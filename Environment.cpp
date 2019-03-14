@@ -1,3 +1,4 @@
+#define _WIN32_WINNT 0x0500
 #include <stdio.h>
 #include <sys/stat.h>
 #include <utime.h>
@@ -6,16 +7,122 @@
 #include "Environment.h"
 #include "Compression/Compression.h"
 
-// Изменим настройки RTS, включив compacting GC начиная с 20 mb: "-c1 -M2000m" (отключено до исправления ошибки в compacting GC)
-char *ghc_rts_opts = "-c1 -M2000m";
+// Изменим настройки RTS, включив compacting GC начиная с 40 mb:
+char *ghc_rts_opts = "-c1 -M4000m";
+
+
+/* ********************************************************************************************************
+*  Find largest contiguous memory block available and dump information about all available memory blocks
+***********************************************************************************************************/
+
+void memstat(void);
+
+struct LargestMemoryBlock
+{
+  void   *p;
+  size_t size;
+  LargestMemoryBlock();
+  ~LargestMemoryBlock()         {free();}
+  void alloc(size_t n);
+  void free();
+  void test();
+};
+
+LargestMemoryBlock::LargestMemoryBlock() : p(NULL)
+{
+  size_t a=0, b=UINT_MAX;
+  while (b-a>1) {
+    free();
+    size_t c=(a+b)/2;
+    alloc(c);
+    if(p) a=c;  else b=c;
+  }
+}
+
+void LargestMemoryBlock::test()
+{
+  if ((size>>20)>0) {
+    printf("Allocated %4d mb, addr=%p\n", size>>20, p);
+    LargestMemoryBlock next;
+    next.test();
+  } else {
+    memstat();
+  }
+}
+
+
+void TestMalloc (void)
+{
+  memstat();
+  printf("\n");
+  LargestMemoryBlock m;
+  m.test();
+}
+
 
 #ifdef FREEARC_WIN
 
 #include <windows.h>
-#include <wininet.h>
 #include <stdio.h>
 #include <conio.h>
 #include <time.h>
+
+// Provide VirtualAlloc operations for testing
+void LargestMemoryBlock::alloc(size_t n) {p = VirtualAlloc (0, size=n, MEM_RESERVE, PAGE_READWRITE);};
+void LargestMemoryBlock::free ()         {VirtualFree (p, 0, MEM_RELEASE); p=NULL;};
+
+
+// Use to convert bytes to MB
+#define DIV (1024*1024)
+
+// Specify the width of the field in which to print the numbers.
+// The asterisk in the format specifier "%*I64d" takes an integer
+// argument and uses it to pad and right justify the number.
+#define WIDTH 4
+
+void memstat (void)
+{
+  MEMORYSTATUSEX statex;
+
+  statex.dwLength = sizeof (statex);
+
+  GlobalMemoryStatusEx (&statex);
+
+  printf ("There is  %*ld percent of memory in use.\n",
+          WIDTH, statex.dwMemoryLoad);
+  printf ("There are %*I64d total Mbytes of physical memory.\n",
+          WIDTH, statex.ullTotalPhys/DIV);
+  printf ("There are %*I64d free Mbytes of physical memory.\n",
+          WIDTH, statex.ullAvailPhys/DIV);
+  printf ("There are %*I64d total Mbytes of paging file.\n",
+          WIDTH, statex.ullTotalPageFile/DIV);
+  printf ("There are %*I64d free Mbytes of paging file.\n",
+          WIDTH, statex.ullAvailPageFile/DIV);
+  printf ("There are %*I64d total Mbytes of virtual memory.\n",
+          WIDTH, statex.ullTotalVirtual/DIV);
+  printf ("There are %*I64d free Mbytes of virtual memory.\n",
+          WIDTH, statex.ullAvailVirtual/DIV);
+
+  // Show the amount of extended memory available.
+
+  printf ("There are %*I64d free Mbytes of extended memory.\n",
+          WIDTH, statex.ullAvailExtendedVirtual/DIV);
+}
+
+#else
+
+// Provide malloc operations for testing
+void LargestMemoryBlock::alloc(size_t n) {p=malloc(size=n);};
+void LargestMemoryBlock::free ()         {::free(p); p=NULL;};
+
+void memstat (void)
+{
+}
+
+#endif
+
+
+#ifdef FREEARC_WIN
 
 /*
 void SetDateTimeAttr(const char* Filename, time_t t)
@@ -42,33 +149,10 @@ void SetDateTimeAttr(const char* Filename, time_t t)
 */
 
 
-#define LARGE_STRING 1024
-
-char Saved_Title[LARGE_STRING];
-bool Saved = FALSE;
-
-void EnvSetConsoleTitle (char *title)
+CFILENAME GetExeName (CFILENAME buf, int bufsize)
 {
-  if (!Saved) {
-    GetConsoleTitle (Saved_Title, sizeof(Saved_Title));
-    Saved = TRUE;
-  }
-  SetConsoleTitle (title);
-}
-
-void EnvResetConsoleTitle (void)
-{
-  if (Saved) {
-    SetConsoleTitle (Saved_Title);
-    Saved = FALSE;
-  }
-}
-
-CFILENAME GetExeName (void)
-{
-  static char buf[LARGE_STRING];
-  GetModuleFileNameW (NULL, (CFILENAME)buf, LARGE_STRING);
-  return (CFILENAME)buf;
+  GetModuleFileNameW (NULL, buf, bufsize);
+  return buf;
 }
 
 unsigned GetPhysicalMemory (void)
@@ -76,6 +160,12 @@ unsigned GetPhysicalMemory (void)
   MEMORYSTATUS buf;
     GlobalMemoryStatus (&buf);
   return buf.dwTotalPhys;
+}
+
+unsigned GetMaxMemToAlloc (void)
+{
+  LargestMemoryBlock block;
+  return block.size - 5*mb;
 }
 
 unsigned GetAvailablePhysicalMemory (void)
@@ -92,7 +182,7 @@ int GetProcessorsCount (void)
   return si.dwNumberOfProcessors;
 }
 
-void SetFileDateTime(const CFILENAME Filename, time_t mtime)
+void SetFileDateTime (const CFILENAME Filename, time_t mtime)
 {
   struct _stat st;
     _wstat (Filename, &st);
@@ -102,15 +192,42 @@ void SetFileDateTime(const CFILENAME Filename, time_t mtime)
   _wutime (Filename, &times);
 }
 
+// Execute program `filename` in the directory `curdir` optionally waiting until it finished
+void RunProgram (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+{
+  STARTUPINFO si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory (&si, sizeof(si));
+  si.cb = sizeof(si);
+  ZeroMemory (&pi, sizeof(pi));
+  BOOL process_created = CreateProcessW (filename, NULL, NULL, NULL, FALSE, 0, NULL, curdir, &si, &pi);
+
+  if (process_created && wait_finish)
+      WaitForSingleObject (pi.hProcess, INFINITE);
+}
+
+// Execute file `filename` in the directory `curdir` optionally waiting until it finished
+void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+{
+  SHELLEXECUTEINFO sei;
+  ZeroMemory(&sei, sizeof(SHELLEXECUTEINFO));
+  sei.cbSize = sizeof(SHELLEXECUTEINFO);
+  sei.fMask = (wait_finish? SEE_MASK_NOCLOSEPROCESS : 0);
+  sei.hwnd = GetActiveWindow();
+  sei.lpFile = filename;
+  sei.lpDirectory = curdir;
+  sei.nShow = SW_SHOW;
+  DWORD rc = ShellExecuteEx(&sei);
+  if (rc && wait_finish)
+    WaitForSingleObject(sei.hProcess, INFINITE);
+}
+
 
 #else // For Unix:
 
 
 #include <unistd.h>
 #include <sys/sysinfo.h>
-
-void EnvSetConsoleTitle    (char *)      {}
-void EnvResetConsoleTitle  (void)        {}
 
 unsigned GetPhysicalMemory (void)
 {
@@ -119,11 +236,18 @@ unsigned GetPhysicalMemory (void)
   return si.totalram*si.mem_unit;
 }
 
+unsigned GetMaxMemToAlloc (void)
+{
+  //struct sysinfo si;
+  //  sysinfo(&si);
+  return UINT_MAX;
+}
+
 unsigned GetAvailablePhysicalMemory (void)
 {
   struct sysinfo si;
     sysinfo(&si);
-  return (si.freeram+si.bufferram)*si.mem_unit;
+  return si.freeram*si.mem_unit;
 }
 
 int GetProcessorsCount (void)
@@ -142,6 +266,22 @@ void SetFileDateTime(const CFILENAME Filename, time_t mtime)
   utime (Filename, &times);
 }
 
+// Execute file `filename` in the directory `curdir` optionally waiting until it finished
+void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+{
+  char *olddir = (char*) malloc(MY_FILENAME_MAX*4),
+       *cmd    = (char*) malloc(strlen(filename)+10);
+  getcwd(olddir, MY_FILENAME_MAX*4);
+
+  chdir(curdir);
+  sprintf(cmd, "./%s%s", filename, wait_finish? "" : " &");
+  system(cmd);
+
+  chdir(olddir);
+  free(cmd);
+  free(olddir);
+}
+
 #endif // Windows/Unix
 
 
@@ -151,6 +291,12 @@ void FormatDateTime (char *buf, int bufsize, time_t t)
   if (t==-1)  t=0;  // Иначе получим вылет :(
   p = localtime(&t);
   strftime( buf, bufsize, "%Y-%m-%d %H:%M:%S", p);
+}
+
+// Максимальная длина имени файла
+int long_path_size (void)
+{
+  return MY_FILENAME_MAX;
 }
 
 
@@ -225,16 +371,16 @@ FILENAME basename (FILENAME fullname)
 }
 
 // Создать каталоги на пути к name
-void BuildPathTo (FILENAME name)
+void BuildPathTo (CFILENAME name)
 {
-  char *path_ptr = NULL;
-  for (char *p = str_end(name); --p >= name;)
-    if (in_set (*p, DIRECTORY_DELIMITERS))
+  CFILENAME path_ptr = NULL;
+  for (CFILENAME p = _tcschr(name,0); --p >= name;)
+    if (_tcschr (_T(DIRECTORY_DELIMITERS), *p))
       {path_ptr=p; break;}
   if (path_ptr==NULL)  return;
 
-  char oldc = *path_ptr;
-  *path_ptr = '\0';
+  TCHAR oldc = *path_ptr;
+  *path_ptr = 0;
 
   if (! file_exists (name))
   {
@@ -246,11 +392,11 @@ void BuildPathTo (FILENAME name)
 
 
 /* ***************************************************************************
-*																			*
-* Random system values collection routine from CryptLib by Peter Gutmann
-* [ftp://ftp.franken.de/pub/crypt/cryptlib/cl331.zip]							
-*																			*
-****************************************************************************/
+*                                                                            *
+* Random system values collection routine from CryptLib by Peter Gutmann     *
+* [ftp://ftp.franken.de/pub/crypt/cryptlib/cl331.zip]                        *
+*                                                                            *
+*****************************************************************************/
 
 /* The size of the intermediate buffer used to accumulate polled data */
 #define RANDOM_BUFSIZE	4096
@@ -408,7 +554,7 @@ int systemRandomData (char *rand_buf, int rand_size)
 		return 0;
 	}
 
-	if (read (f, rand_buf, rand_size) != rand_size)
+	if (file_read (f, rand_buf, rand_size) != rand_size)
 	{
 		perror ("Read from /dev/urandom failed");
 		fclose (f);

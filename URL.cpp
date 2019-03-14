@@ -5,7 +5,16 @@
 // ** URL reading library
 // ****************************************************************************
 
-#ifdef FREEARC_WIN
+#ifdef FREEARC_NOURL
+
+void  url_setup_proxy (char *_proxy)                           {}
+void  url_setup_bypass_list (char *_bypass_list)               {}
+URL*  url_open  (char *_url)                                   {return NULL;}
+int   url_readp (URL *url, int64 offset, char *buf, int size)  {return -1;}
+void  url_close (URL *url)                                     {}
+
+
+#elif defined(FREEARC_WIN)
 
 HINTERNET hInternet   = NULL;
 char*     proxy       = NULL;
@@ -98,14 +107,14 @@ int64 url_detect_size (URL *url)
             // Fast method of getting filesize
             WIN32_FIND_DATA FindFileData;
             HINTERNET hURL = FtpFindFirstFile (url->hConnect, url->file, &FindFileData, 0, 0);
-            hURL && ::InternetCloseHandle (hURL);
+            ::InternetCloseHandle (hURL);
             if (hURL && FindFileData.nFileSizeLow!=(DWORD)-1)
                 return (int64(FindFileData.nFileSizeHigh)<<32)+FindFileData.nFileSizeLow;
 */
             // Slow method of getting filesize
             HINTERNET hURL = FtpOpenFileA (url->hConnect, url->file, GENERIC_READ, FTP_TRANSFER_TYPE_BINARY, 0);
             DWORD SizeHigh, SizeLow = FtpGetFileSize (hURL, &SizeHigh);
-            hURL && ::InternetCloseHandle (hURL);
+            ::InternetCloseHandle (hURL);
             //if (SizeLow==-1)  return 0;  - filesize may be exactly 4gb-1
 
             // DIRTY HACK!
@@ -152,7 +161,7 @@ int64 url_detect_size (URL *url)
             &dwLengthDataSize,
             NULL);
 
-        hURL && ::InternetCloseHandle (hURL);
+        ::InternetCloseHandle (hURL);
 
         DataSize[dwLengthDataSize] = '\0';
         return bQuery1&&bQuery2&&dwStatusCode==HTTP_STATUS_OK? atoll(DataSize): -1;
@@ -229,8 +238,8 @@ void url_close (URL *url)
 {
     if (!url) return;
     ::free (url->url);
-    url->hURL && ::InternetCloseHandle (url->hURL);
-    url->hConnect && ::InternetCloseHandle (url->hConnect);
+    ::InternetCloseHandle (url->hURL);
+    ::InternetCloseHandle (url->hConnect);
     ::free (url);
 }
 

@@ -10,5 +10,5 @@ OPT_FLAGS   = -O2 -march=i486 -mtune=pentiumpro \
 DEBUG_FLAGS = -g0
 CFLAGS = $(CODE_FLAGS) $(OPT_FLAGS) $(DEBUG_FLAGS) $(DEFINES)
 
-$(TEMPDIR)/C_GRZip.o: C_GRZip.cpp C_GRZip.h LZP.c libGRZip.h Rec_Flt.c makefile
+$(TEMPDIR)/C_GRZip.o: C_GRZip.cpp C_GRZip.h LZP.c libGRZip.h Rec_Flt.c makefile ../MultiThreading.h
 	$(GCC) -c $(CFLAGS) -o $*.o $<

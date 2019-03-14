@@ -2,16 +2,9 @@ extern "C" {
 #include "../Compression.h"
 }
 #define MMD_LIBRARY
+
+#ifndef FREEARC_DECOMPRESS_ONLY
 #include "mmdet.cpp"
-
-// Number of channels that multimedia file may have. Used for auto-detection when
-// header of any known file type doesn't exist or don't taken into account. This array is zero-ended
-static int channels[] = {1,2,3,4,0};
-// Number of bits per word that multimedia file may have. Also used for auto-detection
-static int bitvalues[] = {8,16,24,32,0};
-
-// Values used in fast detection mode
-static int fast_channels[] = {1,3,0}, fast_bitvalues[] = {8,16,0};
 
 #ifndef MM_LIBRARY
 #define print_message(s)   fprintf s
@@ -21,8 +14,6 @@ static int fast_channels[] = {1,3,0}, fast_bitvalues[] = {8,16,0};
 
 
 // PREPROCESSING ROUTINES *************************************************************************
-
-#ifndef FREEARC_DECOMPRESS_ONLY
 
 // Run through buffer diffing 8-bit elements
 void diff1 (void *buf, int bufsize, int N, void *_base)
@@ -149,7 +140,7 @@ void undiff4 (void *buf, int bufsize, int N, void *_base)
 
 #ifndef FREEARC_DECOMPRESS_ONLY
 // Multimedia detector and preprocessor
-int mm_compress (int mode, int skip_header, int is_float, int num_chan, int word_size, int offset, int reorder, CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int mm_compress (int mode, int skip_header, int is_float, int num_chan, int word_size, int offset, int reorder, CALLBACK_FUNC *callback, void *auxdata)
 {
     const int BUFSIZE = 1*mb;
     BYTE* buf = (BYTE*) malloc(BUFSIZE+1);  // buffer for data processed, 1 more byte for diff24 safeness
@@ -162,7 +153,8 @@ int mm_compress (int mode, int skip_header, int is_float, int num_chan, int word
 
    {// Select parameters of check depending on speed mode setting
     int check_bytes = mymin (mode<=2? 64*kb : mymax(64*kb,bytes/2), bytes); // how many bytes to check
-    int *use_channels = mode<=2? fast_channels : channels,  *use_bitvalues = mode<=2? fast_bitvalues : bitvalues;
+    int *use_channels  = mode<=2? fast_channels  : channels;
+    int *use_bitvalues = mode<=2? fast_bitvalues : bitvalues;
 
     // If MM type isn't predefined and both file header recognition and
     // entropy autodetection fails then just copy data intact
@@ -231,7 +223,7 @@ int mm_compress (int mode, int skip_header, int is_float, int num_chan, int word
         chunk = N>1? roundDown(BUFFER_SIZE,N) : BUFFER_SIZE;
         buf   = (BYTE*) realloc (buf, chunk+1);       // +1 is for processing 24-bit chunks using 32-bit operations
 
-        // Read next data chunk. This time, bytes+rest should be exactly == chunk, unless we at end of data
+        // Read next data chunk. This time, bytes+rest should be exactly == chunk, unless we at the end of data
         errcode = bytes = callback ("read", buf+rest, chunk-rest, auxdata);
         if (errcode<0) break;                // break on error
         bytes += rest;  rest=0;
@@ -246,7 +238,7 @@ finished:
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 
-int mm_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int mm_decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
     byte header[3];
     BYTE* buf  = (BYTE*) malloc (BUFFER_SIZE+1);  // buffer for data processed
@@ -263,10 +255,10 @@ int mm_decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
             WRITE (buf, bytes);
         }
     } else {
-        // Check that bits other than bit0-bit2 are not set (thses should be used for future extensions)
+        // Check that bits other than bit0-bit2 are not set (these should be used for future extensions)
         // Well, just now we don't support even bits1&2 enabled (i.e. we don't support restoring proper byte order)
         if (header[0] & ~1)  {errcode=FREEARC_ERRCODE_BAD_COMPRESSED_DATA; goto finished;}
-        // Read the remainin two header bytes
+        // Read the remaining two header bytes
         READ (header+1, 2);
 
         // Copy original file header
@@ -316,7 +308,7 @@ finished:
 // DRIVER ************************************************************************
 // This demo program shows how to use MM preprocessor
 
-#include "../Standalone.h"
+#include "../Common.cpp"
 
 #ifdef _WIN32
     #define ERASE_STDERR fprintf (stderr, "%78s\r", "")

@@ -1,13 +1,14 @@
+{-# OPTIONS_GHC -cpp #-}
 ----------------------------------------------------------------------------------------------------
 ---- Кодирование структур данных в виде потока байтов и буферизация его записи/чтения --------------
 ----------------------------------------------------------------------------------------------------
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  ByteStream
--- Copyright   :  (c) Bulat Ziganshin, bulat_z@mail.ru
--- License     :  BSD-style (see the file libraries/base/LICENSE)
+-- Copyright   :  (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
+-- License     :  Public domain
 --
--- Maintainer  :  bulat_z@mail.ru
+-- Maintainer  :  Bulat.Ziganshin@gmail.com
 -- Stability   :  experimental
 -- Portability :  GHC/Hugs on x86 processors
 --
@@ -74,13 +75,18 @@ aTYPICAL_BUFFER = 64*1024
 ----------------------------------------------------------------------------------------------------
 
 data OutStream = OutStream
-  { ref_buf     :: (IORef (Ptr CChar))           -- буфер в памяти, используемый в настоящий момент
-  , ref_size    :: (IORef Int)                   -- его размер в байтах
-  , ref_pos     :: (IORef Int)                   -- текущая позиция записи в буфере
-  , functions   :: ( IO (Ptr CChar, Int)              -- функции, обеспечивающие связь с внешним миром
-                   , Ptr CChar -> Int -> Int -> IO () -- (см. описание create)
-                   , IO () )
+  { ref_buf     :: (IORef (Ptr CChar))    -- буфер в памяти, используемый в настоящий момент
+  , ref_size    :: (IORef Int)            -- его размер в байтах
+  , ref_pos     :: (IORef Int)            -- текущая позиция записи в буфере
+  , functions   :: ( RecvBuf              -- функции, обеспечивающие связь с внешним миром
+                   , SendBuf              --   (см. описание create)
+                   , Cleanup )
   }
+
+type RecvBuf = IO (Ptr CChar, Int)
+type SendBuf = Ptr CChar -> Int -> Int -> IO ()
+type Cleanup = IO ()
+
 
 -- |Записать выводимые данные в файл `filename`, буферизуя их в буфере размером `size` байт
 createFile filename size = do
@@ -145,6 +151,7 @@ closeOut buffer@(OutStream _ _ _ (_, _, cleanup)) = do
 
 -- |All-in-one операция: создаёт выходной поток, записывает в него значение и закрывает поток.
 -- Если вам нужно записать несколько значений - соберите их в tuple
+writeAll :: (BufferData a) =>  RecvBuf -> SendBuf -> Cleanup -> a -> IO ()
 writeAll receiveBuf sendBuf cleanup x =
   bracket (create receiveBuf sendBuf cleanup) (closeOut)
     (\buf -> write buf x)
@@ -170,12 +177,12 @@ writeFile filename x =
 ----------------------------------------------------------------------------------------------------
 
 data InStream = InStream
-  { iref_buf     :: (IORef (Ptr CChar))           -- буфер в памяти, используемый в настоящий момент
-  , iref_size    :: (IORef Int)                   -- его размер в байтах
-  , iref_pos     :: (IORef Int)                   -- текущая позиция записи в буфере
-  , ifunctions   :: ( IO (Ptr CChar, Int)              -- функции, обеспечивающие связь с внешним миром
-                    , Ptr CChar -> Int -> Int -> IO () -- (см. описание open)
-                    , IO () )
+  { iref_buf     :: (IORef (Ptr CChar))   -- буфер в памяти, используемый в настоящий момент
+  , iref_size    :: (IORef Int)           -- его размер в байтах
+  , iref_pos     :: (IORef Int)           -- текущая позиция записи в буфере
+  , ifunctions   :: ( RecvBuf             -- функции, обеспечивающие связь с внешним миром
+                    , SendBuf             --   (см. описание open)
+                    , Cleanup )
   }
 
 -- |to do: Декодировать данные из файла, читая их через буфер размером `size` байт
@@ -221,6 +228,10 @@ closeIn (InStream _ _ _ (_, _, cleanup)) = do
 rewindMemory buffer@(InStream _ _ pos _) = do
   pos =: 0
 
+-- |Пропускает заданное число байт
+skipBytes buffer@(InStream _ _ pos _) bytes = do
+  pos += bytes
+
 -- |Проверяет, что мы достигли конца текущего буфера
 isEOFMemory buffer@(InStream _ size' pos' _) = do
   size <- val size'
@@ -229,6 +240,7 @@ isEOFMemory buffer@(InStream _ size' pos' _) = do
 
 -- |All-in-one операция: создаёт входной поток, читает значение и закрывает поток.
 -- Если вам нужно прочитать несколько значений - соберите их в tuple
+readMemory :: (BufferData a) =>  Ptr CChar -> Int -> IO a
 readMemory buf size = do
   bracket (openMemory buf size) (closeIn) (read)
 
@@ -331,7 +343,8 @@ class FastBufferData a where
     -- что в буфере найдётся место для ещё 100 значений, и продолжит запись списка с того
     -- места, на котором мы остановились
     --
-    let go []     pos _  = ref_pos =: pos  -- Мы кончили! Надо только записать новую позицию в буфере!
+    let --go :: (FastBufferData a) => [a] -> Int -> Int -> IO ()
+        go []     pos _  = ref_pos =: pos  -- Мы кончили! Надо только записать новую позицию в буфере!
         go list   pos 0  = do ref_pos =: pos             -- Записываем новую позицию в буфере
                               writeListFast buffer list  -- ... и вызываем функцию рекурсивно для остатка списка
         go (x:xs) pos n  = do new_pos <- writeUnchecked buf x pos    -- записать очередной элемент
@@ -353,7 +366,8 @@ class FastBufferData a where
   readListFast buffer@(InStream buf _ pos _) length = do
     abuf <- val buf
     apos <- val pos
-    let go apos 0 xs = do pos =: apos
+    let --go :: (FastBufferData a) => Int -> Int -> [a] -> IO [a]
+        go apos 0 xs = do pos =: apos
                           return (reverse xs)
         go apos n xs = do (x, new_pos) <- readUnchecked abuf apos
                           go new_pos (n-1) (x:xs)
@@ -383,11 +397,13 @@ instance (Storable a) => FastBufferData a where
     return (x, pos + sizeOf x)
 
 
--- Символы записываются как CChar, поскольку у нас пока всё равно нет юникодных имён файлов :(
---instance FastBufferData Char where
---  maxSizeOf x = maxSizeOf (undefined :: CChar)
---  writeUnchecked buf x pos  =  writeUnchecked buf (castCharToCChar x) pos
---  readUnchecked buf pos  =  do (x,new_pos) <- readUnchecked buf pos; return (castCCharToChar x, new_pos)
+-- Символы записываются в UTF-8
+instance BufferData Char where
+  write buf c  =  writeList buf (toUTF8List [c])
+  read  buffer@(InStream buf _ pos _) = do
+    buf' <- val buf
+    pos' <- val pos
+    unpackCharUtf8 buf' pos' pos
 
 
 -- Строка записывается как обычный список символов, но с нулевым символом в конце (в стиле Си)
@@ -646,6 +662,67 @@ toUTF8List (x:xs)
                     fromIntegral (0x80 .|. ((ord x `shiftR` 6) .&. 0x3F)) :
                     fromIntegral (0x80 .|. (ord x .&. 0x3F)) :
                     toUTF8List xs
+
+
+-- | Convert UTF-8 to Unicode.
+fromUTF8 :: [Word8] -> String
+fromUTF8 xs = fromUTF' (map fromIntegral xs) where
+    fromUTF' [] = []
+    fromUTF' (all@(x:xs))
+	| x<=0x7F = (chr (x)):fromUTF' xs
+	| x<=0xBF = err
+	| x<=0xDF = twoBytes all
+	| x<=0xEF = threeBytes all
+	| otherwise   = fourBytes all
+    twoBytes (x1:x2:xs) = chr  ((((x1 .&. 0x1F) `shift` 6) .|.
+                                  (x2 .&. 0x3F))):fromUTF' xs
+    twoBytes _ = error "fromUTF8: illegal two byte sequence"
+
+    threeBytes (x1:x2:x3:xs) = chr ((((x1 .&. 0x0F) `shift` 12) .|.
+                                     ((x2 .&. 0x3F) `shift` 6) .|.
+                                      (x3 .&. 0x3F))):fromUTF' xs
+    threeBytes _ = error "fromUTF8: illegal three byte sequence"
+
+    fourBytes (x1:x2:x3:x4:xs) = chr ((((x1 .&. 0x0F) `shift` 18) .|.
+                                       ((x2 .&. 0x3F) `shift` 12) .|.
+                                       ((x3 .&. 0x3F) `shift` 6) .|.
+                                        (x4 .&. 0x3F))):fromUTF' xs
+    fourBytes _ = error "fromUTF8: illegal four byte sequence"
+
+    err = error "fromUTF8: illegal UTF-8 character"
+
+
+-- |Convert UTF8-encoded byte array to Char
+STRICT3(unpackCharUtf8)
+unpackCharUtf8 buf pos ref_pos = do
+      let addr = castPtr buf :: Ptr Word8
+      ch0 <- fromIntegral `liftM` peekElemOff addr pos
+      case () of
+         _ | ch0 <= 0x7F -> do
+                ref_pos =: pos+1
+                return $! (unsafeChr (fromIntegral ch0))
+           | ch0 <= 0xDF -> do
+                ref_pos =: pos+2
+                ch1 <- fromIntegral `liftM` peekElemOff addr (pos+1)
+                return $! (unsafeChr (((ch0 - 0xC0) `shiftL` 6) +
+                                       (ch1 - 0x80)))
+           | ch0 <= 0xEF -> do
+                ref_pos =: pos+3
+                ch1 <- fromIntegral `liftM` peekElemOff addr (pos+1)
+                ch2 <- fromIntegral `liftM` peekElemOff addr (pos+2)
+                return $! (unsafeChr (((ch0 - 0xE0) `shiftL` 12) +
+                                      ((ch1 - 0x80) `shiftL` 6) +
+                                       (ch2 - 0x80)))
+           | otherwise -> do
+                ref_pos =: pos+4
+                ch1 <- fromIntegral `liftM` peekElemOff addr (pos+1)
+                ch2 <- fromIntegral `liftM` peekElemOff addr (pos+2)
+                ch3 <- fromIntegral `liftM` peekElemOff addr (pos+3)
+                return $! (unsafeChr (((ch0 - 0xF0) `shiftL` 18) +
+                                      ((ch1 - 0x80) `shiftL` 12) +
+                                      ((ch2 - 0x80) `shiftL` 6) +
+                                       (ch3 - 0x80)))
+
 
 -- |Convert UTF8-encoded byte array to String
 --unpackCStringUtf8 :: Ptr Word8 -> Int -> IO String

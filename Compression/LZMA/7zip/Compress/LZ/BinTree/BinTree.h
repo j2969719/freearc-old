@@ -2,13 +2,17 @@
 
 #include "../LZInWindow.h"
 #include "../IMatchFinder.h"
- 
+
 namespace BT_NAMESPACE {
 
 typedef UInt32 CIndex;
+#ifdef HASH_TABLE
+const UInt32 kMaxValForNormalize = (UInt32(1) << 30) - 1;    // Two higher bits are used for tagging
+#else
 const UInt32 kMaxValForNormalize = (UInt32(1) << 31) - 1;
+#endif
 
-class CMatchFinder: 
+class CMatchFinder:
   public IMatchFinder,
   public CLZInWindow,
   public CMyUnknownImp,
@@ -20,6 +24,7 @@ class CMatchFinder:
   CIndex *_hash;
   CIndex *_son;
   UInt32 _hashMask;
+  UInt32 _hashShift;
   UInt32 _cutValue;
   UInt32 _hashSizeSum;
 
@@ -40,7 +45,7 @@ class CMatchFinder:
   STDMETHOD_(Int32, NeedChangeBufferPos)(UInt32 numCheckBytes);
   STDMETHOD_(void, ChangeBufferPos)();
 
-  STDMETHOD(Create)(UInt32 historySize, UInt32 keepAddBufferBefore, 
+  STDMETHOD(Create)(UInt32 historySize, UInt32 hashSize, UInt32 keepAddBufferBefore,
       UInt32 matchMaxLen, UInt32 keepAddBufferAfter);
   STDMETHOD(GetMatches)(UInt32 *distances);
   STDMETHOD(Skip)(UInt32 num);
@@ -48,7 +53,7 @@ class CMatchFinder:
 public:
   CMatchFinder();
   virtual ~CMatchFinder();
-  virtual void SetNumPasses(UInt32 numPasses) { _cutValue = numPasses; }
+  virtual void SetNumPasses(UInt32 numPasses) { _cutValue = numPasses;  _hashShift = lb (roundup_to_power_of (_cutValue, 2)); }
 };
 
 }

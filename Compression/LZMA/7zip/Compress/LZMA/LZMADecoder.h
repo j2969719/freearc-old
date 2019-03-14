@@ -4,7 +4,7 @@
 #define __LZMA_DECODER_H
 
 #include "../../../Common/MyCom.h"
-#include "../../../Common/Alloc.h"
+// #include "../../../Common/Alloc.h"
 #include "../../ICoder.h"
 #include "../LZ/LZOutWindow.h"
 #include "../RangeCoder/RangeCoderBitTree.h"

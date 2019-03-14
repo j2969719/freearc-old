@@ -1,6 +1,17 @@
 ---------------------------------------------------------------------------------------------------
 ---- "Взаимодействующие последовательные процессы", как описано в книге Хоара.                 ----
 ---------------------------------------------------------------------------------------------------
+-- |
+-- Module      :  Process
+-- Copyright   :  (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
+-- License     :  Public domain
+--
+-- Maintainer  :  Bulat.Ziganshin@gmail.com
+-- Stability   :  experimental
+-- Portability :  GHC
+--
+-----------------------------------------------------------------------------
+
 module Process where
 {-
 Процессы соединяются в цепочку операторами "|>" или "|>>>" и запускаются на выполнение функцией runP:
@@ -9,7 +20,7 @@ module Process where
 Каждый процесс описывается обычной функцией, которая получает дополнительный параметр типа Pipe.
   С этой переменной можно выполнять операцию receiveP для получения данных от предыдущего
   процесса в списке, и операцию sendP для посылки данных следующему процессу в списке:
-    compress pipe = forever (do data <- receiveP pipe; .....; sendP pipe compressed_data)
+    compress pipe = foreverM (do data <- receiveP pipe; .....; sendP pipe compressed_data)
 Данные от процесса к процессу передаются "слева направо". В зависимости от использованной
   при создании связи между процессами операции - "|>" или "|>>>" - в канал между этими процессами
   можно поместить только одно или неограниченное кол-во значений (реализуется с помощью MVar/Chan,
@@ -51,32 +62,15 @@ p1 |>>> p2 = createP p1 p2 newChan
 createP p1 p2 create_inner (Pipe pid finished income income_back outcome outcome_back) = do
   inner       <- create_inner      -- Канал между p1 и p2 (MVar или Chan)
   inner_back  <- newChan           -- Обратный канал между p1 и p2
-  parent_id   <- myThreadId
-  p1_finished <- newEmptyMVar      -- Сюда записывается значение после завершения выполнения p1
-
-  -- Первый обработчик исключения, который запишет значение в `catched`, убивает второй процесс
-  -- и запоминает своё исключение как общий результат всего процесса
-  catched <- newEmptyMVar
-  done <- newEmptyMVar
-  resulting_e <- newIORef Nothing
-  let handler pid e = do
-        we_first <- tryPutMVar catched ()
-        not_done <- tryPutMVar done    ()
-        when we_first (do when not_done (killThread pid); writeIORef resulting_e (Just e))
+  p1_finished <- newEmptyMVar      -- Признак завершения выполнения p1
 
   -- Запустим первый процесс в отдельном треде, а второй исполним напрямую
   p1_id <- forkOS$ (p1 (Pipe pid finished income income_back inner inner_back) >> return ())
-                       `catch` handler parent_id
-                       `finally` (tryPutMVar done () >> putMVar p1_finished ())
-  (p2 (Pipe (Just p1_id) (Just p1_finished) inner inner_back outcome outcome_back) >> return ())
-      `catch` handler p1_id
-      `finally` (tryPutMVar done () >> takeMVar p1_finished)
-
-  -- Если один из обработчиков исключений записал сюда значение - перевозбудить это исключение
-  just_e <- readIORef resulting_e
-  case just_e of
-    Just e  -> throwIO e
-    Nothing -> return ()
+                       `finally` (putMVar p1_finished ())
+  --
+  p2 (Pipe (Just p1_id) (Just p1_finished) inner inner_back outcome outcome_back)
+  takeMVar p1_finished
+  return ()
 
 
 -- |Запустить комбинированный процесс, созданный операциями "|>" и "|>>>"

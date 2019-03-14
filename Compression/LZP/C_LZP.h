@@ -1,7 +1,7 @@
 #include "../Compression.h"
 
-int lzp_compress   (MemSize BlockSize, int MinCompression, int MinMatchLen, int HashSizeLog, int Barrier, int SmallestLen, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
-int lzp_decompress (MemSize BlockSize, int MinCompression, int MinMatchLen, int HashSizeLog, int Barrier, int SmallestLen, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+int lzp_compress   (MemSize BlockSize, int MinCompression, int MinMatchLen, int HashSizeLog, int Barrier, int SmallestLen, CALLBACK_FUNC *callback, void *auxdata);
+int lzp_decompress (MemSize BlockSize, int MinCompression, int MinMatchLen, int HashSizeLog, int Barrier, int SmallestLen, CALLBACK_FUNC *callback, void *auxdata);
 
 
 #ifdef __cplusplus
@@ -28,20 +28,20 @@ public:
   }
 
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_LZP)
   virtual void ShowCompressionMethod (char *buf);
 
   // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return BlockSize*2;}
-  virtual MemSize GetDecompressionMem   (void)         {return BlockSize*2;}
+  virtual MemSize GetCompressionMem     (void)         {return BlockSize*2 + (1<<HashSizeLog)*sizeof(BYTE*);}
+  virtual MemSize GetDecompressionMem   (void)         {return BlockSize*2 + (1<<HashSizeLog)*sizeof(BYTE*);}
   virtual MemSize GetDictionary         (void)         {return BlockSize;}
   virtual MemSize GetBlockSize          (void)         {return BlockSize;}
-  virtual void    SetCompressionMem     (MemSize mem)  {SetBlockSize (mem/2);}
-  virtual void    SetDecompressionMem   (MemSize mem)  {SetBlockSize (mem/2);}
+  virtual void    SetCompressionMem     (MemSize mem);
+  virtual void    SetDecompressionMem   (MemSize mem)  {SetCompressionMem(mem);}
   virtual void    SetDictionary         (MemSize dict) {SetBlockSize (dict);}
   virtual void    SetBlockSize          (MemSize bs);
 #endif

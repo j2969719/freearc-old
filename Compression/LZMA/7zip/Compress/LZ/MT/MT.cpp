@@ -2,7 +2,7 @@
 
 #include "StdAfx.h"
 
-#include "../../../../Common/Alloc.h"
+// #include "../../../../Common/Alloc.h"
 
 #include "MT.h"
 
@@ -23,7 +23,7 @@ CMatchFinderMT::CMatchFinderMT():
     throw 271826;
 }
 
-CMatchFinderMT::~CMatchFinderMT() 
+CMatchFinderMT::~CMatchFinderMT()
 {
   m_Exit = true;
   m_CS[m_BlockIndex].Leave();
@@ -40,9 +40,9 @@ void CMatchFinderMT::FreeMem()
   m_Buffer = 0;
 }
 
-STDMETHODIMP CMatchFinderMT::Create(UInt32 sizeHistory, UInt32 keepAddBufferBefore, 
+STDMETHODIMP CMatchFinderMT::Create(UInt32 sizeHistory, UInt32 hashSize, UInt32 keepAddBufferBefore,
     UInt32 matchMaxLen, UInt32 keepAddBufferAfter)
-{ 
+{
   FreeMem();
   m_MatchMaxLen = matchMaxLen;
   if (kBlockSize <= matchMaxLen * 4)
@@ -53,7 +53,7 @@ STDMETHODIMP CMatchFinderMT::Create(UInt32 sizeHistory, UInt32 keepAddBufferBefo
     return E_OUTOFMEMORY;
   keepAddBufferBefore += bufferSize;
   keepAddBufferAfter += (kBlockSize + 1);
-  return m_MatchFinder->Create(sizeHistory, keepAddBufferBefore, matchMaxLen, keepAddBufferAfter); 
+  return m_MatchFinder->Create(sizeHistory, hashSize, keepAddBufferBefore, matchMaxLen, keepAddBufferAfter);
 }
 
 // UInt32 blockSizeMult = 800
@@ -64,13 +64,13 @@ HRESULT CMatchFinderMT::SetMatchFinder(IMatchFinder *matchFinder)
 }
 
 STDMETHODIMP CMatchFinderMT::SetStream(ISequentialInStream *s)
-{ 
+{
   return m_MatchFinder->SetStream(s);
 }
 
 // Call it after ReleaseStream / SetStream
 STDMETHODIMP CMatchFinderMT::Init()
-{ 
+{
   m_NeedStart = true;
   m_Pos = 0;
   m_PosLimit = 0;
@@ -79,12 +79,12 @@ STDMETHODIMP CMatchFinderMT::Init()
   if (result == S_OK)
     m_DataCurrentPos = m_MatchFinder->GetPointerToCurrentPos();
   m_NumAvailableBytes = m_MatchFinder->GetNumAvailableBytes();
-  return result; 
+  return result;
 }
 
 // ReleaseStream is required to finish multithreading
 STDMETHODIMP_(void) CMatchFinderMT::ReleaseStream()
-{ 
+{
   m_StopWriting = true;
   m_CS[m_BlockIndex].Leave();
   if (!m_NeedStart)
@@ -99,12 +99,12 @@ STDMETHODIMP_(void) CMatchFinderMT::ReleaseStream()
 }
 
 STDMETHODIMP_(Byte) CMatchFinderMT::GetIndexByte(Int32 index)
-{ 
-  return m_DataCurrentPos[index]; 
+{
+  return m_DataCurrentPos[index];
 }
 
 STDMETHODIMP_(UInt32) CMatchFinderMT::GetMatchLen(Int32 index, UInt32 distance, UInt32 limit)
-{ 
+{
   if ((Int32)(index + limit) > m_NumAvailableBytes)
     limit = m_NumAvailableBytes - (index);
   distance++;
@@ -120,10 +120,10 @@ STDMETHODIMP_(const Byte *) CMatchFinderMT::GetPointerToCurrentPos()
 }
 
 STDMETHODIMP_(UInt32) CMatchFinderMT::GetNumAvailableBytes()
-{ 
+{
   return m_NumAvailableBytes;
 }
-  
+
 void CMatchFinderMT::GetNextBlock()
 {
   if (m_NeedStart)
@@ -166,7 +166,7 @@ void CMatchFinderMT::GetNextBlock()
 }
 
 STDMETHODIMP CMatchFinderMT::GetMatches(UInt32 *distances)
-{ 
+{
   if (m_Pos == m_PosLimit)
     GetNextBlock();
 
@@ -184,26 +184,26 @@ STDMETHODIMP CMatchFinderMT::GetMatches(UInt32 *distances)
     distances[i] = buffer[i];
     distances[i + 1] = buffer[i + 1];
   }
-  return S_OK; 
+  return S_OK;
 }
 
 STDMETHODIMP CMatchFinderMT::Skip(UInt32 num)
-{ 
+{
   do
   {
     if (m_Pos == m_PosLimit)
       GetNextBlock();
-    
+
     if (m_Result != S_OK)
       return m_Result;
     m_NumAvailableBytes--;
     m_DataCurrentPos++;
-    
+
     UInt32 len = m_Buffer[m_Pos++];
     m_Pos += len;
   }
   while(--num != 0);
-  return S_OK; 
+  return S_OK;
 }
 
 STDMETHODIMP_(Int32) CMatchFinderMT::NeedChangeBufferPos(UInt32 /* numCheckBytes */)
@@ -267,7 +267,7 @@ DWORD CMatchFinderMT::ThreadFunc()
           curPos++;
           UInt32 numAvailableBytes = mf->GetNumAvailableBytes();
           buffer[curPos++] = numAvailableBytes;
-          
+
           while (numAvailableBytes-- != 0 && curPos < limit)
           {
             result = mf->GetMatches(buffer + curPos);

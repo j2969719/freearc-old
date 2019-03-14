@@ -43,11 +43,11 @@
 #define LZP_XorFlag      (uint8)(0xFF^LZP_RunFlag)
 
 #define LZP_AllocHashTable()                                          \
-  uint8 ** Contexts=(uint8 **)malloc((LZP_HT_Size+1)*sizeof(uint32)); \
+  uint8 ** Contexts=(uint8 **)BigAlloc((LZP_HT_Size+1)*sizeof(uint32)); \
   if (Contexts==NULL) return (GRZ_NOT_ENOUGH_MEMORY);                 \
   memset(Contexts,0,(LZP_HT_Size+1)*sizeof(uint32));
 
-#define LZP_FreeHashTable() free(Contexts);
+#define LZP_FreeHashTable() BigFree(Contexts);
 
 #ifndef FREEARC_DECOMPRESS_ONLY
 

@@ -4,9 +4,9 @@ ALL: $(TEMPDIR)/C_Tornado.o
 
 CODE_FLAGS  = -fno-exceptions -fno-rtti \
               -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
-OPT_FLAGS   = -O6 -march=i486 -mtune=pentiumpro \
+OPT_FLAGS   = -O3 -march=i486 -mtune=pentiumpro \
               -fomit-frame-pointer -fstrict-aliasing \
-              -fforce-addr -ffast-math -funroll-loops --param inline-unit-growth=999999
+              -fforce-addr -ffast-math -funroll-loops --param inline-unit-growth=999
 DEBUG_FLAGS = -g0
 CFLAGS = $(CODE_FLAGS) $(OPT_FLAGS) $(DEBUG_FLAGS) $(DEFINES)
 

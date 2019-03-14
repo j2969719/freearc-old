@@ -1,6 +1,19 @@
+{-# OPTIONS_GHC -cpp #-}
 ----------------------------------------------------------------------------------------------------
 ---- Операции с именами файлов, манипуляции с файлами на диске, ввод/вывод.                     ----
 ----------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Files
+-- Copyright   :  (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
+-- License     :  Public domain
+--
+-- Maintainer  :  Bulat.Ziganshin@gmail.com
+-- Stability   :  experimental
+-- Portability :  GHC
+--
+-----------------------------------------------------------------------------
+
 module Files (module Files, module FilePath) where
 
 import Prelude hiding (catch)
@@ -8,28 +21,30 @@ import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad
+import Data.Array
 import Data.Char
+import Data.IORef
 import Data.List
 import Foreign
 import Foreign.C
 import Foreign.Marshal.Alloc
-import System.Directory
 import System.Posix.Internals
 import System.Posix.Types
 import System.IO
-import System.IO.Error
+import System.IO.Error hiding (catch)
 import System.IO.Unsafe
 import System.Locale
 import System.Time
 import System.Process
+import System.Directory
 
 import Utils
 import FilePath
 #if defined(FREEARC_WIN)
 import Win32Files
-import System.Win32.File
-import System.Win32.Info
-import System.Win32.Types
+import System.Win32
+#else
+import System.Posix.Files hiding (fileExist)
 #endif
 
 -- |Размер одного буфера, используемый в различных операциях
@@ -53,6 +68,14 @@ dir `isParentDirOf` file =
     Just ""    -> True
     Just (x:_) -> isPathSeparator x
     Nothing    -> False
+
+-- |Имя файла за минусом каталога dir
+file `dropParentDir` dir =
+  case (startFrom dir file) of
+    Just ""    -> ""
+    Just (x:xs) | isPathSeparator x -> xs
+    _          -> error "Utils::dropParentDir: dir isn't prefix of file"
+
 
 #if defined(FREEARC_WIN)
 -- |Для case-insensitive файловых систем
@@ -102,36 +125,53 @@ updateBaseName f pth  =  dir </> f name <.> ext
 ----------------------------------------------------------------------------------------------------
 
 -- |Найти конфиг-файл с заданным именем или возвратить ""
-findFile possibleFilePlaces cfgfilename = do
-  found <- possibleFilePlaces cfgfilename >>= Utils.filterM fileExist
+findFile = findName fileExist
+findDir  = findName dirExist
+findName exist possibleFilePlaces cfgfilename = do
+  found <- possibleFilePlaces cfgfilename >>= Utils.filterM exist
   case found of
     x:xs -> return x
     []   -> return ""
 
+-- |Найти конфиг-файл с заданным именем или возвратить имя для создания нового файла
+findOrCreateFile possibleFilePlaces cfgfilename = do
+  variants <- possibleFilePlaces cfgfilename
+  found    <- Utils.filterM fileExist variants
+  case found of
+    x:xs -> return x
+    []   -> return (head variants)
+
 
 #if defined(FREEARC_WIN)
--- Под Windows все дополнительныйе файлы по умолчанию лежат в одном каталоге с программой
+-- Под Windows все дополнительные файлы по умолчанию лежат в одном каталоге с программой
 libraryFilePlaces = configFilePlaces
-configFilePlaces filename  =  do exe <- getExeName
-                                 return [takeDirectory exe </> filename]
+configFilePlaces filename  =  do -- dir1 <- getAppUserDataDirectory "FreeArc"
+                                 exe  <- getExeName
+                                 return [-- dir1              </> filename,
+                                         takeDirectory exe </> filename]
 
 -- |Имя исполняемого файла программы
-getExeName = c_GetExeName >>= peekCWFilePath
+getExeName = do
+  allocaBytes (long_path_size*4) $ \pOutPath -> do
+    c_GetExeName pOutPath (fromIntegral long_path_size*2) >>= peekCWString
+
 foreign import ccall unsafe "Environment.h GetExeName"
-  c_GetExeName :: IO CWFilePath
+  c_GetExeName :: CWFilePath -> CInt -> IO CWFilePath
 
 #else
 -- |Места для поиска конфиг-файлов
-configFilePlaces  filename  =  return ["/etc"           </> filename]
+configFilePlaces  filename  =  do dir1 <- getAppUserDataDirectory "FreeArc"
+                                  return [dir1   </> filename
+                                         ,"/etc/FreeArc" </> filename]
 
 -- |Места для поиска sfx-модулей
-libraryFilePlaces filename  =  return ["/usr/lib"       </> filename
-                                      ,"/usr/local/lib" </> filename]
+libraryFilePlaces filename  =  return ["/usr/lib/FreeArc"       </> filename
+                                      ,"/usr/local/lib/FreeArc" </> filename]
 #endif
 
 
 ----------------------------------------------------------------------------------------------------
----- Запуск внешних программ -----------------------------------------------------------------------
+---- Запуск внешних программ и работа с Windows registry -------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
 -- |Запустить команду через shell и возвратить её stdout
@@ -143,10 +183,68 @@ runProgram cmd = do
     waitForProcess ph
     return result
 
+-- |Execute file `filename` in the directory `curdir` optionally waiting until it finished
+runFile filename curdir wait_finish = do
+  withCFilePath filename $ \c_filename -> do
+  withCFilePath curdir   $ \c_curdir   -> do
+  c_RunFile c_filename c_curdir (i$fromEnum wait_finish)
+
+foreign import ccall safe "Environment.h RunFile"
+  c_RunFile :: CFilePath -> CFilePath -> CInt -> IO ()
+
+
+#if defined(FREEARC_WIN)
+-- |Создать HKEY и прочитать из Registry значение типа REG_SZ
+registryGetStr root branch key =
+  bracket (regCreateKey root branch) regCloseKey
+    (\hk -> registryGetStringValue hk key)
+
+-- |Создать HKEY и записать в Registry значение типа REG_SZ
+registrySetStr root branch key val =
+  bracket (regCreateKey root branch) regCloseKey
+    (\hk -> registrySetStringValue hk key val)
+
+-- |Прочитать из Registry значение типа REG_SZ
+registryGetStringValue :: HKEY -> String -> IO (Maybe String)
+registryGetStringValue hk key = do
+  (regQueryValue hk (Just key) >>== Just)
+    `catch` (\e -> return Nothing)
+
+-- |Записать в Registry значение типа REG_SZ
+registrySetStringValue :: HKEY -> String -> String -> IO ()
+registrySetStringValue hk key val =
+  withTString val $ \v ->
+  regSetValueEx hk key rEG_SZ v (length val*2)
+#endif
+
+
+#if defined(FREEARC_WIN)
+-- |OS-specific thread id
+foreign import stdcall unsafe "windows.h GetCurrentThreadId"
+  getOsThreadId :: IO DWORD
+#else
+foreign import stdcall unsafe "pthread.h pthread_self"
+  getOsThreadId :: IO Int
+#endif
+
 
 ----------------------------------------------------------------------------------------------------
 ---- Операции с неоткрытыми файлами и каталогами ---------------------------------------------------
 ----------------------------------------------------------------------------------------------------
+
+#if defined(FREEARC_WIN)
+-- |Список дисков в системе с их типами
+getDrives = getLogicalDrives >>== unfoldr (\n -> Just (n `mod` 2, n `div` 2))
+                             >>== zipWith (\c n -> n>0 &&& [c:":"]) ['A'..'Z']
+                             >>== concat
+                             >>=  mapM (\d -> do t <- withCString d c_GetDriveType; return (d++"\t"++(driveTypes!!i t)))
+
+driveTypes = ["", ""]++split ',' "Removable,Fixed,Network,CD/DVD,Ramdisk"
+
+foreign import stdcall unsafe "windows.h GetDriveTypeA"
+  c_GetDriveType :: LPCSTR -> IO CInt
+#endif
+
 
 -- |Create a hierarchy of directories
 createDirectoryHierarchy :: FilePath -> IO ()
@@ -159,6 +257,49 @@ createDirectoryHierarchy dir = do
 
 -- |Создать недостающие каталоги на пути к файлу
 buildPathTo filename  =  createDirectoryHierarchy (takeDirectory filename)
+
+-- |Return current directory
+getCurrentDirectory = myCanonicalizePath "."
+
+-- | Given path referring to a file or directory, returns a
+-- canonicalized path, with the intent that two paths referring
+-- to the same file\/directory will map to the same canonicalized
+-- path. Note that it is impossible to guarantee that the
+-- implication (same file\/dir \<=\> same canonicalizedPath) holds
+-- in either direction: this function can make only a best-effort
+-- attempt.
+myCanonicalizePath :: FilePath -> IO FilePath
+myCanonicalizePath fpath | isURL fpath = return fpath
+                         | otherwise   =
+#if defined(FREEARC_WIN)
+  withCFilePath fpath $ \pInPath ->
+  allocaBytes (long_path_size*4) $ \pOutPath ->
+  alloca $ \ppFilePart ->
+    do c_GetFullPathName pInPath (fromIntegral long_path_size*2) pOutPath ppFilePart
+       peekCFilePath pOutPath >>== dropTrailingPathSeparator
+
+foreign import stdcall unsafe "GetFullPathNameW"
+            c_GetFullPathName :: CWString
+                              -> CInt
+                              -> CWString
+                              -> Ptr CWString
+                              -> IO CInt
+#else
+  withCFilePath fpath $ \pInPath ->
+  allocaBytes (long_path_size*4) $ \pOutPath ->
+    do c_realpath pInPath pOutPath
+       peekCFilePath pOutPath >>== dropTrailingPathSeparator
+
+foreign import ccall unsafe "realpath"
+                   c_realpath :: CString
+                              -> CString
+                              -> IO CString
+#endif
+
+-- |Максимальная длина имени файла
+long_path_size  =  i c_long_path_size :: Int
+foreign import ccall unsafe "Environment.h long_path_size"
+  c_long_path_size :: CInt
 
 
 #if defined(FREEARC_WIN)
@@ -193,6 +334,21 @@ convert_ClockTime_to_CTime (TOD secs _) = i secs
 
 -- |Текстовое представление времени
 showtime format t = formatCalendarTime defaultTimeLocale format (unsafePerformIO (toCalendarTime t))
+
+-- |Отформатировать CTime в строку с форматом "%Y-%m-%d %H:%M:%S"
+formatDateTime t  =  unsafePerformIO $ do
+                       allocaBytes 100 $ \buf -> do
+                       c_FormatDateTime buf 100 t
+                       peekCString buf
+
+foreign import ccall unsafe "Environment.h FormatDateTime"
+  c_FormatDateTime :: CString -> CInt -> CTime -> IO ()
+
+
+#if defined(FREEARC_UNIX)
+executeModes         =  [ownerExecuteMode, groupExecuteMode, otherExecuteMode]
+removeFileModes a b  =  a `intersectFileModes` (complement b)
+#endif
 
 
 ----------------------------------------------------------------------------------------------------
@@ -256,13 +412,19 @@ fileWriteBufSimple = choose  fWriteBufSimple (\_ _ _ -> err "url_write")
 fileFlush          = choose  fFlush          (\_     -> err "url_flush")
 fileClose          = choose  fClose          url_close
 
+-- |Проверяет существование файла/URL
+fileExist name | isURL name = do url <- withCString name url_open
+                                 url_close url
+                                 return (url/=nullPtr)
+               | otherwise  = fExist name
 
-isURL url = "://" `isInfixOf` url
+-- |Проверяет, является ли имя url
+isURL name = "://" `isInfixOf` name
 
 {-# NOINLINE choose0 #-}
 choose0 onfile onurl name | isURL name = do url <- withCString name onurl
                                             when (url==nullPtr) $ do
-                                              fail$ "Can't open url "++name
+                                              fail$ "Can't open url "++name   --registerError$ CANT_OPEN_FILE name
                                             return (URL url)
                           | otherwise  = onfile name >>== FileOnDisk
 
@@ -270,7 +432,7 @@ choose _ onurl  (URL        url)   = onurl  url
 choose onfile _ (FileOnDisk file)  = onfile file
 
 {-# NOINLINE err #-}
-err s  =  fail$ s++" isn't implemented" --registerError$ GENERAL_ERROR
+err s  =  fail$ s++" isn't implemented"    --registerError$ GENERAL_ERROR ["0343 %1 isn't implemented", s]
 
 
 type URL = Ptr ()
@@ -293,6 +455,7 @@ type FileOnDisk      = FD
 type CFilePath       = CWFilePath
 type FileAttributes  = FileAttributeOrFlag
 withCFilePath        = withCWFilePath
+peekCFilePath        = peekCWString
 fOpen       name     = wopen name (read_flags  .|. o_BINARY) 0o666
 fCreate     name     = wopen name (write_flags .|. o_BINARY .|. o_TRUNC) 0o666
 fCreateRW   name     = wopen name (rw_flags    .|. o_BINARY .|. o_TRUNC) 0o666
@@ -304,7 +467,7 @@ fReadBufSimple       = wread
 fWriteBufSimple      = wwrite
 fFlush  file         = return ()
 fClose               = wclose
-fileExist            = wDoesFileExist
+fExist               = wDoesFileExist
 fileRemove           = wunlink
 fileRename           = wrename
 fileWithStatus       = wWithFileStatus
@@ -315,36 +478,45 @@ stat_mtime           = wst_mtime
 dirCreate            = wmkdir
 dirExist             = wDoesDirectoryExist
 dirRemove            = wrmdir
+dirList dir          = dirWildcardList (dir </> "*")
+dirWildcardList wc   = withList $ \list -> do
+                         wfindfiles wc $ \find -> do
+                           name <- w_find_name find
+                           list <<= name
 
 #else
 
 type FileOnDisk      = Handle
 type CFilePath       = CString
 type FileAttributes  = Int
-withCFilePath        = withCString   . str2filesystem
-fOpen       name     = openBinaryFile (str2filesystem name) ReadMode
-fCreate     name     = openBinaryFile (str2filesystem name) WriteMode
-fCreateRW   name     = openBinaryFile (str2filesystem name) ReadWriteMode
-fAppendText name     = openFile       (str2filesystem name) AppendMode
+withCFilePath s a    = (`withCString` a) =<< str2filesystem s
+peekCFilePath ptr    = peekCString ptr >>= filesystem2str
+fOpen                = (`openBinaryFile` ReadMode     ) =<<. str2filesystem
+fCreate              = (`openBinaryFile` WriteMode    ) =<<. str2filesystem
+fCreateRW            = (`openBinaryFile` ReadWriteMode) =<<. str2filesystem
+fAppendText          = (`openFile`       AppendMode   ) =<<. str2filesystem
 fGetPos              = hTell
 fGetSize             = hFileSize
-fSeek   file         = hSeek file AbsoluteSeek
+fSeek                = (`hSeek` AbsoluteSeek)
 fReadBufSimple       = hGetBuf
 fWriteBufSimple      = hPutBuf
 fFlush               = hFlush
 fClose               = hClose
-fileExist            = doesFileExist  . str2filesystem
-fileRemove           = removeFile     . str2filesystem
-fileRename a b       = renameFile      (str2filesystem a) (str2filesystem b)
+fExist               = doesFileExist =<<. str2filesystem
+fileGetStatus        = getFileStatus =<<. str2filesystem
+fileSetMode name mode= (`setFileMode` mode) =<< str2filesystem name
+fileRemove name      = removeFile    =<<  str2filesystem name
+fileRename a b       = do a1 <- str2filesystem a; b1 <- str2filesystem b; renameFile a1 b1
 fileSetSize          = hSetFileSize
 fileStdin            = stdin
 stat_mode            = st_mode
 stat_size            = st_size  .>>== i
 stat_mtime           = st_mtime
-dirCreate            = createDirectory     . str2filesystem
-dirExist             = doesDirectoryExist  . str2filesystem
-dirRemove            = removeDirectory     . str2filesystem
-dirList dir          = getDirectoryContents (str2filesystem dir)  >>==  map filesystem2str
+dirCreate            = createDirectory     =<<. str2filesystem
+dirExist             = doesDirectoryExist  =<<. str2filesystem
+dirRemove            = removeDirectory     =<<. str2filesystem
+dirList dir          = str2filesystem dir >>= getDirectoryContents >>= mapM filesystem2str
+dirWildcardList wc   = dirList (takeDirectory wc)  >>==  filter (match$ takeFileName wc)
 
 -- kidnapped from System.Directory :)))
 fileWithStatus :: String -> FilePath -> (Ptr CStat -> IO a) -> IO a
@@ -369,260 +541,20 @@ fileCopyBytes srcfile size dstfile = do
       bytes <- fileReadBuf srcfile buf bytes        -- Проверим, что прочитано ровно столько байт, сколько затребовано
       fileWriteBuf dstfile buf bytes
 
-
----------------------------------------------------------------------------------------------------
----- Парсер опции командной строки -sc/--charset --------------------------------------------------
----------------------------------------------------------------------------------------------------
-
--- |Обработать список опций --charset/-sc, возвратив таблицу кодировок
--- и процедуры чтения/записи файлов с её учётом
-parse_charset_option optionsList = (charsets, parseFile, unParseFile)
-  where
-    -- Таблица кодировок
-    charsets = foldl f aCHARSET_DEFAULTS optionsList
-    -- Функция обработки опций --charset
-    f value "--"      =  aCHARSET_DEFAULTS      -- -sc-- означает восстановить значения по умолчанию
-    f value ('s':cs)  =  _7zToRAR value "l" cs  -- -scs... устанавливает кодировку для листфайлов
-    f value ('l':cs)  =  _7zToRAR value "l" cs  -- -scl... does the same
-    f value ('c':cs)  =  _7zToRAR value "c" cs  -- -scs... устанавливает кодировку для комментфайлов
-    f value ('f':cs)  =  _7zToRAR value "f" cs  -- -scf... устанавливает кодировку для файловой системы
-    f value ('d':cs)  =  _7zToRAR value "d" cs  -- -scd... устанавливает кодировку для каталога архива
-    f value ('t':cs)  =  _7zToRAR value "t" cs  -- -sct... устанавливает кодировку для терминала (консоли)
-    f value ('p':cs)  =  _7zToRAR value "p" cs  -- -scp... устанавливает кодировку для параметров ком. строки
-    f value ('i':cs)  =  _7zToRAR value "i" cs  -- -sci... устанавливает кодировку для ini-файлов (arc.ini/arc.groups)
-    f value (x:cs)    =  foldl Utils.update value [(c,x) | c<-cs|||"cl"]  -- установить в `x` элементы списка, перечисленные в cs (по умолчанию 'c' и 'l')
-    -- Вспомогательные функции, преобразующие 7zip-овский формат опций в RAR'овский
-    _7zToRAR value typ cs  =  f value (g (strLower cs):typ)
-    g "utf-8"  = '8';  g "win"  = 'a'
-    g "utf8"   = '8';  g "ansi" = 'a'
-    g "utf-16" = 'u';  g "dos"  = 'o'
-    g "utf16"  = 'u';  g "oem"  = 'o'
-
-    -- Процедура чтения файла, транслирующая его кодировку и разбивающая на отдельные строки
-    parseFile domain file = fileGetBinary file
-                                >>== aTRANSLATE_INPUT (translation charsets domain)
-                                >>== linesCRLF
-
-    -- Процедура записи файла, транслирующая данные в его кодировку
-    unParseFile domain file = filePutBinary file
-                                  . aTRANSLATE_OUTPUT (translation charsets domain)
-
-
--- |Разбиение на строки файла, ипользующего любое представление конца строки (CR, LF, CR+LF)
-linesCRLF = recursive oneline  -- oneline "abc\n..." = ("abc","...")
-              where oneline ('\r':'\n':s)  =  ("",'\xFEFF':s)
-                    oneline ('\r':s)       =  ("",'\xFEFF':s)
-                    oneline ('\n':s)       =  ("",'\xFEFF':s)
-                    oneline ('\xFEFF':s)   =  oneline s
-                    oneline (c:s)          =  (c:s0,s1)  where (s0,s1) = oneline s
-                    oneline ""             =  ("","")
+-- |True, если существует файл или каталог с заданным именем
+fileOrDirExist f  =  mapM ($f) [fileExist, dirExist] >>== or
 
 
 ---------------------------------------------------------------------------------------------------
----- Поддержка различных кодировок для ввода/вывода -----------------------------------------------
+---- Глобальные настройки перекодировки для использования в глубоко вложенных функциях ------------
 ---------------------------------------------------------------------------------------------------
 
--- |Транслировать входные данные из области domain (листфайлы, конфигфайлы, коммент-файлы...),
--- используя charset, заданный для неё в domainСharsets
-translation domainCharsets domain  =  translators
-  where charset     = lookup domain  domainCharsets `defaultVal` error ("Unknown charset domain "++quote [domain])
-        translators = lookup charset aCHARSETS      `defaultVal` error ("Unknown charset "++quote [charset])
-
--- |Translate filename from internal to terminal encoding
-str2terminal   = aTRANSLATE_OUTPUT (translation aCHARSET_DEFAULTS 't')
--- |Translate filename from filelist to internal encoding
-filelist2str   = aTRANSLATE_INPUT  (translation aCHARSET_DEFAULTS 'l')
--- |Translate filename from cmdline to internal encoding
-cmdline2str    = aTRANSLATE_INPUT  (translation aCHARSET_DEFAULTS 'p')
 -- |Translate filename from filesystem to internal encoding
-filesystem2str = aTRANSLATE_INPUT  (translation aCHARSET_DEFAULTS 'f')
+filesystem2str'   = unsafePerformIO$ newIORef$ id   -- 'id' means that inifiles can't have non-English names
+filesystem2str s  = val filesystem2str' >>== ($s)
 -- |Translate filename from internal to filesystem encoding
-str2filesystem = aTRANSLATE_OUTPUT (translation aCHARSET_DEFAULTS 'f')
-
--- Типы, используемые для представления domain и charset
-type Domain  = Char
-type Charset = Char
-
--- |Each charset is represented by pair of functions: input translation (byte sequence into Unicode String) and output translation
-data TRANSLATION = TRANSLATION {aTRANSLATE_INPUT, aTRANSLATE_OUTPUT :: String->String}
-
--- |Character sets and functions to translate texts from/to these charsets
-aCHARSETS = [ ('0', TRANSLATION id               id)
-            , ('8', TRANSLATION utf8_to_unicode  unicode2utf8)
-            , ('u', TRANSLATION utf16_to_unicode unicode2utf16)
-            ] ++ aLOCAL_CHARSETS
-
-
-#ifdef FREEARC_UNIX
-
-aLOCAL_CHARSETS = []
-
--- |Default charsets for various domains
-aCHARSET_DEFAULTS = [ ('f','8')  -- filenames in filesystem: UTF-8
-                    , ('d','8')  -- filenames in archive directory: UTF-8
-                    , ('l','8')  -- filelists: UTF-8
-                    , ('c','8')  -- comment files: UTF-8
-                    , ('t','8')  -- terminal: UTF-8
-                    , ('p','8')  -- program arguments: UTF-8
-                    , ('i','8')  -- ini/group files: UTF-8
-                    ]
-
-#else
-
--- |Windows-specific charsets
-aLOCAL_CHARSETS = [ ('o', TRANSLATION oem2unicode  unicode2oem)
-                  , ('a', TRANSLATION ansi2unicode unicode2ansi)
-                  ]
-
--- |Default charsets for various domains
-aCHARSET_DEFAULTS = [ ('f','u')  -- filenames in filesystem: UTF-16
-                    , ('d','8')  -- filenames in archive directory: UTF-8
-                    , ('l','o')  -- filelists: OEM
-                    , ('c','o')  -- comment files: OEM
-                    , ('t','o')  -- terminal: OEM
-                    , ('p','a')  -- program arguments: ANSI
-                    , ('i','o')  -- ini/group files: OEM
-                    ]
-
----------------------------------------------------------------------------------------------------
----- Windows-specific codecs ----------------------------------------------------------------------
----------------------------------------------------------------------------------------------------
-
--- |Преобразовать виндовые коды символов \r и \n в человеческий вид
-iHateWindows = replace (chr 9834) '\r' . replace (chr 9689) '\n'
-
--- |Translate string from Unicode to OEM encoding
-unicode2oem s =
-  if all isAscii s
-    then s
-    else unsafePerformIO $ do
-           withCWStringLen s $ \(wstr,len) -> do
-             allocaBytes len $ \cstr -> do
-               c_WideToOemBuff wstr cstr (i len)
-               peekCStringLen (cstr,len)
-
--- |Translate string from OEM encoding to Unicode
-oem2unicode s =
-  if all isAscii s
-    then s
-    else iHateWindows $
-         unsafePerformIO $ do
-           withCStringLen s $ \(cstr,len) -> do
-             allocaBytes (len*2) $ \wstr -> do
-               c_OemToWideBuff cstr wstr (i len)
-               peekCWStringLen (wstr,len)
-
--- |Translate string from Unicode to ANSI encoding
-unicode2ansi s =
-  if all isAscii s
-    then s
-    else unsafePerformIO $ do
-           withCWStringLen s $ \(wstr,len) -> do
-             allocaBytes len $ \cstr -> do
-               c_WideToOemBuff wstr cstr (i len)
-               c_OemToAnsiBuff cstr cstr (i len)
-               peekCStringLen (cstr,len)
-
--- |Translate string from ANSI encoding to Unicode
-ansi2unicode s =
-  if all isAscii s
-    then s
-    else iHateWindows $
-         unsafePerformIO $ do
-           withCStringLen s $ \(cstr,len) -> do
-             allocaBytes (len*2) $ \wstr -> do
-               c_AnsiToOemBuff cstr cstr (i len)
-               c_OemToWideBuff cstr wstr (i len)
-               peekCWStringLen (wstr,len)
-
-foreign import stdcall unsafe "winuser.h CharToOemBuffW"
-  c_WideToOemBuff :: CWString -> CString -> DWORD -> IO Bool
-
-foreign import stdcall unsafe "winuser.h OemToCharBuffW"
-  c_OemToWideBuff :: CString -> CWString -> DWORD -> IO Bool
-
-foreign import stdcall unsafe "winuser.h OemToCharBuffA"
-  c_OemToAnsiBuff :: CString -> CString -> DWORD -> IO Bool
-
-foreign import stdcall unsafe "winuser.h CharToOemBuffA"
-  c_AnsiToOemBuff :: CString -> CString -> DWORD -> IO Bool
-
-#endif
-
-
----------------------------------------------------------------------------------------------------
----- UTF-8, UTF-16 codecs -------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------
-
--- |Translate string from UTF-16 encoding to Unicode
-utf16_to_unicode = tryToSkip [chr 0xFEFF] . map chr . fromUTF16 . map ord
- where
-  fromUTF16 (c1:c2:c3:c4:wcs)
-    | 0xd8<=c2 && c2<=0xdb  &&  0xdc<=c4 && c4<=0xdf =
-      ((c1+c2*256 - 0xd800)*0x400 + (c3+c4*256 - 0xdc00) + 0x10000) : fromUTF16 wcs
-  fromUTF16 (c1:c2:wcs) = c1+c2*256 : fromUTF16 wcs
-  fromUTF16 [] = []
-
--- |Translate string from Unicode to UTF-16 encoding
-unicode2utf16 = map chr . foldr utf16Char [] . map ord
- where
-  utf16Char c wcs
-    | c < 0x10000 = c `mod` 256 : c `div` 256 : wcs
-    | otherwise   = let c' = c - 0x10000 in
-                    ((c' `div` 0x400) .&. 0xFF) :
-                    (c' `div` 0x40000 + 0xd8) :
-                    (c' .&. 0xFF) :
-                    (((c' `mod` 0x400) `div` 256) + 0xdc) : wcs
-
--- |Translate string from UTF-8 encoding to Unicode
-utf8_to_unicode s =
-  if all isAscii s
-    then s
-    else (tryToSkip [chr 0xFEFF] . fromUTF' . map ord) s  where
-            fromUTF' [] = []
-            fromUTF' (all@(x:xs))
-                | x<=0x7F = chr x : fromUTF' xs
-                | x<=0xBF = err
-                | x<=0xDF = twoBytes all
-                | x<=0xEF = threeBytes all
-                | x<=0xFF = fourBytes all
-                | otherwise = err
-            twoBytes (x1:x2:xs) = chr  ((((x1 .&. 0x1F) `shift` 6) .|.
-                                          (x2 .&. 0x3F))):fromUTF' xs
-            twoBytes _ = error "fromUTF: illegal two byte sequence"
-
-            threeBytes (x1:x2:x3:xs) = chr ((((x1 .&. 0x0F) `shift` 12) .|.
-                                             ((x2 .&. 0x3F) `shift` 6) .|.
-                                              (x3 .&. 0x3F))):fromUTF' xs
-            threeBytes _ = error "fromUTF: illegal three byte sequence"
-
-            fourBytes (x1:x2:x3:x4:xs) = chr ((((x1 .&. 0x0F) `shift` 18) .|.
-                                               ((x2 .&. 0x3F) `shift` 12) .|.
-                                               ((x3 .&. 0x3F) `shift` 6) .|.
-                                                (x4 .&. 0x3F))):fromUTF' xs
-            fourBytes _ = error "fromUTF: illegal four byte sequence"
-
-            err = error "fromUTF: illegal UTF-8 character"
-
--- |Translate string from Unicode to UTF-8 encoding
-unicode2utf8 s =
-  if all isAscii s
-    then s
-    else go s
-      where go [] = []
-            go (x:xs) | ord x<=0x007f = chr (ord x) : go xs
-                      | ord x<=0x07ff = chr (0xC0 .|. ((ord x `shiftR` 6) .&. 0x1F)):
-                                        chr (0x80 .|. ( ord x .&. 0x3F)):
-                                        go xs
-                      | ord x<=0xffff = chr (0xE0 .|. ((ord x `shiftR` 12) .&. 0x0F)):
-                                        chr (0x80 .|. ((ord x `shiftR`  6) .&. 0x3F)):
-                                        chr (0x80 .|. ( ord x .&. 0x3F)):
-                                        go xs
-                      | otherwise     = chr (0xF0 .|. ( ord x `shiftR` 18)) :
-                                        chr (0x80 .|. ((ord x `shiftR` 12) .&. 0x3F)) :
-                                        chr (0x80 .|. ((ord x `shiftR`  6) .&. 0x3F)) :
-                                        chr (0x80 .|. ( ord x .&. 0x3F)) :
-                                        go xs
+str2filesystem'   = unsafePerformIO$ newIORef$ id
+str2filesystem s  = val str2filesystem' >>== ($s)
 
 
 ---------------------------------------------------------------------------------------------------

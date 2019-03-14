@@ -23,17 +23,27 @@ REP_METHOD::REP_METHOD()
 }
 
 // Функция распаковки
-int REP_METHOD::decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int REP_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
-  return rep_decompress (BlockSize, MinCompression, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
+  // Use faster function from DLL if possible
+  static FARPROC f = LoadFromDLL ("rep_decompress");
+  if (!f) f = (FARPROC) rep_decompress;
+
+  return ((int (__cdecl *)(MemSize, int, int, int, int, int, int, CALLBACK_FUNC*, void*)) f)
+                          (BlockSize, MinCompression, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
 }
 
 #ifndef FREEARC_DECOMPRESS_ONLY
 
 // Функция упаковки
-int REP_METHOD::compress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int REP_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
-  return rep_compress (BlockSize, MinCompression, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
+  // Use faster function from DLL if possible
+  static FARPROC f = LoadFromDLL ("rep_compress");
+  if (!f) f = (FARPROC) rep_compress;
+
+  return ((int (__cdecl *)(MemSize, int, int, int, int, int, int, CALLBACK_FUNC*, void*)) f)
+                          (BlockSize, MinCompression, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_REP)
@@ -49,6 +59,17 @@ void REP_METHOD::ShowCompressionMethod (char *buf)
     sprintf (HashSizeLogStr, HashSizeLog!=defaults.HashSizeLog? ":h%d" : "", HashSizeLog);
     sprintf (MinMatchLenStr, MinMatchLen!=defaults.MinMatchLen? ":%d"  : "", MinMatchLen);
     sprintf (buf, "rep:%s%s%s%s%s%s%s", BlockSizeStr, MinCompressionStr, MinMatchLenStr, BarrierStr, SmallestLenStr, HashSizeLogStr, AmplifierStr);
+}
+
+// Посчитать, сколько памяти требуется для упаковки заданным методом
+MemSize REP_METHOD::GetCompressionMem (void)
+{
+    // Скопировано из rep_compress
+    int L = roundup_to_power_of (mymin(SmallestLen,MinMatchLen)/2, 2);  // Размер блоков, КС которых заносится в хеш
+    int k = sqrtb(L*2);
+    int HashSize = CalcHashSize (HashSizeLog, BlockSize, k);
+
+    return BlockSize + HashSize*sizeof(int);
 }
 
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)

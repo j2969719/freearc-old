@@ -21,8 +21,8 @@ import Files
 import qualified ByteStream
 import FileInfo
 import Compression      (CRC, isFakeCompressor)
-import Statistics       (debugLog)
-import Cmdline          (opt_broken_archive, opt_decryption_info, opt_dir_exclude_path)
+import UI               (debugLog)
+import Options
 import ArhiveStructure
 
 ----------------------------------------------------------------------------------------------------
@@ -33,9 +33,12 @@ import ArhiveStructure
 data ArchiveInfo = ArchiveInfo
          { arcArchive    :: Archive           -- открытый файл архива
          , arcFooter     :: FooterBlock       -- FOOTER BLOCK архива
+         , arcDirectory  :: [CompressedFile]  -- файлы, содержащиеся в архиве
+         , arcDataBlocks :: [ArchiveBlock]    -- список солид-блоков
          , arcDirBytes   :: FileSize          -- размер служебных блоков в распакованном виде
          , arcDirCBytes  :: FileSize          -- размер служебных блоков в упакованном виде
-         , arcDirectory  :: [CompressedFile]  -- файлы, содержащиеся в архиве
+         , arcDataBytes  :: FileSize          -- размер данных в распакованном виде
+         , arcDataCBytes :: FileSize          -- размер данных в упакованном виде
          , arcPhantom    :: Bool              -- True, если архива на самом деле нет (используется для main_archive)
          }
 
@@ -49,7 +52,7 @@ arcComment = ftComment . arcFooter
 phantomArc  =  (dirlessArchive (error "phantomArc:arcArchive") (FooterBlock [] False "" "" 0)) {arcPhantom = True}
 
 -- |Архив без каталога файлов - используется только для вызова writeSFX из runArchiveRecovery
-dirlessArchive archive footer = ArchiveInfo archive footer (error "emptyArchive:arcDirBytes") (error "emptyArchive:arcDirCBytes") [] False
+dirlessArchive archive footer = ArchiveInfo archive footer [] [] (error "emptyArchive:arcDirBytes") (error "emptyArchive:arcDirCBytes") (error "emptyArchive:arcDataBytes") (error "emptyArchive:arcDataCBytes") False
 
 -- |Закрыть архивный файл, если только это не фантомный архив
 arcClose arc  =  unless (arcPhantom arc) $  do archiveClose (arcArchive arc)
@@ -76,13 +79,19 @@ archiveReadInfo command               -- выполняемая команда со всеми её опциями
       (buf,size) <- archiveBlockReadAll pool (opt_decryption_info command) block
       archiveReadDir arc_basedir disk_basedir (opt_dir_exclude_path command) archive (blPos block) filter_f (return (buf,size))
 
+  let data_blocks = concatMap fst files
+      directory   = concatMap snd files
+
   -- Добавим в arcinfo информацию о списке файлов в архиве
-  return ArchiveInfo { arcArchive   = archive
-                     , arcFooter    = footer
-                     , arcDirBytes  = sum (map blOrigSize dir_blocks)
-                     , arcDirCBytes = sum (map blCompSize dir_blocks)
-                     , arcDirectory = concat files
-                     , arcPhantom   = False
+  return ArchiveInfo { arcArchive    = archive
+                     , arcFooter     = footer
+                     , arcDirectory  = directory
+                     , arcDataBlocks = data_blocks
+                     , arcDirBytes   = sum (map blOrigSize dir_blocks)
+                     , arcDirCBytes  = sum (map blCompSize dir_blocks)
+                     , arcDataBytes  = sum (map blOrigSize data_blocks)
+                     , arcDataCBytes = sum (map blCompSize data_blocks)
+                     , arcPhantom    = False
                      }
 
 
@@ -125,8 +134,10 @@ archiveWriteDir dirdata     -- список пар (block :: ArchiveBlock, directory :: [
 
   -- 0. Cоздадим выходной буфер, использующий для общения с внешним миром функции `receiveBuf` и `sendBuf`
   stream <- ByteStream.create receiveBuf sendBuf (return ())
-  let write          =  ByteStream.write          stream   -- shortcuts для функций записи в буфер
+  let write         :: (ByteStream.BufferData a) =>  a -> IO ()   -- shortcuts для функций записи в буфер
+      write          =  ByteStream.write          stream
       writeLength    =  ByteStream.writeInteger   stream . length
+      writeList     :: (ByteStream.BufferData a) =>  [a] -> IO ()
       writeList      =  ByteStream.writeList      stream
       writeIntegers  =  mapM_ (ByteStream.writeInteger stream)
       writeTagged     tag x   =  write tag >> write x     -- запись с тегами - для опциональных полей
@@ -211,41 +222,43 @@ archiveReadDir arc_basedir   -- базовый каталог в архиве
 
   -- 0. Cоздадим входной буфер, использующий для общения с внешним миром функцию `receiveBuf`
   stream <- ByteStream.open receiveBuf (\a b c->return ()) (return ())
-  let read           = ByteStream.read stream           -- shortcuts для функций чтения из буфера
+  let read         :: (ByteStream.BufferData a) =>  IO a   -- shortcuts для функций чтения из буфера
+      read           = ByteStream.read stream
+      readList     :: (ByteStream.BufferData a) =>  Int -> IO [a]
       readList       = ByteStream.readList stream
       readInteger    = ByteStream.readInteger stream
       readLength     = readInteger
       readIntegers n = replicateM n readInteger
 
   -- 1. Прочитаем описания блоков архива
-  num_of_blocks <- readLength                   -- кол-во блоков
+  num_of_blocks <- readLength                     -- кол-во блоков
   -- Для каждого блока прочитаем:
-  num_of_files  <- readIntegers num_of_blocks   -- кол-во файлов
-  blCompressors <- readList     num_of_blocks   -- метод сжатия
-  blOffsets     <- readList     num_of_blocks   -- относительную позицию блока в файле архива
-  blCompSizes   <- readList     num_of_blocks   -- размер блока в упакованном виде
+  num_of_files  <- readIntegers num_of_blocks     -- кол-во файлов
+  blCompressors <- readList     num_of_blocks     -- метод сжатия
+  blOffsets     <- readList     num_of_blocks     -- относительную позицию блока в файле архива
+  blCompSizes   <- readList     num_of_blocks     -- размер блока в упакованном виде
 
   -- 2. Прочитаем имена каталогов
-  -- Сколько всего имён каталогов сохранено в этом оглавлении архива
-  total_dirs  <-  readLength
-  -- Массив имён каталогов
-  storedName  <-  readList total_dirs >>== toP
+  total_dirs    <-  readLength                    -- Сколько всего имён каталогов сохранено в этом оглавлении архива
+  storedName    <-  readList total_dirs >>== toP  -- Массив имён каталогов
 
   -- 3. Прочитаем списки данных для каждого поля в CompressedFile/FileInfo
-  let total_files = sum num_of_files         -- суммарное кол-во файлов в каталоге
-  names        <- readList     total_files   -- Имена файлов (без имени каталога)
-  dir_numbers  <- readIntegers total_files   -- Номер каталога для каждого из файлов
-  sizes        <- readList     total_files   -- Размеры файлов
-  times        <- readList     total_files   -- Время модификации файлов
-  dir_flags    <- readList     total_files   -- Булевские флаги "это каталог?"
-  crcs         <- readList     total_files   -- CRC файлов
+  let total_files = sum num_of_files              -- суммарное кол-во файлов в каталоге
+  names         <- readList     total_files       -- Имена файлов (без имени каталога)
+  dir_numbers   <- readIntegers total_files       -- Номер каталога для каждого из файлов
+  sizes         <- readList     total_files       -- Размеры файлов
+  times         <- readList     total_files       -- Время модификации файлов
+  dir_flags     <- readList     total_files       -- Булевские флаги "это каталог?"
+  crcs          <- readList     total_files       -- CRC файлов
 
-  -- 4. Опциональные поля, префиксируются своими тегами, в конце - тег окончания опциональных полей
-  repeat_whileM (read) (/=aTAG_END) $ \tag -> do
-    -- to do: пропустить данные этого поля  -  ByteStream.skipBytes stream =<< readInteger
-    registerError$ GENERAL_ERROR ("can't skip optional field TAG="++show tag++" in archive directory")
+  -- 4. Дополнительные поля, префиксируются своими тегами, в конце - тег окончания дополнительных полей
+{-repeat_while (read) (/=aTAG_END) $ \tag -> do
+    (isMandatory::Bool) <- read
+    when isMandatory $ do
+      registerError$ GENERAL_ERROR ("can't skip mandatory field TAG="++show tag++" in archive directory")
+    readInteger >>= ByteStream.skipBytes stream   -- пропустить данные этого поля
     return ()
-
+-}
   -- 5. Вотысё! :)
   ByteStream.closeIn stream
   debugLog "  Directory decoded"
@@ -282,6 +295,7 @@ archiveReadDir arc_basedir   -- базовый каталог в архиве
                                   , fiTime          =  time
                                   , fiAttr          =  0
                                   , fiIsDir         =  dir_flag
+                                  , fiGroup         =  fiUndefinedGroup
                                   }
               fiStoredName    =  packFilePathPacked2 stored   (fpPackedFullname stored)   name
               fiFilteredName  =  packFilePathPacked2 filtered (fpPackedFullname filtered) name
@@ -324,15 +338,15 @@ archiveReadDir arc_basedir   -- базовый каталог в архиве
       scanningSum xs = 0 : scanl1 (+) (init xs)
 
   -- Теперь у нас готовы все компоненты для создания списка файлов, содержащихся в этом каталоге
-  let result = [ CompressedFile fileinfo arcblock pos crc
-               | (Just fileinfo, arcblock, pos, crc)  <-  zip4 fileinfos arcblocks positions crcs
-               ]
+  let files = [ CompressedFile fileinfo arcblock pos crc
+              | (Just fileinfo, arcblock, pos, crc)  <-  zip4 fileinfos arcblocks positions crcs
+              ]
 
-  return $! evalList result              -- Переведём созданный список файлов в вычисленное состояние
+  return $! evalList files               -- Переведём созданный список файлов в вычисленное состояние
   when (total_files >= 10000) performGC  -- Соберём мусор, если блок содержит достаточно много файлов
   debugLog "  Directory built"
 
-  return result
+  return (blocks, files)
 
 --  let f CompressedFile{cfFileInfo=FileInfo{fiFilteredName=PackedFilePath{fpParent=PackedFilePath{fpParent=RootDir}}}} = True
 --      f _ = False
@@ -367,6 +381,15 @@ cfCompressor = blCompressor.cfArcBlock
 
 -- |Это сжатый файл, использующий фейковый метод компрессии?
 isCompressedFake file  =  isCompressedFile file  &&  isFakeCompressor (cfCompressor file)
+
+-- |Это запаролированный файл?
+cfIsEncrypted = blIsEncrypted . cfArcBlock
+
+-- |Определить тип файла по группе, если она не проставлена - вычислить по имени
+cfType command file | group/=fiUndefinedGroup  =  opt_group2type command group
+                    | otherwise                =  opt_find_type command fi
+                                                    where fi    = cfFileInfo file
+                                                          group = fiGroup fi
 
 
 ----------------------------------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 #include "../Compression.h"
 
-int delta_compress   (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
-int delta_decompress (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+int delta_compress   (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, void *auxdata);
+int delta_decompress (MemSize BlockSize, int ExtendedTables, CALLBACK_FUNC *callback, void *auxdata);
 
 
 #ifdef __cplusplus
@@ -18,9 +18,9 @@ public:
   DELTA_METHOD();
 
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DELTA)
   virtual void ShowCompressionMethod (char *buf);

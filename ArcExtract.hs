@@ -4,6 +4,7 @@
 module ArcExtract ( runArchiveExtract
                   , runArchiveList
                   , runCommentWrite
+                  , formatDateTime
                   ) where
 
 import Prelude hiding (catch)
@@ -14,17 +15,19 @@ import Foreign.C.Types
 import Foreign.C.String
 import Foreign.Marshal.Alloc
 import Numeric
+import System.IO.Unsafe
+import System.Posix.Internals
 
+import Process
 import Utils
 import Files
-import Process
-import Errors
 import FileInfo
-import Compression         (aINIT_CRC, updateCRC, finishCRC)
-import Cmdline
-import CUI
-import Statistics
-import ArhiveStructure     (ftComment)
+import Charsets            (i18n)
+import Errors
+import Compression         (aINIT_CRC, updateCRC, finishCRC, join_compressor)
+import Options
+import UI
+import ArhiveStructure
 import ArhiveDirectory
 import ArcvProcessExtract
 
@@ -39,12 +42,13 @@ runArchiveExtract pretestArchive
                                  } = do
     -- Суперэкономия памяти: find_archives -> buffer 10_000 -> read_dir -> buffer 10_000 -> arcExtract
   doFinally uiDoneArchive2 $ do
-  uiStartArchive command "" undefined  -- сообщить пользователю о начале обработки очередного архива
+  uiStartArchive command []  -- сообщить пользователю о начале обработки очередного архива
+  uiStage "0249 Reading archive directory"
   command <- (command.$ opt_cook_passwords) command ask_passwords  -- подготовить пароли в команде к использованию
   let openArchive = archiveReadInfo command arc_basedir disk_basedir archive_filter (pretestArchive command)
-  bracketCtrlBreak (openArchive arcname) (arcClose)$ \archive -> do
-    uiPrintArcComment (arcComment archive)           -- Напечатать комментарий
-    when (arccmt_file/="-" && arccmt_file/="--") $   -- и записать его в файл, указанный опцией -z
+  bracketCtrlBreak "arcClose:ArcExtract" (openArchive arcname) (arcClose)$ \archive -> do
+    uiPrintArcComment (arcComment archive)            -- Напечатать комментарий
+    when (arccmt_file/="-" && arccmt_file/="--") $    -- и записать его в файл, указанный опцией -z
       unParseFile 'c' arccmt_file (arcComment archive)
     arcExtract command archive
   uiDoneArchive  -- напечатать и вернуть в вызывающую процедуру статистику выполнения команды
@@ -56,20 +60,19 @@ arcExtract command arcinfo = do
                        "t"  -> test_file
                        _    -> extract_file (fpFullname.fiDiskName) command
   -- Отобразить в UI общий объём распаковываемых файлов и объём уже распакованного каталога архива
-  uiStartProcessing (map cfFileInfo (arcDirectory arcinfo))
+  uiStartProcessing (map cfFileInfo (arcDirectory arcinfo))  (arcDataBytes arcinfo)  (arcDataCBytes arcinfo)
   uiStartDirectory
   uiUnpackedBytes   (arcDirBytes  arcinfo)
   uiCompressedBytes (arcDirCBytes arcinfo)
   uiStartFiles 0
-  -- Создать процесс для распаковки файлов
-  decompress_pipe <- runAsyncP$ decompress_PROCESS command (uiCompressedBytes.i)
+  -- Создадим процесс для распаковки файлов и гарантируем его корректное завершение
+  bracket (runAsyncP$ decompress_PROCESS command (uiCompressedBytes.i))
+          ( \decompress_pipe -> do sendP decompress_pipe Nothing; joinP decompress_pipe)
+          $ \decompress_pipe -> do
   -- Распаковать каждый распаковываемый файл и выругаться на нераспаковываемые
   let (filesToSkip, filesToExtract)  =  partition isCompressedFake (arcDirectory arcinfo)
   for filesToExtract (process_file decompress_pipe)   -- runP$ enum_files |> decompress |> write_files
   unless (null filesToSkip)$  do registerWarning$ SKIPPED_FAKE_FILES (length filesToSkip)
-  -- Завершить работу подпроцесса распаковки
-  sendP decompress_pipe Nothing
-  joinP decompress_pipe
 
 -- |Тестирование одного файла из архива
 test_file decompress_pipe compressed_file = do
@@ -98,7 +101,7 @@ extract_file filename_func command decompress_pipe compressed_file = do
                         clearArchiveBit filename            -- Опция -ac - очистить атрибут Archive после распаковки
             else fileRemove filename                     -- Удалить файл, распакованный с ошибками
     do  --fileSetSize outfile (fiSize fileinfo)  -- Приличная ОС при этом выделит на диске место для файла одним куском
-        handleCtrlBreak (closeOutfile False) $ do
+        handleCtrlBreak "closeOutfile" (closeOutfile False) $ do
           ok <- run_decompress decompress_pipe compressed_file (fileWriteBuf outfile)
           closeOutfile ok
 
@@ -115,16 +118,20 @@ can_be_extracted cmd filename arcfile = do
   if not diskfile_exist                         -- Если файл на диске не существует
     then return (opt_update_type cmd /= 'f')    -- то извлечь файл из архива можно во всех случаях, кроме '-f'
     else do
-  diskfile_time     <-  getFileDateTime filename
-  let arcfile_newer  =  fiTime arcfile > diskfile_time   -- файл в архиве свежее, чем на диске?
+  fileWithStatus "getFileInfo" filename $ \p_stat -> do
+  diskFileIsDir  <-  stat_mode  p_stat  >>==  s_isdir
+  diskFileTime   <-  stat_mtime p_stat
+  diskFileSize   <-  if diskFileIsDir then return 0
+                                      else stat_size p_stat
+  let arcfile_newer  =  fiTime arcfile > diskFileTime   -- файл в архиве свежее, чем на диске?
   let overwrite = case (opt_update_type cmd) of
                     'f' -> arcfile_newer
                     'u' -> arcfile_newer
                     's' -> error "--sync can't be used on extract"
                     'a' -> True
-  if overwrite
-    then askOverwrite filename (opt_overwrite cmd) arcfile_newer
-    else return False
+  if not overwrite  then return False  else do
+  askOverwrite filename diskFileSize diskFileTime arcfile (opt_overwrite cmd) arcfile_newer
+
 
 {-# NOINLINE run_decompress #-}
 -- |Распаковка файла из архива с проверкой CRC
@@ -154,7 +161,7 @@ runCommentWrite command@Command{ cmd_filespecs   = filespecs
                                } = do
   doFinally uiDoneArchive2 $ do
   when (length filespecs /= 1) $
-    registerError$ CMDLINE_GENERAL "command syntax is \"cw archive outfile\""
+    registerError$ CMDLINE_SYNTAX "cw archive outfile"
   let [outfile] = filespecs
   command <- (command.$ opt_cook_passwords) command ask_passwords  -- подготовить пароли в команде к использованию
   printLineLn$ "Writing archive comment of "++arcname++" to "++outfile
@@ -179,7 +186,7 @@ runArchiveList pretestArchive
                               } = do
   command <- (command.$ opt_cook_passwords) command ask_passwords  -- подготовить пароли в команде к использованию
   bracket (archiveReadInfo command arc_basedir "" archive_filter (pretestArchive command) arcname) (arcClose) $
-      archiveList command (length arclist==1)
+      archiveList command (null$ tail arclist)
 
 -- |Листинг архива
 archiveList command @ Command{ cmd_name = cmd, cmd_arcname = arcname }
@@ -189,66 +196,89 @@ archiveList command @ Command{ cmd_name = cmd, cmd_arcname = arcname }
       bytes = sum$ map (fiSize.cfFileInfo) directory
   when (files>0 || show_empty) $ do
     doFinally uiDoneArchive2 $ do
-    uiStartArchive command "" undefined -- Сообщить пользователю о начале обработки очередного архива
+    uiStartArchive command [] -- Сообщить пользователю о начале обработки очередного архива
+    let list line1 line2 list_func linelast = do
+                uiPrintArcComment (arcComment arc)
+                myPutStrLn line1
+                myPutStrLn line2
+                compsize <- list_func
+                myPutStrLn linelast
+                myPutStr$   show3 files ++ " files, " ++ show3 bytes ++ " bytes, " ++ show3 compsize ++ " compressed"
     case cmd of
-      "l" -> do uiPrintArcComment (arcComment arc)
-                putStrLn$ "Date/time                  Size Filename"
-                putStrLn$ "----------------------------------------"
-                mapM_ terse_list directory
-                putStrLn$ "----------------------------------------"
-                putStr$   show3 files ++ " files, " ++ show3 bytes ++ " bytes"
+      "l" -> list "Date/time                  Size Filename"
+                  "----------------------------------------"
+                  (myMapM terse_list directory)
+                  "----------------------------------------"
 
-      "lb"-> do putStr$ joinWith "\n"$ map filename directory
+      "v" -> list "Date/time              Attr            Size          Packed      CRC Filename"
+                  "-----------------------------------------------------------------------------"
+                  (myMapM verbose_list directory)
+                  "-----------------------------------------------------------------------------"
 
-      "v" -> do uiPrintArcComment (arcComment arc)
-                putStrLn$ "Date/time              Attr            Size          Packed      CRC Filename"
-                putStrLn$ "-----------------------------------------------------------------------------"
-                mapM_ verbose_list directory
-                putStrLn$ "-----------------------------------------------------------------------------"
-                putStr$   show3 files ++ " files, " ++ show3 bytes ++ " bytes"
+      "lb"-> myPutStr$ joinWith "\n"$ map filename directory
 
+      "lt"-> list "              Pos            Size      Compressed   Files Method"
+                  "-----------------------------------------------------------------------------"
+                  (do mapM_ data_block_list (arcDataBlocks arc)
+                      return (sum$ map blCompSize (arcDataBlocks arc)))
+                  "-----------------------------------------------------------------------------"
   return (1, files, bytes, -1)
 
+
 -- |Имя файла
-filename = str2terminal . fpFullname . fiStoredName . cfFileInfo
+filename = fpFullname . fiStoredName . cfFileInfo
+
+-- |Добавляет к командам листинга информацию о сжатых размерах солид-блоков
+myMapM f = go 0 True undefined
+ where
+  go total first lastSolidBlock [] = return total
+  go total first lastSolidBlock (file:rest) = do
+    let solidBlock = cfArcBlock file
+    let compsize = if first  ||  blPos solidBlock /= blPos lastSolidBlock
+                     then (blCompSize solidBlock)
+                     else 0
+    f file compsize
+    (go $! total+compsize) False solidBlock rest
+
 
 -- |Однострочный простой листинг файла
-terse_list direntry = do
+terse_list direntry compsize = do
   let fi = cfFileInfo direntry
-  timestr <- formatDateTime (fiTime fi)
-  putStrLn$        timestr
-         ++ " " ++ right_justify 11 (if (fiIsDir fi) then ("-dir-") else (show3$ fiSize fi))
-         ++ " " ++ filename direntry
+  myPutStrLn$        (formatDateTime$ fiTime fi)
+           ++ " " ++ right_justify 11 (if (fiIsDir fi) then ("-dir-") else (show3$ fiSize fi))
+                  ++ (if (cfIsEncrypted direntry)  then "*"  else " ")
+                  ++ filename direntry
 
 -- |Однострочный подробный листинг файла
-verbose_list direntry = do
+verbose_list direntry compsize = do
   let fi = cfFileInfo direntry
-  timestr <- formatDateTime (fiTime fi)
-  putStrLn$        timestr
-         ++ " " ++ (if (fiIsDir fi)  then ".D....."  else ".......")
-         ++ " " ++ right_justify 15 (show$ fiSize fi)
-         ++ " " ++ right_justify 15 "0"
-         ++ " " ++ left_fill  '0' 8 (showHex (cfCRC direntry) "")
-         ++ " " ++ filename direntry
+  myPutStrLn$        (formatDateTime$ fiTime fi)
+           ++ " " ++ (if (fiIsDir fi)  then ".D....."  else ".......")
+           ++ " " ++ right_justify 15 (show$ fiSize fi)
+           ++ " " ++ right_justify 15 (show$ compsize)
+           ++ " " ++ left_fill  '0' 8 (showHex (cfCRC direntry) "")
+                  ++ (if (cfIsEncrypted direntry)  then "*"  else " ")
+                  ++ filename direntry
 
 {-
 -- |Многострочный технический листинг файла
 technical_list direntry = do
   let fi = (cfFileInfo direntry)
   timestr <- formatDateTime (fiTime fi)
-  putStrLn$ ""
-  putStrLn$ "Filename: "  ++ (str2terminal$ fpFullname$ fiStoredName fi)
-  putStrLn$ "Size: "      ++ (show$ fiSize fi)
-  putStrLn$ "Date/time: " ++ timestr
-  putStrLn$ "CRC: "       ++ showHex (cfCRC direntry) ""
-  putStrLn$ "Type: "      ++ if (fiIsDir fi) then "directory" else "file"
+  myPutStrLn$ ""
+  myPutStrLn$ "Filename: "  ++ (fpFullname$ fiStoredName fi)
+  myPutStrLn$ "Size: "      ++ (show$ fiSize fi)
+  myPutStrLn$ "Date/time: " ++ timestr
+  myPutStrLn$ "CRC: "       ++ showHex (cfCRC direntry) ""
+  myPutStrLn$ "Type: "      ++ if (fiIsDir fi) then "directory" else "file"
 -}
 
--- |Отформатировать CTime в строку с форматом "%Y-%m-%d %H:%M:%S"
-formatDateTime t  =  allocaBytes 100 $ \buf -> do
-                       c_FormatDateTime buf 100 t
-                       peekCString buf
-
-foreign import ccall unsafe "Environment.h FormatDateTime"
-  c_FormatDateTime :: CString -> CInt -> CTime -> IO ()
+-- |Описание солид-блока
+data_block_list bl = do
+  myPutStrLn$        (if (blIsEncrypted bl)  then "*"  else " ")
+           ++ " " ++ right_justify 15 (show3$ blPos      bl)
+           ++ " " ++ right_justify 15 (show3$ blOrigSize bl)
+           ++ " " ++ right_justify 15 (show3$ blCompSize bl)
+           ++ " " ++ right_justify  7 (show3$ blFiles    bl)
+           ++ " " ++ join_compressor (blCompressor bl)
 

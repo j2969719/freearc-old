@@ -64,15 +64,15 @@ int register_all()
     register_hash (&sha1_desc);
     register_hash (&sha512_desc);
 #ifndef LTC_NO_TEST
-    CHECK (blowfish_test()==CRYPT_OK, ("blowfish_test failed!\n"));
-//    CHECK (rijndael_test()==CRYPT_OK, ("rijndael_test failed!\n"));
-    CHECK (serpent_test ()==CRYPT_OK, ("serpent_test failed!\n"));
-    CHECK (twofish_test ()==CRYPT_OK, ("twofish_test failed!\n"));
-    CHECK (sha1_test    ()==CRYPT_OK, ("sha1_test failed!\n"));
-    CHECK (sha512_test  ()==CRYPT_OK, ("sha512_test failed!\n"));
-//    CHECK (hmac_test    ()==CRYPT_OK, ("hmac_test failed!\n"));
-//    CHECK (ctr_test     ()==CRYPT_OK, ("ctr_test failed!\n"));
-//    CHECK (cfb_test     ()==CRYPT_OK, ("cfb_test failed!\n"));
+    CHECK (blowfish_test()==CRYPT_OK, (s,"blowfish_test failed!"));
+//    CHECK (rijndael_test()==CRYPT_OK, (s,"rijndael_test failed!"));
+    CHECK (serpent_test ()==CRYPT_OK, (s,"serpent_test failed!"));
+    CHECK (twofish_test ()==CRYPT_OK, (s,"twofish_test failed!"));
+    CHECK (sha1_test    ()==CRYPT_OK, (s,"sha1_test failed!"));
+    CHECK (sha512_test  ()==CRYPT_OK, (s,"sha512_test failed!"));
+//    CHECK (hmac_test    ()==CRYPT_OK, (s,"hmac_test failed!"));
+//    CHECK (ctr_test     ()==CRYPT_OK, (s,"ctr_test failed!"));
+//    CHECK (cfb_test     ()==CRYPT_OK, (s,"cfb_test failed!"));
 #endif
     return 0;
 }
@@ -162,7 +162,7 @@ void Pbkdf2Hmac (const BYTE *pwd, int pwdSize, const BYTE *salt, int saltSize,
 
 // Зашифровывает или расшифровывает поток данных, в зависимости от значения DoEncryption
 int docrypt (enum TEncrypt DoEncryption, int cipher, int mode, BYTE *key, int keysize, int rounds, BYTE *iv,
-             CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+             CALLBACK_FUNC *callback, void *auxdata)
 {
     EncryptionMode encryptor(mode);
     encryptor.start (cipher, iv, key, keysize, rounds);
@@ -230,7 +230,7 @@ void decode16 (char *src, BYTE *dst)
 
 
 // Функция распаковки
-int ENCRYPTION_METHOD::decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int ENCRYPTION_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
     BYTE key_bytes[MAXKEYSIZE];  decode16 (key, key_bytes);
     BYTE iv_bytes [MAXKEYSIZE];  decode16 (iv,  iv_bytes);
@@ -240,7 +240,7 @@ int ENCRYPTION_METHOD::decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
 #ifndef FREEARC_DECOMPRESS_ONLY
 
 // Функция упаковки
-int ENCRYPTION_METHOD::compress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)
+int ENCRYPTION_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
     BYTE key_bytes[MAXKEYSIZE];  decode16 (key, key_bytes);
     BYTE iv_bytes [MAXKEYSIZE];  decode16 (iv,  iv_bytes);

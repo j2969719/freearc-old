@@ -1,7 +1,7 @@
 #include "../Compression.h"
 
-int external_compress   (char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
-int external_decompress (char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+int external_compress   (char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, void *auxdata);
+int external_decompress (char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, void *auxdata);
 
 // Добавить в таблицу методов сжатия описанный пользователем в arc.ini внешний упаковщик.
 // params содержит описание упаковщика из arc.ini. Возвращает 1, если описание корректно.
@@ -22,6 +22,9 @@ public:
   char    *packedfile;      // Наименование файла с упакованными данными
   char    *packcmd;         // Команда упаковки данных (datafile -> packedfile)
   char    *unpackcmd;       // Команда распаковки данных (packedfile -> datafile)
+  char    *options[MAX_PARAMETERS];             // Доп. параметры метода
+  char     option_strings[MAX_METHOD_STRLEN];   // Текстовый буфер для хранения текста параметров
+  char    *defaultopt;      // Значения параметров по умолчанию
 
   // Параметры, специфичные для PPMonstr
   int     order;            // Порядок модели (по скольким последним сивмолам предсказывается следующий)
@@ -37,9 +40,9 @@ public:
   }
 
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_EXTERNAL)
   virtual void ShowCompressionMethod (char *buf);

@@ -1,15 +1,17 @@
+{-# OPTIONS_GHC -cpp -fallow-overlapping-instances -fallow-undecidable-instances -fno-monomorphism-restriction #-}
 ---------------------------------------------------------------------------------------------------
 ---- Вспомогательные функции: работа со строками, списками, регулярными выражениями,           ----
 ----   аллокатор памяти. упрощение манипуляций с IORef-переменными,                            ----
 ----   определение удобных операций и управляющих структур программы.                          ----
 ---------------------------------------------------------------------------------------------------
-module Utils where
+module Utils (module Utils, module CompressionLib) where
 
 import Prelude hiding (catch)
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Data.Array
+import Data.Bits
 import Data.Char
 import Data.Either
 import Data.IORef
@@ -19,6 +21,8 @@ import Data.Word
 import Debug.Trace
 import Foreign.Marshal.Utils
 import Foreign.Ptr
+
+import CompressionLib (MemSize,b,kb,mb,gb,tb)
 
 ---------------------------------------------------------------------------------------------------
 ---- Проверим define's ----------------------------------------------------------------------------
@@ -44,27 +48,19 @@ make4byte b0 b1 b2 b3 = b0+256*(b1+256*(b2+256*b3)) :: Word32
 make4byte b0 b1 b2 b3 = b3+256*(b2+256*(b1+256*b0)) :: Word32
 #endif
 
--- |Удобные обозначения для кол-ва килобайтов, мегабайтов и т.д.
-b  = 1
-kb = 1024*b
-mb = 1024*kb
-gb = 1024*mb
-tb = 1024*gb
-b_:kb_:mb_:gb_:tb_:_   = iterate (1024*) 1 :: [Integer]
-
 -- |Разборщик чисел, указываемых во всяких опциях. Толкование числа определяется символами,
 -- написанными после него (b/k/f/...), если их нет - используется `default_specifier`.
 -- Результат возвращается в виде пары, второй элемент в которой - `b`, если результат выражен в байтах,
 -- или другой символ, записанный после числа, или переданный как `default_specifier`.
 parseNumber num default_specifier =
   case (span isDigit$ strLower$ num++[default_specifier]) of
-    (digits, 'b':_)  ->  (readI digits      , 'b')
-    (digits, 'k':_)  ->  (readI digits * kb_, 'b')
-    (digits, 'm':_)  ->  (readI digits * mb_, 'b')
-    (digits, 'g':_)  ->  (readI digits * gb_, 'b')
-    (digits, 't':_)  ->  (readI digits * tb_, 'b')
-    (digits, '^':_)  ->  (2 ^ readI digits  , 'b')
-    (digits,  c :_)  ->  (readI digits      ,  c )
+    (digits, 'b':_)  ->  (readI digits     , 'b')
+    (digits, 'k':_)  ->  (readI digits * kb, 'b')
+    (digits, 'm':_)  ->  (readI digits * mb, 'b')
+    (digits, 'g':_)  ->  (readI digits * gb, 'b')
+    (digits, 't':_)  ->  (readI digits * tb, 'b')
+    (digits, '^':_)  ->  (2 ^ readI digits , 'b')
+    (digits,  c :_)  ->  (readI digits     ,  c )
 
 -- |Расшифровать запись размера, по умолчанию - в байтах
 parseSize memstr =
@@ -87,15 +83,20 @@ parseMemWithPercents memory memstr =
         _                ->  error$ memstr++" - unrecognized size specifier"
 
 -- Должна усекать к максимальному позволенному в MemSize числу или может вообще выдавать ошибку?
-clipToMaxMemSize = i
-
+clipToMaxMemSize x | x < i(maxBound::MemSize) = i x
+                   | otherwise                = i(maxBound::MemSize)
 
 readI = foldl f 0
   where f m c | isDigit c  =  fromIntegral (ord c - ord '0') + (m * 10)
               | otherwise  =  error ("Non-digit "++[c]++" in readI")
 
 readInt :: String -> Int
-readInt = fromInteger.readI
+readInt = readI
+
+readSignedInt ('-':xs) = - readInt xs
+readSignedInt      xs  =   readInt xs
+
+isSignedInt = all isDigit.tryToSkip "-"
 
 lb :: Integral a =>  a -> Int
 lb 0 = 0
@@ -132,12 +133,16 @@ instance Defaults (a->a)               where defaultValue = id
 instance Defaults (Maybe a)            where defaultValue = Nothing
 instance Defaults (a->IO a)            where defaultValue = return
 instance Defaults a => Defaults (IO a) where defaultValue = return defaultValue
-instance Num a => Defaults a           where defaultValue = 0
+instance Defaults Int                  where defaultValue = 0
+instance Defaults Integer              where defaultValue = 0
+instance Defaults Double               where defaultValue = 0
 
-class    TestDefaultValue a    where isDefaultValue :: a -> Bool
-instance TestDefaultValue Bool where isDefaultValue = not
-instance TestDefaultValue [a]  where isDefaultValue = null
-instance Num a => TestDefaultValue a where isDefaultValue = (==0)
+class    TestDefaultValue a       where isDefaultValue :: a -> Bool
+instance TestDefaultValue Bool    where isDefaultValue = not
+instance TestDefaultValue [a]     where isDefaultValue = null
+instance TestDefaultValue Int     where isDefaultValue = (==0)
+instance TestDefaultValue Integer where isDefaultValue = (==0)
+instance TestDefaultValue Double  where isDefaultValue = (==0)
 
 infixr 3  &&&
 infixr 2  |||
@@ -166,9 +171,13 @@ whenM cond action = do
 unlessM = whenM . liftM not
 
 -- |Выполнить `action` над значением, возвращённым `x`, если оно не Nothing
-whenJustM x action  =  x >>= maybe (return Nothing) action
+whenJustM  x action  =  x >>= (`whenJust` action)
 
-whenJustM_ x action  =  x >>= maybe (return ()) (action .>> return ())
+whenJustM_ x action  =  x >>= (`whenJust_` action)
+
+whenJust   x action  =  x .$ maybe (return Nothing) (action .>>== Just)
+
+whenJust_  x action  =  x .$ maybe (return ()) (action .>> return ())
 
 -- |Выполнить `action` над значением, возвращённым `x`, если оно "Right _"
 whenRightM_ x action  =  x >>= either doNothing (action .>> return ())
@@ -185,10 +194,20 @@ for = flip mapM_
 
 -- |Условное выполнение с условием в конце строки
 infixr 0 `on`
-on = flip when
+on = flip (&&&)
 
 -- |Удобный способ записать сначала то, что должно обязательно быть выполнено в конце :)
 doFinally = flip finally
+
+-- |Выполнить onError при ошибке в acquire, и action в противном случае
+handleErrors onError acquire action = do
+  x <- try acquire
+  case x of
+    Left  err -> onError
+    Right res -> action res
+
+-- |Записать в начале то, что нужно выполнить в конце
+atExit a b = (b>>a)
 
 -- |Выполнить действие только один раз, при var=True
 once var action = do whenM (val var) action; var =: False
@@ -200,35 +219,43 @@ doNothing  a     = return ()
 doNothing2 a b   = return ()
 doNothing3 a b c = return ()
 
--- |Игнорировать исключения
+-- |Игнорировать исключени
 ignoreErrors  =  handle doNothing
+
+-- |Создать новый Channel и записать в него начальный список значений
+newChanWith xs = do c <- newChan
+                    writeList2Chan c xs
+                    return c
 
 -- |Константные функции
 const2 x _ _ = x
 const3 x _ _ _ = x
 const4 x _ _ _ _ = x
 
+-- |Нафига вам этот ThreadId??
+forkIO_ action = forkIO action >> return ()
+
 -- |Повторять бесконечно
-forever action = do
+foreverM action = do
   action
-  forever action
+  foreverM action
 
 -- |Управляющая структура, аналогичная циклу 'while' в обычных языках
-repeat_whileM inp cond out = do
+repeat_while inp cond out = do
   x <- inp
   if (cond x)
     then do out x
-            repeat_whileM inp cond out
+            repeat_while inp cond out
     else return x
 
 -- |Управляющая структура, аналогичная repeat-until в Паскале
-repeat_untilM action = do
+repeat_until action = do
   done <- action
   when (not done) $ do
-    repeat_untilM action
+    repeat_until action
 
 -- |Управляющая структура, разбивающая выполнение операции размером size
--- на отдельные операции размером не более chunk каждая
+-- на отдельные операции размером не более chunk кажда
 doChunks size chunk action =
   case size of
     0 -> return ()
@@ -260,10 +287,18 @@ mapMConditional (init,map_f,sum_f,crit_f) action list = do
 -- |Execute action with background computation
 withThread thread  =  bracket (forkIO thread) killThread . const
 
-{-# NOINLINE forever #-}
-{-# NOINLINE repeat_whileM #-}
-{-# NOINLINE repeat_untilM #-}
+-- |Выполнить действие в другом треде и возвратить конечный результат
+bg action = do
+  resultVar <- newEmptyMVar
+  forkIO (action >>= putMVar resultVar)
+  takeMVar resultVar
+
+
+{-# NOINLINE foreverM #-}
+{-# NOINLINE repeat_while #-}
+{-# NOINLINE repeat_until #-}
 {-# NOINLINE mapMConditional #-}
+{-# NOINLINE bg #-}
 
 
 -- |Отфильтровать список с помощью монадического (выполняемого) предиката
@@ -280,9 +315,16 @@ mapMaybeM f  =  go []
         go accum (x:xs)  =  f x  >>=  maybe (      go    accum  xs)
                                             (\r -> go (r:accum) xs)
 
+-- |@firstJust@ takes a list of @Maybes@ and returns the
+-- first @Just@ if there is one, or @Nothing@ otherwise.
+firstJust :: [Maybe a] -> Maybe a
+firstJust [] = Nothing
+firstJust (Just x  : ms) = Just x
+firstJust (Nothing : ms) = firstJust ms
+
 -- |Вернуть первый успешный (Just) результат применения f к списку или Nothing
 firstMaybe :: (a -> Maybe b) -> [a] -> Maybe b
-firstMaybe f  =  listToMaybe . mapMaybe f
+firstMaybe f  =  firstJust . map f
 
 -- |Заменить Nothing на значение по умолчанию
 defaultVal = flip fromMaybe
@@ -293,6 +335,10 @@ defaultValM = liftM2 defaultVal
 -- |Выбрать одно из двух значений в зависимости от последнего аргумента
 bool onFalse onTrue False  =  onFalse
 bool onFalse onTrue True   =  onTrue
+
+-- |if без синт. оверхеда
+iif True  onTrue onFalse  =  onTrue
+iif False onTrue onFalse  =  onFalse
 
 -- Применить к списку одну из двух функций в зависимости от того, пуст ли он
 list onNotNull onNull [] = onNull
@@ -363,6 +409,8 @@ any_function fs  = or . map_functions fs
 applyAll []     x = x
 applyAll (f:fs) x = applyAll fs (f x)
 
+(f>>>g) x = g(f x)
+
 
 ---------------------------------------------------------------------------------------------------
 ---- Операции над строками ------------------------------------------------------------------------
@@ -389,7 +437,7 @@ joinWith :: [a] -> [[a]] -> [a]
 joinWith x  =  concat . intersperse x
 
 -- |Соединить список строк в единый текст, используя два разных разделителя:
--- joinWith2 ["one","two","three","four"]  ", "  " and "  -->  "one, two, three and four"
+-- joinWith2 ", " " and " ["one","two","three","four"]  -->  "one, two, three and four"
 joinWith2 :: [a] -> [a] -> [[a]] -> [a]
 joinWith2 a b []    =  []
 joinWith2 a b [x]   =  x
@@ -404,7 +452,15 @@ between s1 x s2 = s1++x++s2
 quote :: String -> String
 quote str  =  "\"" ++ str ++ "\""
 
+-- |Удалить двойные кавычки вокруг строки (если они есть)
+unquote :: String -> String
+unquote ('"':str) | str>"" && x=='"'  =  xs     where (x:xs) = reverse str
+unquote str = str
+
 contains = flip elem
+
+-- |Удалить n элементов в конце спсика
+dropEnd n  =  reverse . drop n . reverse
 
 -- |Истина, если `s` содержит хотя бы один из элементов множества `set`
 s `contains_one_of` set  =  any (`elem` set) s
@@ -452,6 +508,15 @@ replaceAll from to = repl
         repl (c:cs)                                       =  c : repl cs
         repl []                                           =  []
 
+-- |Заменить %1 на заданную строку
+format msg s  =  replaceAll "%1" s msg
+
+-- |Заменить %1..%9 на заданные строки
+formatn msg s  =  go msg
+  where go ('%':d:rest) | isDigit d = (s !! (digitToInt d-1)) ++ go rest
+        go (x:rest)                 = x : go rest
+        go ""                       = ""
+
 -- |Заменить в строке `s` префикс `from` на `to`
 replaceAtStart from to s =
   case startFrom from s of
@@ -463,6 +528,33 @@ replaceAtEnd from to s =
   case startFrom (reverse from) (reverse s) of
     Just remainder  -> reverse remainder ++ to
     Nothing         -> s
+
+-- |Закодировать символы, запрещённые в URL
+urlEncode = concatMap (\c -> if isReservedChar(ord c) then '%':encode16 [c] else [c])
+  where
+        isReservedChar x
+            | x >= ord 'a' && x <= ord 'z' = False
+            | x >= ord 'A' && x <= ord 'Z' = False
+            | x >= ord '0' && x <= ord '9' = False
+            | x <= 0x20 || x >= 0x7F = True
+            | otherwise = x `elem` map ord [';','/','?',':','@','&'
+                                           ,'=','+',',','$','{','}'
+                                           ,'|','\\','^','[',']','`'
+                                           ,'<','>','#','%', chr 34]
+
+-- |Вернуть шестнадцатеричную запись строки символов с кодами <=255
+encode16 (c:cs) | n<256 = [intToDigit(n `div` 16), intToDigit(n `mod` 16)] ++ encode16 cs
+                             where n = ord c
+encode16 "" = ""
+
+-- |Декодировать шестнадцатеричную запись строки символов с кодами <=255
+decode16 (c1:c2:cs) = chr(digitToInt c1 * 16 + digitToInt c2) : decode16 cs
+decode16 ""         = ""
+
+-- |Взять первых n элементов списка и добавить к ним more для индикации того, что что-то было опущено
+takeSome n more s | (y>[])    = x ++ more
+                  | otherwise = x
+                  where  (x,y) = splitAt n s
 
 -- |Выровнять строку влево/вправо, дополнив её до заданной ширины пробелами или чем-нибудь ещё
 right_fill  c n s  =  s ++ replicate (n-length s) c
@@ -480,6 +572,9 @@ strLower = map toLower
 
 -- |Сравнить две строки, игнорируя регистр
 strLowerEq a b  =  strLower a == strLower b
+
+-- |break начиная со второго элемента
+break1 f (x:xs)  =  mapFst (x:) (break f xs)
 
 -- |Возвратить значение по умолчанию вместо головы списка, если он пуст
 head1 [] = defaultValue
@@ -532,9 +627,15 @@ groupOn f  =  groupBy (map2eq f)
 sort_and_groupOn  f  =  groupOn f . sortOn  f
 sort_and_groupOn' f  =  groupOn f . sortOn' f
 
--- |Сгруппировать все элементы (a.b) с одинаковым знаением 'a'
+-- |Сгруппировать все элементы (a.b) с одинаковым значением 'a'
 groupFst :: (Ord a) =>  [(a,b)] -> [(a,[b])]
 groupFst = map (\xs -> (fst (head xs), map snd xs)) . sort_and_groupOn fst
+
+-- |Удаляет дубликаты из списка
+removeDups = removeDupsOn id
+
+-- |Оставляет только по одному элементу из каждой группы с одинаковым значением f
+removeDupsOn f = map head . sort_and_groupOn f
 
 -- |Проверить, что все последовательные значения в списке удовлетворяют заданному соотношению
 isAll f []       = True
@@ -551,6 +652,12 @@ isSortedOn f  =  isAll (<=) . map f
 
 -- |Check that all elements in list are equal by given field/critery
 isEqOn f      =  isAll (==) . map f
+
+-- |Find maximum element by given comparison critery
+maxOn f (x:xs) = go x xs
+  where go x [] = x
+        go x (y:ys) | f x > f y  =  go x ys
+                    | otherwise  =  go y ys
 
 -- |Merge two lists, sorted by `cmp`, in one sorted list
 merge :: (a -> a -> Ordering) -> [a] -> [a] -> [a]
@@ -633,6 +740,13 @@ keepOnlyFirstOn f (x:xs) = x : keepOnlyFirstOn f (filter (\a -> f x /= f a) xs)
 -- |Оставить в списке только последний из дубликатов по заданному критерию
 keepOnlyLastOn f = reverse . keepOnlyFirstOn f . reverse
 
+-- |Удалить элементы с заданными номерами из списка
+deleteElems = go 0
+  where go n xs [] = xs  -- Удалять больше нечего
+        go n (x:xs) iis@(i:is) | n<i  = x:go (n+1) xs iis  -- мы ещё не дошли до i-го элемента
+                               | n==i =   go (n+1) xs is   -- дошли - удаляем!
+
+
 {-# NOINLINE partitionList #-}
 {-# NOINLINE splitList #-}
 
@@ -641,7 +755,13 @@ keepOnlyLastOn f = reverse . keepOnlyFirstOn f . reverse
 ---- Операции с массивами -------------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------------
 
+-- |Превратить список в 0-based array
 listArray0 list  =  listArray (0,length(list)-1) list
+
+-- |Найти миним. и макс. индексы в списке пар и создать из них массив,
+populateArray defaultValue castValue pairs =
+  accumArray (\a b -> castValue b) defaultValue (minimum indexes, maximum indexes) pairs
+  where indexes = map fst pairs
 
 
 ---------------------------------------------------------------------------------------------------
@@ -655,6 +775,10 @@ mapFstSnd f (a,b)  =  (f a, f b)
 map2      (f,g) a  =  (f a, g a)
 mapFsts = map . mapFst
 mapSnds = map . mapSnd
+map2s   = map . map2
+
+-- |Слить вторые элементы пар в списке и оставить один (общий) первый элемент
+concatSnds xs = (fst (head xs), concatMap snd xs)
 
 -- Операции над tuple/3
 fst3 (a,_,_)    =  a
@@ -667,19 +791,41 @@ map3 (f,g,h) a  =  (f a, g a, h a)
 ---- Эмуляция обычных переменных ------------------------------------------------------------------
 ---------------------------------------------------------------------------------------------------
 
-infixl 0 =:, +=, -=, ++=, =::, .=, .<-, <<=
+infixl 0 =:, +=, -=, ++=, =::, .=, .<-, <<=, <=>
 
 -- Simple variables
+class Variable v a | v->a where
+  new  :: a -> IO v
+  val  :: v -> IO a
+  (=:) :: v -> a -> IO ()
+  (.=) :: v -> (a->a) -> IO ()
+  (=::) :: v -> IO a -> IO ()
+  (.<-) :: v -> (a->IO a) -> IO ()
+  -- Default implementations
+  a.=f = do x<-val a; a=:f x
+  a=::b = (a=:) =<< b
+  a.<-f = do x<-val a>>=f; a=:x
+
 ref = newIORef
-new = newIORef
-val = readIORef
-a=:b = writeIORef a b
-a+=b = modifyIORef a (\a->a+b)
-a-=b = modifyIORef a (\a->a-b)
-a.=b = modifyIORef a (\a->b a)
-a++=b = modifyIORef a (\a->a++b)
-a.<-b = modifyIORefIO a (\a->b a)
-a=::b = writeIORef a =<< b
+instance Variable (IORef a) a where
+  new = newIORef
+  val = readIORef
+  a=:b = writeIORef a b
+  a.=b = modifyIORef a b
+  a.<-b = modifyIORefIO a b
+
+mvar = newMVar
+instance Variable (MVar a) a where
+  new = newMVar
+  val = readMVar
+  a=:b = swapMVar a b >> return ()
+  a.=b = modifyMVar_ a (return.b)
+  a.<-b = modifyMVar_ a b
+
+a+=b = a.=(\a->a+b)
+a-=b = a.=(\a->a-b)
+a++=b = a.=(\a->a++b)
+a<=>b = do x <- val a; a =: b; return x
 withRef init  =  with' (ref init) val
 
 
@@ -687,6 +833,7 @@ withRef init  =  with' (ref init) val
 newtype AccList a = AccList [a]
 newList   = ref$ AccList []
 a<<=b     = a .= (\(AccList x) -> AccList$ b:x)
+pushList  = (<<=)
 listVal a = val a >>== (\(AccList x) -> reverse x)
 withList  =  with' newList listVal
 
@@ -704,8 +851,19 @@ modifyIORefIO var action = do
 -- |Ещё одна полезная управляющая структура
 with' init finish action  =  do a <- init;  action a;  finish a
 
+-- |Выполнить операцию и возвратить её результат внутри обрамления init/finish операций
+inside init finish action  =  do init;  x <- action;  finish; return x
 
--- JIT-переменные инициализируются только в момент их первого использования
+-- |Выполнить "add key" c кешированием результатов
+lookupMVarCache mvar add key = do
+  modifyMVar mvar $ \assocs -> do
+    case (lookup key assocs) of
+      Just value -> return (assocs, value)
+      Nothing    -> do value <- add key
+                       return ((key,value):assocs, value)
+
+
+-- JIT-переменные инициализируются только в момент их первого использовани
 newJIT init        = ref (Left init)
 delJIT a    finish = whenRightM_ (val a) finish
 valJIT a           = do x <- val a
@@ -730,7 +888,6 @@ clipToMaxInt            =  i. min (i (maxBound::Int))
 atLeast                 =  max
 i                       =  fromIntegral
 clipTo low high         =  min high . max low
-inRange i (low,high)    =  i>=low && i<=high
 divRoundUp   x chunk    = ((x-1) `div` i chunk) + 1
 roundUp      x chunk    = divRoundUp x chunk * i chunk
 divRoundDown x chunk    = x `div` i chunk
@@ -806,7 +963,7 @@ allocator heapsize aBUFFER_SIZE aALIGN returnBlock = do
           else end =: new_end
         printStats$ "*** returned buf:"++show addr++" size:"++show size++"   "
 
-  -- Получить очередной блок размера aBUFFER_SIZE. Если свободных блоков нет - дождаться
+  -- Получить очередной блок размера aBUFFER_SIZE. Если свободных блоков нет - дождатьс
   --   возвращения необходимого количества выделенной прежде памяти
   let getBlock = do
         avail <- available
@@ -842,7 +999,7 @@ memoryAllocator heap size chunksize align returnBlock = do
 
 ---------------------------------------------------------------------------------------------------
 ---- Поддержка регулярных выражений.                                                           ----
----- #define FULL_REGEXP включает использование расширенных рег. выражений: r[0-9][0-9]        ----
+---- todo: #define FULL_REGEXP включает использование расширенных рег. выражений: r[0-9][0-9]  ----
 ---------------------------------------------------------------------------------------------------
 
 -- |Скомпилированное представление регулярного выражения                            ПРИМЕР
@@ -867,18 +1024,22 @@ compile_RE s  =  case s of
   c  :cs                     -> RE_Char   c (compile_RE  cs)
 
 -- |Проверить соответствие строки скомпилированному регулярному выражению
-match_RE re s  =  case re of
-  RE_End        -> null s
-  RE_Anything   -> True
-  RE_AnyStr   r -> any (match_RE r) (tails s)
-  RE_FromEnd  r -> match_RE r (reverse s)
-  RE_AnyChar  r -> case s of
+match_RE r = case r of
+  RE_End        -> null
+  RE_Anything   -> const True
+  RE_AnyStr   r -> let re = match_RE r in \s -> any re (tails s)
+  RE_FromEnd  r -> let re = match_RE r in re . reverse
+  RE_AnyChar  r -> let re = match_RE r in \s -> case s of
                      ""   -> False
-                     _:xs -> match_RE r xs
-  RE_Char   c r -> case s of
+                     _:xs -> re xs
+  RE_Char   c r -> let re = match_RE r in \s -> case s of
                      ""   -> False
-                     x:xs -> x==c && match_RE r xs
+                     x:xs -> x==c && re xs
 
 -- |Проверить соответствие строки `s` регулярному выражению `re`
 match re {-s-}  =  match_RE (compile_RE re) {-s-}
 
+-- Perl-like names for matching routines
+infix 4 ~=, !~
+(~=)    = flip match
+a !~ b  = not (a~=b)

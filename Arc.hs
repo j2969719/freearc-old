@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -cpp #-}
 ----------------------------------------------------------------------------------------------------
 ---- Основной модуль программы.                                                                 ----
 ---- Вызывает parseCmdline из модуля Cmdline для разбора командной строки и выполняет каждую    ----
@@ -17,7 +18,7 @@
 ----   ArhiveStructure  - для работы со структурой архива                                       ----
 ----   ByteStream       - для превращения каталога архива в последовательность байтов           ----
 ----   Compression      - для вызова алгоритмов упаковки, распаковки и вычисления CRC           ----
-----   Statistics       - для информирования пользователя о ходе выполняемых работ :)           ----
+----   UI               - для информирования пользователя о ходе выполняемых работ :)           ----
 ----   Errors           - для сигнализации о возникших ошибках и записи в логфайл               ----
 ----   FileInfo         - для поиска файлов на диске и получения информации о них               ----
 ----   Files            - для всех операций с файлами на диске и именами файлов                 ----
@@ -31,7 +32,6 @@ import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Data.List
-import System.Environment
 import System.Mem
 import System.IO
 
@@ -40,34 +40,53 @@ import Process
 import Errors
 import Files
 import FileInfo
-import CUI
-import Statistics
+import Charsets
+import Options
 import Cmdline
+import UI
 import ArcCreate
 import ArcExtract
 import ArcRecover
+#ifdef FREEARC_GUI
+import FileManager
+#endif
 
 
 -- |Главная функция программы
-main         =  (doMain =<< getArgs) >> shutdown "" aEXIT_CODE_SUCCESS
+main         =  (doMain =<< myGetArgs) >> shutdown "" aEXIT_CODE_SUCCESS
 -- |Дублирующая главная функция для интерактивной отладки
 arc cmdline  =  doMain (words cmdline)
 
 -- |Превратить командную строку в набор команд и выполнить их
-doMain args  =  do
+doMain args  = do
+#ifdef FREEARC_GUI
+  bg $ do                           -- выполняем в новом треде, не являющемся bound thread
+#endif
   setUncaughtExceptionHandler handler
   setCtrlBreakHandler $ do          -- Организуем обработку ^Break
-  ensureCtrlBreak (resetConsoleTitle) $ do
+  ensureCtrlBreak "resetConsoleTitle" (resetConsoleTitle) $ do
+  luaLevel "Program" [("command", args)] $ do
+#ifdef FREEARC_GUI
+  if length args < 2                -- При вызове программы без аргументов или с одним аргументом (именем каталога/архива)
+    then myGUI run args             --   запускаем полноценный Archive Manager
+    else do                         --   а иначе - просто отрабатываем команды (де)архивации
+#endif
   uiStartProgram                    -- Открыть UI
   commands <- parseCmdline args     -- Превратить командную строку в список команд на выполнение
   mapM_ run commands                -- Выполнить каждую полученную команду
   uiDoneProgram                     -- Закрыть UI
+
  where
-  handler ex  =  registerError$ GENERAL_ERROR$
+  handler ex  =
+#ifdef FREEARC_GUI
+    mapM_ doNothing $
+#else
+    registerError$ GENERAL_ERROR$
+#endif
       case ex of
-        Deadlock    -> "no threads to run: infinite loop or deadlock?"
-        ErrorCall s -> s
-        other       -> showsPrec 0 other ""
+        Deadlock    -> ["0011 No threads to run: infinite loop or deadlock?"]
+        ErrorCall s -> [s]
+        other       -> [show ex]
 
 
 -- |Диспетчеризует команду и организует её повторение для каждого подходящего архива
@@ -78,6 +97,7 @@ run command @ Command
                 } = do
   performGC       -- почистить мусор после обработки предыдущих команд
   setup_command   -- выполнить настройки, необходимые перед началом выполнения команды
+  luaLevel "Command" [("command", cmd)] $ do
   case (cmd) of
     "create" -> find_archives  False           run_add     command
     "a"      -> find_archives  False           run_add     command
@@ -88,7 +108,7 @@ run command @ Command
     "j"      -> find_archives  False           run_join    command
     "cw"     -> find_archives  False           run_cw      command
     "ch"     -> find_archives  scan_subdirs    run_copy    command
-    "s"      -> find_archives  scan_subdirs    run_copy    command
+    's':_    -> find_archives  scan_subdirs    run_copy    command
     "c"      -> find_archives  scan_subdirs    run_copy    command
     "k"      -> find_archives  scan_subdirs    run_copy    command
     'r':'r':_-> find_archives  scan_subdirs    run_copy    command
@@ -99,6 +119,7 @@ run command @ Command
     "t"      -> find_archives  scan_subdirs    run_test    command
     "l"      -> find_archives  scan_subdirs    run_list    command
     "lb"     -> find_archives  scan_subdirs    run_list    command
+    "lt"     -> find_archives  scan_subdirs    run_list    command
     "v"      -> find_archives  scan_subdirs    run_list    command
     _ -> registerError$ UNKNOWN_CMD cmd aLL_COMMANDS
 
@@ -113,9 +134,10 @@ find_archives scan_subdirs   -- искать архивы и в подкаталогах?
                else return [arcspec]
   results <- foreach arclist $ \arcname -> do
     performGC   -- почистить мусор после обработки предыдущих архивов
+    luaLevel "Archive" [("arcname", arcname)] $ do
     -- Если указана опция -ad, то добавить к базовому каталогу на диске имя архива (без расширения)
     let add_dir  =  opt_add_dir command  &&&  (</> takeBaseName arcname)
-    run_command command { cmd_arcspec      = error "find_archives:cmd_arcspec undefined"  -- cmd_arcspec нам больше не понадобится
+    run_command command { cmd_arcspec      = error "find_archives:cmd_arcspec undefined"  -- cmd_arcspec нам больше не понадобится.
                         , cmd_arclist      = arclist
                         , cmd_arcname      = arcname
                         , opt_disk_basedir = add_dir (opt_disk_basedir command)
@@ -125,12 +147,14 @@ find_archives scan_subdirs   -- искать архивы и в подкаталогах?
 
 -- |Команды добавления в архив: create, a, f, m, u
 run_add cmd = do
-  let diskfiles =  find_and_filter_files (cmd_filespecs cmd) find_criteria
+  msg <- i18n"0246 Found %1 files"
+  let diskfiles =  find_and_filter_files (cmd_filespecs cmd) (uiScanning msg) find_criteria
       find_criteria  =  FileFind{ ff_ep             = opt_add_exclude_path cmd
                                 , ff_scan_subdirs   = opt_scan_subdirs     cmd
                                 , ff_include_dirs   = opt_include_dirs     cmd
                                 , ff_no_nst_filters = opt_no_nst_filters   cmd
                                 , ff_filter_f       = add_file_filter      cmd
+                                , ff_group_f        = opt_find_group       cmd.$Just
                                 , ff_arc_basedir    = opt_arc_basedir      cmd
                                 , ff_disk_basedir   = opt_disk_basedir     cmd}
   runArchiveAdd cmd{ cmd_diskfiles      = diskfiles     -- файлы, которые нужно добавить с диска
@@ -141,13 +165,15 @@ run_add cmd = do
 run_join cmd @ Command { cmd_filespecs = filespecs
                        , opt_noarcext  = noarcext
                        } = do
+  msg <- i18n"0247 Found %1 archives"
   let arcspecs  =  map (addArcExtension noarcext) filespecs   -- добавим к именам расширение по умолчанию (".arc")
-      arcnames  =  map diskName ==<< find_and_filter_files arcspecs find_criteria
+      arcnames  =  map diskName ==<< find_and_filter_files arcspecs (uiScanning msg) find_criteria
       find_criteria  =  FileFind{ ff_ep             = opt_add_exclude_path cmd
                                 , ff_scan_subdirs   = opt_scan_subdirs     cmd
                                 , ff_include_dirs   = Just False
                                 , ff_no_nst_filters = opt_no_nst_filters   cmd
                                 , ff_filter_f       = add_file_filter      cmd
+                                , ff_group_f        = Nothing
                                 , ff_arc_basedir    = ""
                                 , ff_disk_basedir   = opt_disk_basedir     cmd}
   runArchiveAdd cmd{ cmd_added_arcnames = arcnames      -- дополнительные входные архивы

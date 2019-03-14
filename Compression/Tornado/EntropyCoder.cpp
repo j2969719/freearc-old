@@ -1,4 +1,5 @@
 // (c) Bulat Ziganshin <Bulat.Ziganshin@gmail.com>
+// (c) Joachim Henke
 // GPL'ed code for various streams and entropy codecs:
 //   - in/out byte streams
 //   - in/out bit streams
@@ -7,8 +8,7 @@
 //   - fast semi-adaptive arithmetic codec
 // Here semi-adaptive means that statistics collected on previous symbols are
 // used to encode new ones, but encoding tables are updated with some intervals
-// (after each 30k-50k symbols encoded)
-
+// (after each 10k-20k symbols encoded)
 
 // Selects either encoder or decoder
 enum CodecDirection {Encoder, Decoder};
@@ -31,20 +31,21 @@ struct ByteBuffer
 struct OutputByteStream
 {
     CALLBACK_FUNC *callback;  // Function that writes data to the outstream
-    VOID_FUNC     *auxdata;
+    void          *auxdata;
     BYTE          *buf;       // Output buffer
     BYTE          *output;    // Current pos
+    BYTE          *last_qwrite;  // Value of output pointer for last quasi-write call
     BYTE          *anchor;    // Marked position in output buffer. Shifted synchronous to buffer contents
     UINT          chunk;      // How many bytes should be written at least in each "write" call
     int           errcode;
 
     // chunk - how many bytes should be written each time, at least
     // pad   - how many bytes may be put to buffer between flush()/putbuf() calls
-    OutputByteStream (CALLBACK_FUNC *_callback, VOID_FUNC *_auxdata, UINT _chunk, UINT pad)
+    OutputByteStream (CALLBACK_FUNC *_callback, void *_auxdata, UINT _chunk, UINT pad)
     {
-        callback = _callback;  auxdata = _auxdata;
+        callback = _callback;  auxdata = _auxdata;  chunk = _chunk;
         // Add 512 bytes for LZ77_ByteCoder (its LZSS scheme needs to overwrite old flag words) and 4096 for rounding written chunks
-        output = buf = (byte*) malloc (chunk+pad+512+4096);
+        last_qwrite = output = buf = (byte*) malloc (chunk+pad+512+4096);
         errcode = buf==NULL?  FREEARC_ERRCODE_NOT_ENOUGH_MEMORY : FREEARC_OK;
     }
     ~OutputByteStream()       {free(buf);}
@@ -61,12 +62,10 @@ struct OutputByteStream
     void finish (int n=-1);
     // Writes 8-64 bits to the buffer
     void put8   (uint c)      {*         output = c; advance(1);}
-    void put16  (uint c)      {*(uint16*)output = c; advance(2);}
-    void put24  (uint c)      {*(uint32*)output = c; advance(3);}
-    void put32  (uint c)      {*(uint32*)output = c; advance(4);}
-    void put64  (uint64 c)    {*(uint64*)output = c; advance(8);}
-    // Writes machine-size word
-    void putword(uint c)      {*(uint  *)output = c; advance(sizeof(uint));}
+    void put16  (uint c)      {setvalue16(output, c); advance(2);}
+    void put24  (uint32 c)    {setvalue32(output, c); advance(3);}
+    void put32  (uint32 c)    {setvalue32(output, c); advance(4);}
+    void put64  (uint64 c)    {setvalue64(output, c); advance(8);}
     // Writes len bytes pointed by ptr
     void putbuf (void *ptr, uint len);
 };
@@ -74,7 +73,7 @@ struct OutputByteStream
 void OutputByteStream::putbuf (void *ptr, uint len)
 {
     if ((output-buf)+len > chunk)    flush();
-    CHECK( (output-buf)+len <= chunk, ("\nFatal error: putbuf %d in buffer of size %d\n", len, chunk));
+    CHECK( (output-buf)+len <= chunk, (s,"Fatal error: putbuf %d in buffer of size %d", len, chunk));
     memcpy (output, ptr, len);
     output += len;
 }
@@ -89,93 +88,110 @@ void OutputByteStream::finish (int n)
 
 void OutputByteStream::flush()
 {
+    QUASIWRITE(output-last_qwrite);
     if (output-buf>512) {
-        UINT n = (output-buf-512) & ~4095;  // how much bytes we can flush now (don't flush last 512 bytes due to possible LZSS use and round down to 4096-byte chunks)
+        UINT n = (output-buf-512) & ~4095;  // how much bytes we can flush now (don't flush last 512 bytes due to possible LZSS use and round down to 4096-byte chunk)
         if (n >= chunk) {                   // go if this value is larger than requested chunk size
            finish (n);
            memcpy (buf, buf+n, output-(buf+n));
            output -= n;                     // Shift write pointer
-           anchor -= n;                     // Shift placed in buffer anchor too
+           anchor -= n;                     // Shift data placed in buffer anchor too
         }
     }
+    last_qwrite=output;
 }
 
 
 struct InputByteStream
 {
-    CALLBACK_FUNC *callback;               // Function that reads data from the instream
-    VOID_FUNC     *auxdata;
-    byte  buf[MAXELEM+LARGE_BUFFER_SIZE];  // Buffer (MAXELEM additional bytes are allocated for get64, see below)
-    byte  *input;                          // Current reading pos in buf[]
-    byte  *dataend;                        // End of real data in buf[]
+    CALLBACK_FUNC *callback;    // Function that reads data from the instream
+    void     *auxdata;
+    UINT          bufsize;
+    byte          *buf;         // Buffer (MAXELEM additional bytes are allocated for get64, see below)
+    byte          *input;       // Current reading pos in buf[]
+    byte          *read_point;  // Fence before next read callback
+//  byte          *dataend;     // End of real data in buf[]
+    int           errcode;      // Value returned by last "read" callback
 
     // In order to improve speed, we use MAXELEM bytes at the buffer beginning
     // to hold last bytes of previous data chunk read. This allows us
     // to implement get64 and likewise operations without worrying about
     // crossing read-chunk boundaries. Therefore, we fill buffer each time
     // starting from its MAXELEM position
-    InputByteStream (CALLBACK_FUNC *_callback, VOID_FUNC *_auxdata)
+    InputByteStream (CALLBACK_FUNC *_callback, void *_auxdata, UINT _bufsize)
     {
-        callback = _callback;  auxdata = _auxdata;
-        input    = buf + MAXELEM;
-        dataend  = buf+MAXELEM + callback ("read", buf+MAXELEM, LARGE_BUFFER_SIZE, auxdata);
+        callback   = _callback;  auxdata = _auxdata;
+        bufsize    = compress_all_at_once? _bufsize+(_bufsize/4) : LARGE_BUFFER_SIZE;  // For all-at-once compression input buffer should be large enough to hold all compressed data
+        buf        = (byte*) malloc (MAXELEM+bufsize);
+        errcode    = buf==NULL?  FREEARC_ERRCODE_NOT_ENOUGH_MEMORY : FREEARC_OK;
+        input      = buf + MAXELEM;
+        read_point = buf + bufsize;
+        if (error()==FREEARC_OK)   errcode = callback ("read", buf+MAXELEM, bufsize, auxdata);
     }
+    ~InputByteStream()  {free(buf);}
     // Returns error code if there is any problem in stream work
-    int error()  {return buf==NULL?  FREEARC_ERRCODE_NOT_ENOUGH_MEMORY : FREEARC_OK;}
+    int error()  {return errcode<0? errcode : FREEARC_OK;}
 
     // Reads next data chunk if lookahead is not enough for get64() execution
     void fill()
     {
         // If input ptr points inside last MAXELEM bytes in buf,
         // then move these bytes to the buffer start and read next portion of data
-        if (input >= buf+LARGE_BUFFER_SIZE) {
-           memcpy (buf, buf+LARGE_BUFFER_SIZE, MAXELEM);
-           dataend = buf+MAXELEM + callback ("read", buf+MAXELEM, LARGE_BUFFER_SIZE, auxdata);
-           input  -= LARGE_BUFFER_SIZE;
+        if (input >= read_point) {
+           memcpy (buf, buf+bufsize, MAXELEM);
+           if (error()==FREEARC_OK)   errcode = callback ("read", buf+MAXELEM, bufsize, auxdata);
+           input  -= bufsize;
         }
     }
 
     // Reads 8-64 bits from the buffer
     uint   getc   ()  {fill(); return *input++;}
     uint   get8   ()  {fill(); return *input++;}
-    uint   get16  ()  {fill(); uint   n = *(uint16*)input; input+=2; return n;}
-    uint   get24  ()  {fill(); uint   n =  value24(input); input+=3; return n;}
-    uint   get32  ()  {fill(); uint   n = *(uint32*)input; input+=4; return n;}
-    uint64 get64  ()  {fill(); uint64 n = *(uint64*)input; input+=8; return n;}
-    // Reads machine-size word
-    uint   getword()  {fill(); uint   n = *(uint*)  input; input+=sizeof(uint); return n;}
+    uint   get16  ()  {fill(); uint   n = value16(input); input+=2; return n;}
+    uint32 get24  ()  {fill(); uint32 n = value24(input); input+=3; return n;}
+    uint32 get32  ()  {fill(); uint32 n = value32(input); input+=4; return n;}
+    uint64 get64  ()  {fill(); uint64 n = value64(input); input+=8; return n;}
 };
 
 
 // Bit-aligned I/O streams ***********************************************************************
 
-#define CHUNK          (sizeof(uint))
-
 // It's an output bit stream
 struct OutputBitStream : OutputByteStream
 {
-    uint  bitbuf;      // Bit buffer - written to outstream when filled
-    int   bitcount;    // Count of lower bits already filled in current bitbuf
+#ifdef FREEARC_64BIT
+    uint64 bitbuf;   // Bit buffer - written to outstream when filled
+#else
+    uint32 bitbuf;
+#endif
+    int    bitcount; // Count of lower bits already filled in current bitbuf
 
     // Init and finish bit stream
-    OutputBitStream (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad);
+    OutputBitStream (CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad);
     void finish();
 
     // Write n lower bits of x
-    void putbits (int n, uint x)
+    void putbits (int n, uint32 x)
     {
-        //Tracevv((stderr,"\nPut %2d bits of %04x",n,x));
-        bitbuf |= x << bitcount;
+        bitbuf |=
+#ifdef FREEARC_64BIT
+                  (uint64)
+#endif
+                          x << bitcount;
         bitcount += n;
-        if( bitcount >= CHAR_BIT*CHUNK ) {
-            putword (bitbuf);
-            bitcount -= CHAR_BIT*CHUNK;
+        if (bitcount >= CHAR_BIT * sizeof(bitbuf)) {
+#ifdef FREEARC_64BIT
+            put64 (bitbuf);
+#else
+            put32 (bitbuf);
+#endif
+            bitcount -= CHAR_BIT * sizeof(bitbuf);
             bitbuf = x >> (n-bitcount);
         }
     }
 
     // Write n lower bits of x
-    void putlowerbits (int n, uint x)
+    void putlowerbits (int n, uint32 x)
     {
         putbits (n, mask(x,n));
     }
@@ -185,7 +201,7 @@ struct OutputBitStream : OutputByteStream
 #define eat_at_start 0
 #define eat_at_end   0
 
-OutputBitStream::OutputBitStream (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad)
+OutputBitStream::OutputBitStream (CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad)
     : OutputByteStream (callback, auxdata, chunk, pad)
 {
     bitbuf   = 0;
@@ -194,7 +210,11 @@ OutputBitStream::OutputBitStream (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, U
 
 void OutputBitStream::finish()
 {
-    putword (bitbuf);
+    while (bitcount > 0) {
+        put8 (bitbuf);
+        bitbuf  >>= 8;
+        bitcount -= 8;
+    }
     OutputByteStream::finish();
 }
 
@@ -206,7 +226,7 @@ struct InputBitStream : InputByteStream
     int     bitcount;    // Count of higher bits not yet filled in current bitbuf
 
     // Initialize bit stream
-    InputBitStream (CALLBACK_FUNC *callback, VOID_FUNC *auxdata);
+    InputBitStream (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize);
 
     // Ensure that bitbuf contains at least n valid bits (n<=32)
     uint needbits (int n)
@@ -230,7 +250,7 @@ struct InputBitStream : InputByteStream
     }
 };
 
-InputBitStream::InputBitStream (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)  :  InputByteStream (callback, auxdata)
+InputBitStream::InputBitStream (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize)  :  InputByteStream (callback, auxdata, bufsize)
 {
     bitbuf   = 0;
     bitcount = 0;
@@ -243,9 +263,14 @@ InputBitStream::InputBitStream (CALLBACK_FUNC *callback, VOID_FUNC *auxdata)  : 
 #define FAST_BITS 11    /* symbols with shorter codes (<=FAST_BITS bits) are decoded much faster */
 
 // This structure used for intermediate data when building huffman tree
-struct Node {uint cnt, left, right, bits, code;};
-// For sorting Nodes by counters
-int by_cnt (const Node *a, const Node *b)   { return a->cnt - b->cnt; }
+struct Node {uint32 cnt, code; uint16 left, right; uint8 bits;};
+// Simplified Node structure, saving counter in higher bits and index in lower ones (in order to allow stable sorting by counter!)
+typedef uint Node0;
+#define make_node(i,cnt)  ((cnt)*MAXHUF+(i))
+#define index0(node)      ((node)%MAXHUF)
+#define cnt0(node)        ((node)/MAXHUF)
+// For stable sorting Nodes by counters
+int __cdecl by_cnt_and_index (const void* a, const void* b)   {return *(const Node0*)a - *(const Node0*)b;}
 
 // Huffman tree for dynamic encoding.
 // If you want to work with block-wise static encoding, you need to
@@ -255,7 +280,6 @@ struct HuffmanTree
     CodecDirection type;              // Determines whether this tree used for encoding or decoding
     int    n;                         // Number of symbols in huffman tree
     uint   counter[MAXHUF];           // Symbol counters used to build huffman tree
-    Node   buf[MAXHUF*2+4];           // Intermediate data used to build huffman tree
                                       // Built huffman tree:
     int    maxbits;                   //   Maximum number of bits in any code of current table
     int    maxbits_so_far;            //   Maximum maxbits encountered so far
@@ -269,11 +293,11 @@ struct HuffmanTree
     void Inc (int s, int i=1)                     {counter[s] += i;}
     void build_tree (int rescale_mode);
 
-    // Decode value by code and return its bitsize
+    // Decode value by code (todo: and return its bitsize)
     int Decode (UINT code)
     {
         // We first try to decode value using first FAST_BITS input bits
-        // via small fast_index[] table. If this don't gives single decoded
+        // via small fast_index[] table. If this cannot produce single decoded
         // value (flagged by x<0) then we decode using maxbits input bits
         // via index[] table which guarantees single-meaning decoding
         int x = fast_index[mask(code,FAST_BITS)];
@@ -283,7 +307,7 @@ struct HuffmanTree
 
 HuffmanTree::HuffmanTree (CodecDirection _type, int _n)
 {
-    CHECK( _n<=MAXHUF, ("\nFatal error: HuffmanTree::n=%d is larger than maximum allowed value %d\n", _n, MAXHUF));
+    CHECK( _n<=MAXHUF, (s,"Fatal error: HuffmanTree::n=%d is larger than maximum allowed value %d", _n, MAXHUF));
     if (_n==0) return;
     type  = _type;
     n     = _n;
@@ -295,7 +319,7 @@ HuffmanTree::HuffmanTree (CodecDirection _type, int _n)
 
 // It seems this is the only original implementation of "build huffman tree"
 // procedure, all other compressors borrow zip's one :)
-// The algorithm is obvious - instead of using heap for searching nodes with
+// The algorithm is obvious - instead of using heap for searching of nodes with
 // smallest counters, we keep nodes in two separate lists - first includes
 // "original" nodes - i.e. those correspoding to symbols, second list
 // includes constructed intermediate nodes. We keep both lists sorted
@@ -309,10 +333,41 @@ HuffmanTree::HuffmanTree (CodecDirection _type, int _n)
 void HuffmanTree::build_tree (int rescale_mode)
 {
     debug (printf ("=== BUILD_TREE rescale_mode=%d ===\n", rescale_mode));
-    int b=0;   // This var will contain count of non-zero symbols
-    iterate_var(i,n)   buf[b].left=i, buf[b].cnt=counter[i], b++;    // STATIC: add "if (counter[i])"
-    qsort (buf, b, sizeof(*buf), (int (*)(const void*, const void*)) by_cnt);
-    iterate_var(i,b+4)  buf[b+i].cnt = INT_MAX;
+
+    Node buf [2*MAXHUF+4];              // Intermediate data used to build huffman tree
+    int *places = (int*) (buf+MAXHUF);  // Part of the buffer reused for better caching
+    int b = 0;                          // This var will contain count of non-zero symbols
+
+    // Nodes with small counters (<CHUNKS) sorted by counting, remaining nodes (<10%) sorted by STL sort()
+    const int CHUNKS = 250;
+    iterate_var(i,CHUNKS+1)
+        places[i] = 0;
+    iterate_var(i,n) {               // STATIC: add "if (counter[i])"
+        if (counter[i] < CHUNKS)
+            places[counter[i] + 1]++;
+        b++;
+    }
+    iterate_var(i,CHUNKS)
+        places[i + 1] += places[i];
+    // code[] is reused here as a temporary buffer for better caching  (== Node0 rest[b - places[CHUNKS]])
+    Node0 *rest = (Node0 *)code, *r = rest;
+    iterate_var(i,n)                 // STATIC: add "if (counter[i])"
+        if (counter[i] < CHUNKS) {
+            int p = places[counter[i]]++;
+            buf[p].cnt = counter[i];
+            buf[p].left = i;
+        } else
+            *r++ = make_node(i, counter[i]);
+    // Stable sorting of nodes by counter (== std::sort (rest, r))
+    qsort (rest, r - rest, sizeof(*rest), by_cnt_and_index);
+    iterate_var(i, r - rest) {
+        int p = i + places[CHUNKS];
+        buf[p].cnt = cnt0(rest[i]);
+        buf[p].left = index0(rest[i]);
+    }
+    // Now buf[0..b-1] contains nodes stable-sorted by counter.
+
+    iterate_var(i,b+4)  buf[b+i].cnt = INT_MAX;  // maximum possible int value used here as a fence
     int p1 = 0,    // Index of first remaining original node
         p2 = b+2,  // Index of first remaining combined node
         p3 = b+2;  // Index of next combined node to create
@@ -397,7 +452,7 @@ void HuffmanTree::build_tree (int rescale_mode)
 
 // Semi-adaptive huffman coder ********************************************************************
 
-#define HUFBLOCKSIZE 50000
+#define HUFBLOCKSIZE 5000
 
 // Encode symbols using huffman coder
 template <int EOB>
@@ -406,18 +461,18 @@ struct HuffmanEncoder : OutputBitStream
     HuffmanTree  huf;           // Huffman tree used to encode symbols
     int          remainder;     // Count symbols remaining before huffman tree rebuild
 
-    HuffmanEncoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad, int n)
+    HuffmanEncoder (CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad, int n)
         : OutputBitStream (callback,auxdata,chunk,pad), huf(Encoder,n) {remainder=HUFBLOCKSIZE/4;}
 
     // Encode symbol and count it in huffman tree
     void encode (UINT x)
     {
         if (--remainder==0)  {      // Rebuild huffman tree periodically
-            const int rescale_mode = 0;  // Fastest statistics update
+            const int rescale_mode = 3;  // Statistics update rate
             putbits (huf.bits[EOB], huf.code[EOB]);
             putbits (3, rescale_mode);
             huf.build_tree (rescale_mode);
-            remainder=HUFBLOCKSIZE;
+            remainder = HUFBLOCKSIZE;
         }
         huf.Inc (x);
         putbits (huf.bits[x], huf.code[x]);
@@ -430,17 +485,19 @@ struct HuffmanDecoder : InputBitStream
 {
     HuffmanTree  huf;           // Huffman tree used to decode symbols
 
-    HuffmanDecoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, int n)
-        : InputBitStream (callback, auxdata), huf(Decoder,n) {}
+    HuffmanDecoder (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize, int n)
+        : InputBitStream (callback, auxdata, bufsize), huf(Decoder,n) {}
 
     // Decode symbol and count it in huffman tree
     UINT decode()
     {
         UINT x;
-    again:
-        x = huf.Decode (needbits (huf.maxbits));
-        dumpbits (huf.bits[x]);
-        if (x==EOB)  {huf.build_tree (getbits(3)); goto again;}    // Rebuild huffman tree on EOB code
+        while (1) {
+            x = huf.Decode (needbits (huf.maxbits));
+            dumpbits (huf.bits[x]);
+            if (x != EOB) break;
+            huf.build_tree (getbits(3));  // Rebuild huffman tree on EOB code
+        }
         huf.Inc (x);
         return x;
     }
@@ -452,7 +509,7 @@ struct HuffmanDecoder : InputBitStream
 class TRangeCoder : public OutputByteStream
 {
 private:
-  long long low; // 64-bit extended integer
+  int64 low;
   unsigned int range;
   unsigned int buffer;
   unsigned int help;
@@ -472,7 +529,7 @@ private:
   }
 
 public:
-  TRangeCoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad) :
+  TRangeCoder (CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad) :
     OutputByteStream (callback, auxdata, chunk, pad),
     low(0), range(0xffffffff), buffer(0), help(0) {}
 
@@ -502,7 +559,7 @@ private:
   unsigned int buffer;
 
 public:
-  TRangeDecoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata) : InputByteStream (callback, auxdata), range(0xffffffff)
+  TRangeDecoder (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize) : InputByteStream (callback, auxdata, bufsize), range(0xffffffff)
   {
     for (int i = 0; i < 5; i++)
       buffer = (buffer << 8) + getc();
@@ -534,7 +591,7 @@ public:
 //   symbols encoded it recalculates encoding using counters
 //   gathered to this moment. So, each time it uses for encoding
 //   stats of previous block. Actually, counters for new block
-//   are started from 3/4 of previous counters, so algorithm
+//   are started from 5/6 of previous counters, so algorithm
 //   is more resistant to temporary statistic changes
 
 #define NUM        2048             /* maximum number of symbols + 1 */
@@ -616,7 +673,7 @@ struct ArithCoder : TRangeCoder
 {
     TCounter<Encoder> c;   // Provides stats about symbol frequencies
 
-    ArithCoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, UINT chunk, UINT pad, int n)
+    ArithCoder (CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad, int n)
         : TRangeCoder (callback,auxdata,chunk,pad), c(n) {}
 
     // Encode symbol x using TCounter stats
@@ -648,8 +705,8 @@ struct ArithDecoder : TRangeDecoder
 {
     TCounter<Decoder> c;   // Provides stats about symbol frequencies
 
-    ArithDecoder (CALLBACK_FUNC *callback, VOID_FUNC *auxdata, int elements)
-        : TRangeDecoder (callback, auxdata), c(elements) {}
+    ArithDecoder (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize, int elements)
+        : TRangeDecoder (callback, auxdata, bufsize), c(elements) {}
 
     // Decode next symbol using TCounter stats
     UINT decode()

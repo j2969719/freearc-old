@@ -1,1 +1,1 @@
-@compile -O2
+@compile -O2 %1 %2 %3

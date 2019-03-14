@@ -4,7 +4,7 @@
 #define __LZMA_ENCODER_H
 
 #include "../../../Common/MyCom.h"
-#include "../../../Common/Alloc.h"
+// #include "../../../Common/Alloc.h"
 #include "../../ICoder.h"
 #include "../LZ/IMatchFinder.h"
 #include "../RangeCoder/RangeCoderBitTree.h"
@@ -229,8 +229,11 @@ class CEncoder :
   UInt32 _numLiteralContextBits;
 
   UInt32 _dictionarySize;
-
   UInt32 _dictionarySizePrev;
+
+  UInt32 _hashSize;
+  UInt32 _hashSizePrev;
+
   UInt32 _numFastBytesPrev;
 
   UInt32 _matchPriceCount;
@@ -325,6 +328,7 @@ class CEncoder :
   UInt32 Backward(UInt32 &backRes, UInt32 cur);
   HRESULT GetOptimum(UInt32 position, UInt32 &backRes, UInt32 &lenRes);
   HRESULT GetOptimumFast(UInt32 position, UInt32 &backRes, UInt32 &lenRes);
+  HRESULT GetOptimumFastest(UInt32 position, UInt32 &backRes, UInt32 &lenRes);
 
   void FillDistancesPrices();
   void FillAlignPrices();
@@ -391,6 +395,7 @@ public:
 
   // Alternative function to setup coder properties
   HRESULT SetupProperties( UInt32 dictionarySize,
+                           UInt32 hashSize,
                            UInt32 posStateBits,
                            UInt32 litContextBits,
                            UInt32 litPosBits,

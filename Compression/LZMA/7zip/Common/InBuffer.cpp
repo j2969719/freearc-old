@@ -4,12 +4,12 @@
 
 #include "InBuffer.h"
 
-#include "../../Common/Alloc.h"
+// #include "../../Common/Alloc.h"
 
-CInBuffer::CInBuffer(): 
-  _buffer(0), 
-  _bufferLimit(0), 
-  _bufferBase(0), 
+CInBuffer::CInBuffer():
+  _buffer(0),
+  _bufferLimit(0),
+  _bufferBase(0),
   _stream(0),
   _bufferSize(0)
 {}
