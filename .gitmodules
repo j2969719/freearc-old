@@ -1,0 +1,3 @@
+[submodule "7zip"]
+	path = 7zip
+	url = https://github.com/warexify/p7zip.git
