@@ -4,7 +4,7 @@ ALL: $(TEMPDIR)/C_Tornado.o
 
 CODE_FLAGS  = -fno-exceptions -fno-rtti \
               -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
-OPT_FLAGS   = -O3 -march=i486 -mtune=pentiumpro \
+OPT_FLAGS   = -O3 \
               -fomit-frame-pointer -fstrict-aliasing \
               -fforce-addr -ffast-math -funroll-loops --param inline-unit-growth=999
 DEBUG_FLAGS = -g0

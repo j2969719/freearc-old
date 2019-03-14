@@ -96,19 +96,18 @@ writeRecoveryBlocks archive oldarc init_pos command params bufOps = do
       -- Расшифруем запись опции -rr в виде recovery_amount;sector_size или rec_sectors*sector_size,
       -- запоминая размер recovery сектора и/или их количество, если эти величины заданы явно
   let (recovery_amount, explicit_rec_size, explicit_sector_size) = case () of
-        _ | ';' `elem` recovery -> let (r,ss)  = split2 ';' recovery .$ mapSnd (i.parseSize) in
+        _ | ';' `elem` recovery -> let (r,ss)  = split2 ';' recovery .$ mapSnd (i.parseSize 'b') in
                                    (r,  Nothing,       Just ss)
-          | '*' `elem` recovery -> let (ns,ss) = split2 '*' recovery .$ mapFstSnd (i.parseSize) in
+          | '*' `elem` recovery -> let (ns,ss) = split2 '*' recovery .$ mapFstSnd (i.parseSize 'b') in
                                    ("", Just (ns*ss),  Just ss)
           | otherwise           -> (recovery, Nothing, Nothing)
-      -- Пересчитаем размер recovery info в байты
-      wanted_rec_size = (case parseNumber recovery_amount 's' of
-                             (num,'b') -> num                        -- уже задан в байтах
-                             (num,'s') -> num*aRAR_REC_SECTOR_SIZE   -- задан в секторах по 512 байт
-                             (num,'%') -> arcsize_1p * num           -- задан в процентах
-                             (num,'p') -> arcsize_1p * num           -- -.-
-                        -- ... но должен быть не больше половины объёма ОЗУ 8-)
-                        ) `minI` (getPhysicalMemory `div` 2)
+      -- Пересчитаем размер recovery info в байты (но не больше лимита, заданного -lc)
+  wanted_rec_size <- limit_protection command $
+                       case parseNumber recovery_amount 's' of
+                           (num,'b') -> num                        -- уже задан в байтах
+                           (num,'s') -> num*aRAR_REC_SECTOR_SIZE   -- задан в секторах по 512 байт
+                           (num,'%') -> arcsize_1p * num           -- задан в процентах
+                           (num,'p') -> arcsize_1p * num           -- -.-
       -- Размер recovery сектора зависит того, сколько процентов от размера архива занимает
       -- recovery info - чем она больше, тем меньший размер сектора можно сделать,
       -- не опасаясь, что crc секторов архива будут занимать слишком большую часть recovery info.
@@ -118,7 +117,7 @@ writeRecoveryBlocks archive oldarc init_pos command params bufOps = do
       -- При маленьком относительном объёме recovery info (в частности, при большом размере архива),
       -- размер recovery сектора, наоборот, растёт до бесконечности.
       -- Зависимость "объём recovery info -> размер сектора" следующая: 4% -> 512, 2% -> 1024, 1% -> 2048...
-      sector_size =  explicit_sector_size `defaultVal`
+  let sector_size =  explicit_sector_size `defaultVal`
                      case wanted_rec_size of
                        0 -> 4096  -- При задании -rr0% запоминаются только CRC 4-килобайтных секторов, что составит 0.1% от размера архива
                        _ -> (2^lb(40*arcsize `div` wanted_rec_size)) `atLeast` 512
@@ -128,7 +127,7 @@ writeRecoveryBlocks archive oldarc init_pos command params bufOps = do
       crcs_size0  = arc_sectors * sizeOf (undefined::CRC)
       -- Реальный размер блока recovery
       rec_size    = explicit_rec_size `defaultVal`
-                    max wanted_rec_size (crcs_size0+0*sector_size)  -- Блок recovery должен вмещать как минимум CRC секторов архива плюс 0 recovery-секторов
+                    max (i wanted_rec_size) (crcs_size0+0*sector_size)  -- Блок recovery должен вмещать как минимум CRC секторов архива плюс 0 recovery-секторов
       -- Количество recovery секторов и их общий объём
       rec_sectors = (rec_size - crcs_size0) `divRoundUp` sector_size
       rec_sectors_size = rec_sectors*sector_size

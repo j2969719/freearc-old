@@ -1,30 +1,5 @@
 #include "../Compression.h"
 
-int lzma_compress   (int dictionarySize,
-                     int hashSize,
-                     int algorithm,
-                     int numFastBytes,
-                     int matchFinder,
-                     int matchFinderCycles,
-                     int posStateBits,
-                     int litContextBits,
-                     int litPosBits,
-                     CALLBACK_FUNC *callback,
-                     void *auxdata);
-
-int lzma_decompress (int dictionarySize,
-                     int hashSize,
-                     int algorithm,
-                     int numFastBytes,
-                     int matchFinder,
-                     int matchFinderCycles,
-                     int posStateBits,
-                     int litContextBits,
-                     int litPosBits,
-                     CALLBACK_FUNC *callback,
-                     void *auxdata);
-
-
 #ifdef __cplusplus
 
 // Реализация стандартного интерфейса методов сжатия COMPRESSION_METHOD
@@ -47,24 +22,28 @@ public:
 
   // Универсальный метод, отвечает на запрос "has_progress?"
   virtual int doit (char *what, int param, void *data, CALLBACK_FUNC *callback);
+  // Упаковка/распаковка в памяти
+  virtual int DeCompressMem (COMPRESSION direction, void *input, int inputSize, void *output, int *outputSize, CALLBACK_FUNC *callback=0, void *auxdata=0, void **CodecState=0);
   // Функции распаковки и упаковки
   virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress (CALLBACK_FUNC *callback, void *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
+
+  // Вычисляет общий расход памяти и размер хеш-таблицы при упаковке
+  void CalcCompressionMemories (MemSize *pmem, MemSize *phashSize);
+
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void);
+  virtual void    SetCompressionMem        (MemSize mem);
+  virtual void    SetMinDecompressionMem   (MemSize mem);
+  virtual void    SetDictionary            (MemSize dict);
+#endif
+  virtual MemSize GetDictionary            (void)               {return dictionarySize;}
+  virtual MemSize GetDecompressionMem      (void);
+  virtual LongMemSize GetMaxCompressedSize (LongMemSize insize) {return insize + (insize/40) + 512;}
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_LZMA)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void);
-  virtual MemSize GetDictionary         (void)         {return dictionarySize;}
-  virtual MemSize GetBlockSize          (void)         {return 0;}
-  virtual void    SetCompressionMem     (MemSize mem);
-  virtual void    SetDecompressionMem   (MemSize mem);
-  virtual void    SetDictionary         (MemSize dict);
-  virtual void    SetBlockSize          (MemSize)      {}
-#endif
-  virtual MemSize GetDecompressionMem   (void);
 };
 
 // Разборщик строки метода сжатия LZMA

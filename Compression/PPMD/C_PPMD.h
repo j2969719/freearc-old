@@ -22,21 +22,18 @@ public:
   // Функции распаковки и упаковки
   virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress (CALLBACK_FUNC *callback, void *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
+
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void)               {return mem+1*mb;}
+  virtual void    SetCompressionMem        (MemSize _mem);
+  virtual void    SetMinDecompressionMem   (MemSize _mem)       {SetCompressionMem(_mem);}
+#endif
+  virtual MemSize GetAlgoMem               (void)               {return mem;}
+  virtual MemSize GetDecompressionMem      (void)               {return mem+1*mb;}
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_PPMD)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)          {return mem;}
-  virtual MemSize GetDictionary         (void)          {return 0;}
-  virtual MemSize GetBlockSize          (void)          {return 0;}
-  virtual void    SetCompressionMem     (MemSize _mem);
-  virtual void    SetDecompressionMem   (MemSize _mem)  {SetCompressionMem(_mem);}
-  virtual void    SetDictionary         (MemSize dict)  {}
-  virtual void    SetBlockSize          (MemSize bs)    {}
-#endif
-  virtual MemSize GetDecompressionMem   (void)          {return mem;}
 };
 
 // Разборщик строки метода сжатия PPMD

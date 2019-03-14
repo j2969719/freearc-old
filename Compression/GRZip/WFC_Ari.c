@@ -489,8 +489,6 @@ sint32 GRZip_WFC_Ari_Decode(uint8* Input,uint32 Size,uint8* Output)
 {
   uint8* SOutput=Output;
 
-  uint32 FFNum=0;
-  uint32 Cache=0;
   uint32 ARICode=0;
   uint32 Range=(uint32)(-1);
 
@@ -498,7 +496,6 @@ sint32 GRZip_WFC_Ari_Decode(uint8* Input,uint32 Size,uint8* Output)
 {                                                          \
   uint32 AFreq=TFreq;                                      \
   uint32 ACumFreq=TCumFreq;                                \
-  uint32 ATotFreq=TTotFreq;                                \
   ARICode-=ACumFreq*Range;                                 \
   Range*=AFreq;                                            \
   while(Range<ARI_RangeTOP)                                \
@@ -525,7 +522,7 @@ sint32 GRZip_WFC_Ari_Decode(uint8* Input,uint32 Size,uint8* Output)
 
   Init_Models();
 
-  uint32 Mask,Log2RunSize,RunSize,WFCMTF_Rank,PredChar,Char=0;
+  uint32 Log2RunSize,RunSize,WFCMTF_Rank,PredChar,Char=0;
 
   while (1)
   {

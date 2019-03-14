@@ -109,24 +109,26 @@ parse_charset_option optionsList = (charsets
                                    ,unParseData . domainTranslation charsets)
   where
     -- Таблица кодировок
-    charsets = foldl f aCHARSET_DEFAULTS optionsList
-    -- Функция обработки опций --charset
-    f value "--"      =  aCHARSET_DEFAULTS      -- -sc-- означает восстановить значения по умолчанию
-    f value ('s':cs)  =  _7zToRAR value "l" cs  -- -scs... устанавливает кодировку для листфайлов
-    f value ('l':cs)  =  _7zToRAR value "l" cs  -- -scl... does the same
-    f value ('c':cs)  =  _7zToRAR value "c" cs  -- -scs... устанавливает кодировку для комментфайлов
-    f value ('f':cs)  =  _7zToRAR value "f" cs  -- -scf... устанавливает кодировку для файловой системы
-    f value ('d':cs)  =  _7zToRAR value "d" cs  -- -scd... устанавливает кодировку для каталога архива
-    f value ('t':cs)  =  _7zToRAR value "t" cs  -- -sct... устанавливает кодировку для терминала (консоли)
-    f value ('p':cs)  =  _7zToRAR value "p" cs  -- -scp... устанавливает кодировку для параметров ком. строки
-    f value ('i':cs)  =  _7zToRAR value "i" cs  -- -sci... устанавливает кодировку для ini-файлов (arc.ini/arc.groups)
-    f value (x:cs)    =  foldl Utils.update value [(c,x) | c<-cs|||"cl"]  -- установить в `x` элементы списка, перечисленные в cs (по умолчанию 'c' и 'l')
-    -- Вспомогательные функции, преобразующие 7zip-овский формат опций в RAR'овский
-    _7zToRAR value typ cs  =  f value (g (strLower cs):typ)
-    g "utf-8"  = '8';  g "win"  = 'a'
-    g "utf8"   = '8';  g "ansi" = 'a'
-    g "utf-16" = 'u';  g "dos"  = 'o'
-    g "utf16"  = 'u';  g "oem"  = 'o'
+    charsets = foldl (flip process) aCHARSET_DEFAULTS optionsList
+    -- Функция, превращающая значение одной опции --charset в rar/7z формате, в операцию (charsets -> charsets)
+    process "--"                                                  =  const aCHARSET_DEFAULTS         -- -sc-- означает восстановить значения по умолчанию
+    process (d:cs) | d `elem` ("sa"++aDOMAIN_CODES)               =  rar (_7zToRAR cs) [d]           -- -scDcs: опция в формате 7-zip: D=domain char, cs=charset name (utf-8...)
+    process (c:ds)                                                =  rar c             ds            -- -scCds: опция в формате rar:   C=charset char (a/u/o/8), ds=domain chars list
+    process ""                                                    =  error "Empty charset option"
+    -- Обрабатывает опцию в rar'овском формате:
+    rar c ds  -- установить в `c` элементы списка, перечисленные в ds  (по умолчанию 'c' и 'l';  's' устанавливает кодировку для листфайлов;  'a' устанавливает все кодировки разом)
+      | c `notElem` aCHARSET_CODES                                =  error ("Unknown charset code "++quote [c])
+      | Just domain <- domains .$ find (`notElem` aDOMAIN_CODES)  =  error ("Unknown charset domain code "++quote [domain])
+      | otherwise                                                 =  flip (foldl Utils.update) [(d,c) | d<-domains]
+         where domains  =  ds .$ changeTo [("","cl"), ("s","l"), ("a",aDOMAIN_CODES)]
+    -- Преобразует название charset в 7zip-овском формате в RAR'овский
+    _7zToRAR charset = case (strLower charset) of
+      "utf-8"  -> '8';  "win"  -> 'a'
+      "utf8"   -> '8';  "ansi" -> 'a'
+      "utf-16" -> 'u';  "dos"  -> 'o'
+      "utf16"  -> 'u';  "oem"  -> 'o'
+      ('=':_)  ->  _7zToRAR (tail charset)
+      _        ->  error ("Unknown charset "++quote charset)
 
 
 -- Процедура чтения файла, транслирующая его кодировку и разбивающая на отдельные строки
@@ -173,11 +175,11 @@ readConfigFileManyTries file = go 1 where
 
 -- |Возвращает charset, используемый в domainCharsets для данных типа domain
 domainTranslation domainCharsets domain =
-  lookup domain domainCharsets `defaultVal` error ("Unknown charset domain "++quote [domain])
+  lookup domain domainCharsets `defaultVal` error ("Unknown charset domain code "++quote [domain])
 
 -- |Трансляция данных, заданных в кодировке charset
 charsetTranslation charset =
-  lookup charset aCHARSETS `defaultVal` error ("Unknown charset "++quote [charset])
+  lookup charset aCHARSETS `defaultVal` error ("Unknown charset code "++quote [charset])
 
 -- |Трансляция данных из области domain (листфайлы, конфигфайлы, коммент-файлы...),
 -- используя charset, заданный для неё в domainСharsets
@@ -190,6 +192,13 @@ type Charset = Char
 
 -- |Each charset is represented by pair of functions: input translation (byte sequence into Unicode String) and output translation
 data TRANSLATION = TRANSLATION {aTRANSLATE_INPUT, aTRANSLATE_OUTPUT :: String->String}
+
+
+-- |Set of domain codes used in -sc option
+aDOMAIN_CODES = map fst aCHARSET_DEFAULTS
+
+-- |Set of single-char charset codes supported by current platform
+aCHARSET_CODES = map fst aCHARSETS
 
 -- |Character sets and functions to translate texts from/to these charsets
 aCHARSETS = [ ('0', TRANSLATION id               id)
@@ -390,13 +399,14 @@ urlEncode = concatMap (\c -> if isReservedChar c then '%':encode16 [c] else [c])
 {-# NOINLINE locale #-}
 -- |Локализация: отображение индекса в локализованную строку
 locale :: IORef (Array Int (Maybe String))
-locale = unsafePerformIO $ ref$ array (0,-1) []
+locale = unsafePerformIO (ref empty_locale)
+empty_locale = array (0,-1) []
 
 {-# NOINLINE setLocale #-}
 -- |Установить локализацию по файлу
-setLocale "--"       = return ()
-setLocale localeFile = do
-  localeInfo <- parseLocaleFile localeFile
+setLocale ["--"]      = return ()
+setLocale localeFiles = do
+  localeInfo <- parseLocaleFiles localeFiles
   locale =: localeInfo
 
 -- |Переводит строку/список строк на местный язык
@@ -414,23 +424,26 @@ is_i18 str = all isDigit (take 4 str) && (take 1 (drop 4 str) == " ")
 i18fmt (x:xs)  =  i18n x >>== (`formatn` xs)
 
 
-{-# NOINLINE parseLocaleFile #-}
--- |Прочитать из файла список строк локализации
-parseLocaleFile localeFile = do
-  -- Прочитаем файл локализации или возвратим пустую болванку
-  localeInfo <- readConfigFile localeFile `catch` \e -> return ["0000=English"]
-  -- Отбираем строки, начинающиеся на "dddd", и создаём из них массив: dddd -> текст после знака '='
-  -- Если текст после '=' заключён в двойные кавычки - избавимся от них
-  -- Символы '&' заменяются на '_' (различие в акселераторах 7-zip и Gtk)
-  -- \" заменяется на просто ", запись "\\n" на сам символ \n
-  return$ localeInfo .$ filter   (\s -> length s > 4  &&  s `contains` '=')
-                     .$ filter   (all isDigit.take 4)
-                     .$ map      (split2 '=')
-                     .$ deleteIf (("??"==).snd)
-                     .$ mapFsts  (readInt.take 4)
-                     .$ mapSnds  (\s -> s.$ (s.$match "\"*\"" &&& (reverse.drop 1.reverse.drop 1)))
-                     .$ mapSnds  (replace '&' '_'. replaceAll "\\\"" "\"". replaceAll "\\n" "\n")
-                     .$ populateArray Nothing Just
+{-# NOINLINE parseLocaleFiles #-}
+-- |Прочитать из файлов списки строк локализации (с приоритетом у строк из более поздних файлов)
+parseLocaleFiles localeFiles = do
+  xs <- foreach localeFiles $ \localeFile -> do
+          -- Прочитаем файл локализации или возвратим пустую болванку
+          localeInfo <- readConfigFile localeFile `catch` \e -> return ["0000=English"]
+          -- Отбираем строки, начинающиеся на "dddd", и создаём из них массив: dddd -> текст после знака '='
+          -- Если текст после '=' заключён в двойные кавычки - избавимся от них
+          -- Символы '&' заменяются на '_' (различие в акселераторах 7-zip и Gtk)
+          -- \" заменяется на просто ", запись "\\n" на сам символ \n
+          return$ localeInfo .$ filter   (\s -> length s > 4  &&  s `contains` '=')
+                             .$ filter   (all isDigit.take 4)
+                             .$ map      (split2 '=')
+                             .$ deleteIf (("??"==).snd)
+                             .$ mapFsts  (readInt.take 4)
+                             .$ mapSnds  (\s -> s.$ (s.$match "\"*\"" &&& (reverse.drop 1.reverse.drop 1)))
+                             .$ mapSnds  (replace '&' '_'. replaceAll "\\\"" "\"". replaceAll "\\n" "\n" . replaceAll "FreeArc" aFreeArc)
+  --
+  return$ populateArray Nothing Just (concat xs)
+
 
 {-# NOINLINE i18n_general #-}
 -- |Возвращает локализованный текст надписи и её всплывающую подсказку

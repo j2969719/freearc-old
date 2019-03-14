@@ -166,6 +166,12 @@ data FileInfo = FileInfo
   , fiGroup :: {-# UNPACK #-} !FileGroup       -- Номер группы в arc.groups
   }
 
+-- |Битовые поля в fiAttr
+aFI_ATTR_READONLY = 0x01
+aFI_ATTR_HIDDEN   = 0x02
+aFI_ATTR_SYSTEM   = 0x04
+aFI_ATTR_ARCHIVE  = 0x20
+
 -- |Преобразовать FileInfo в имя файла на диске
 diskName     = fpFullname.fiDiskName
 storedName   = fpFullname.fiStoredName
@@ -188,7 +194,7 @@ fiTimeCorrect t | t<aMINIMUM_POSSIBLE_FILETIME  =  aMAXIMUM_POSSIBLE_FILETIME
 stat_mtime p_stat  =  raw_stat_mtime p_stat  >>==  fiTimeCorrect
 
 -- |Строка атрибутов файла, используемая при выводе листинга архива
-fiAttrStr fi = '.' : (if fiIsDir fi then 'D' else '.') : zipWith check [0x01,0x02,0x04,0x20,0] "RHSA."
+fiAttrStr fi = '.' : (if fiIsDir fi then 'D' else '.') : zipWith check [aFI_ATTR_READONLY, aFI_ATTR_HIDDEN, aFI_ATTR_SYSTEM, aFI_ATTR_ARCHIVE,0] "RHSA."
   where check n c  =  if fiAttr fi .&. n > 0  then c  else '.'
 
 -- |Создать структуру FileInfo для каталога с заданным именем
@@ -411,12 +417,13 @@ find_filter_and_process_files filespecs ff@FileFind{ ff_ep=ep, ff_scan_subdirs=s
             full_dirname      =  curdir </> diskdir
 
             -- Базовый каталог в архиве
-            arcdir  =  arc_basedir </> case ep of
-               0 -> ""                        -- -ep:  exclude any paths from names
-               1 -> ""                        -- -ep1: exclude base dir from names
-               2 -> full_dirname.$stripRoot   -- -ep2: full absolute path without "d:\"
-               3 -> full_dirname              -- -ep3: full absolute path with "d:\"
-               _ -> dirname.$stripRoot        -- Default: full relative path
+            arcdir     =  remove_unsafe_dirs (arc_basedir </> arc_subdir)
+            arc_subdir =  case ep of
+                            0 -> ""                        -- -ep:     exclude any paths from names
+                            1 -> ""                        -- -ep1:    exclude base dir from names
+                            2 -> full_dirname.$stripRoot   -- -ep2:    full absolute path without "d:\"
+                            3 -> full_dirname              -- -ep3:    full absolute path with "d:\"
+                            _ -> dirname.$stripRoot        -- Default: full relative path
             -- Выбирает parent или root каталог в зависимости от опции -ep
             parent_or_root      =  if ep==0  then const root  else id
             -- Имена файлов внутри архива и в ком. строке совпадают?

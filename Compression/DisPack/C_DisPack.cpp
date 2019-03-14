@@ -13,7 +13,7 @@ extern "C" {
 // Конструктор, присваивающий параметрам метода сжатия значения по умолчанию
 DISPACK_METHOD::DISPACK_METHOD()
 {
-    BlockSize      = 64*mb;
+    BlockSize      = 8*mb;
     ExtendedTables = 0;
 }
 
@@ -23,11 +23,10 @@ bool is_tag (unsigned x)  {return (x^TAG_DATA) < 0x10;}
 // Функция распаковки
 int DISPACK_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
-    int errcode = FREEARC_OK;   // Error code returned by last operation or FREEARC_OK
-    BYTE* In = NULL;  // указатель на входные данные
-    BYTE* Out= NULL;  // указатель на выходные данные
-    uint BaseAddress = 1<<30;
-    int CHUNK_SIZE, InBufferSize = BlockSize+BlockSize/4+1024;
+    int   errcode = FREEARC_OK;     // Error code returned by last operation or FREEARC_OK
+    BYTE *In = NULL,  *Out = NULL;  // Указатели на входные и выходные данные, соответственно
+    uint  BaseAddress = 1u<<30;
+    int   CHUNK_SIZE, InBufferSize = BlockSize+BlockSize/4+1024;
     READ4_OR_EOF (CHUNK_SIZE);
     if (CHUNK_SIZE > BlockSize)  ReturnErrorCode(FREEARC_ERRCODE_BAD_COMPRESSED_DATA);
     BIGALLOC (BYTE, In,  InBufferSize+2);
@@ -62,6 +61,7 @@ int DISPACK_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
         } else {
             ReturnErrorCode(FREEARC_ERRCODE_BAD_COMPRESSED_DATA);
         }
+        if (BaseAddress >= 3u<<30)  BaseAddress -= 2u<<30;
     }
 finished:
     BigFreeAndNil(In); BigFreeAndNil(Out);
@@ -75,32 +75,32 @@ enum EXETYPE {EXETYPE_UNKNOWN, EXETYPE_DATA, EXETYPE_EXE};
 EXETYPE detect (BYTE *buf, int len)
 {
   int e8=0, exe=0, obj=0;
-  for (BYTE *p=buf; p+4<buf+len; p++)
+  for (BYTE *p=buf; p+5<buf+len; p++)
   {
     if (*p == 0xE8)
     {
       e8++;
-      if (p[4]==0xFF)
+      if (p[4]==0xFF && p[5]!=0xFF)
         exe++;
-      if (p[4]==0)
+      if (p[4]==0    && p[5]!=0)
         obj++;
     }
   }
+  // printf("  e8 %d, exe %d, obj %d, len %d\n", e8, exe, obj, len);
   return double(e8)/len >= 0.002   &&   double(exe+obj)/e8 >= 0.20  &&   double(exe)/e8 >= 0.01?  EXETYPE_EXE : EXETYPE_DATA;
 }
 
 // Функция упаковки
 int DISPACK_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
-    int errcode = FREEARC_OK;   // Error code returned by last operation or FREEARC_OK
-    BYTE* In = NULL;  // указатель на входные данные
-    BYTE* Out= NULL;  // указатель на выходные данные
-    uint BaseAddress = 1<<30;
-    int InSize; uint32 OutSize;     // количество байт во входном и выходном буфере, соответственно
+    int   errcode = FREEARC_OK;     // Error code returned by last operation or FREEARC_OK
+    BYTE *In = NULL,  *Out = NULL;  // Указатели на входные и выходные данные, соответственно
+    int   InSize;  uint32 OutSize;  // Количество байт во входном и выходном буфере, соответственно
+    uint  BaseAddress = 1u<<30;
     const int CHUNK_SIZE = 16*kb;
-    bool first_time = TRUE;
+    bool  first_time = TRUE;
     BIGALLOC (BYTE, In, BlockSize+2);
-    while (1)
+    for(;;)
     {
         // Читаем файл блоками по 16 кб, пока не кончится исполняемый код
         BYTE *p = In;  int len;
@@ -112,9 +112,10 @@ int DISPACK_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
             p += len, len = 0;
         } while (p-In <= BlockSize-CHUNK_SIZE);
 
+        InSize = p-In;
+        if (InSize+len == 0)  break;
         if (first_time)   WRITE4 (CHUNK_SIZE);  first_time = FALSE;
 
-        InSize = p-In;
         if (InSize)
         {
             // Кодируем исполняемый код
@@ -135,29 +136,29 @@ int DISPACK_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
             }
             WRITE (p, len);
         }
-        BaseAddress += InSize+len;
-        if (InSize+len == 0) break;
+        if ((BaseAddress += InSize+len)  >=  3u<<30)   BaseAddress -= 2u<<30;
     }
 finished:
     BigFreeAndNil(In); //BigFreeAndNil(Out);
     return errcode;
 }
 
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DISPACK)
 void DISPACK_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     DISPACK_METHOD defaults; char BlockSizeStr[100]=":";
     showMem (BlockSize, BlockSizeStr+1);
-    sprintf (buf, "dispack%s%s", BlockSize!=defaults.BlockSize? BlockSizeStr:"", ExtendedTables? ":x":"");
+    sprintf (buf, "dispack070%s%s", BlockSize!=defaults.BlockSize? BlockSizeStr:"", ExtendedTables? ":x":"");
 }
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа DISPACK_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах
 COMPRESSION_METHOD* parse_DISPACK (char** parameters)
 {
-  if (strcmp (parameters[0], "dispack") == 0) {
+  if (strcmp (parameters[0], "dispack") == 0
+   || strcmp (parameters[0], "dispack070") == 0) {
     // Если название метода (нулевой параметр) - "dispack", то разберём остальные параметры
 
     DISPACK_METHOD *p = new DISPACK_METHOD;

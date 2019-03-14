@@ -30,7 +30,7 @@ Date        Version  New features compared to previous version
 
 2008-10-28  0.4b     Added -11:c1 .. -11:c3 modes
 
-2009-01-01  0.5      Removed modes -6 -8 -10 -12, renumerated -7/9/11 to -6/7/8
+2014-01-15  0.5      Removed modes -6 -8 -10 -12, renumerated -7/9/11 to -6/7/8
                      -7/-8: 1% better compression and 5-20% better speed due to use of ht5
                      New -9..-11 modes: 2gb hash and ht5..ht7 match finders
                      In small tornado.exe -c1..-c3 available for -7..-11 modes
@@ -47,33 +47,27 @@ Date        Version  New features compared to previous version
                      Removed CHECK_FOR_DATA_TABLE(2) in -3/-4 modes
 
 
-shift buffer by 1/8, 1/16... for large -l
--h512m:64, -ah512m:64, -h -ah -b<128m
-hufblock=50.000 in -3 & for texts/compressed
-no rep codes in -3  (also useful for -2 -c3)
+2014-03-08  0.6      http://freearc.org/download/research/tornado06.zip
 
-skip 0/32 when calculating hash
-check matches at REP_DIST first	(should improve compression for binary files)
-len7*2: add accept_match check in first cycle
-multithreading (support multiple blocks in decoder)
-optimal parsing
-split cycled caching hash into two parts - pointers and data (probably useful only for optimal parsing because there is no update() in this case)
--t2 full delta filter
--6 -> switch to CCMF<4>	?
-MFN<MINLEN,MAXLEN> with checks for dist<48k/... and exit when len>=MAXLEN
-maxdist for len=8..9 in accept_match() - may improve compression for 256mb-1gb dictionaries
-chunked hash (15 elements + pointer to the next chunk)
--kadach lazy
--use prevlen to skip checking useless matches (with len<=prevlen)
--if len>32 then lazy_search_row/=4
-+match_writer that dynamically uses byte/bit/huf/aricoder
-+kadach huffman   (5000/3)
+Compression:
+* new -11..-16 modes employing the new optimal parser (-p4)
+* -fb (FAST BYTES), new parameter used only by the optimal parser
+* old -10 mode was removed, old -11 mode was better tuned and renamed to -10
+* -s1 option meaning changed to "64kb hash3 + 4kb hash2", slightly improving compression in -5/-6 modes
+* new chash5..7 (-x15..17) and bt4..7 (-x24..27) match finders
+* all chash/cchash/bt matchfinders support -l values that is not power of 2
+* new manual.txt explaining all compression parameters
 
-ускорение lazy parsing благодар€ одновременной проверке двух позиций
-1. tor -5/-6: ищем матчи дл€ p+1, в хеш-таблице сохран€ем p[0,4,5,6],
-              провер€ем сразу матчи на p и p+1,
-              если Ќ»„≈√ќ не найдено - ищем матчи дл€ p до дистанции 48к
-2. в старших режимах - после нахождени€ матча размером N+4 переключаемс€ на поиск
-        матчей дл€ p+4 (или p+1..p+3). или просто ищем на шару :)
+Command line and progress indicator:
+* -slp/-rem options, large pages are allocated by default
+* Win7 taskbar progress indication (green bar) plus info in the console window title
+* returns Errcode 2 on any error, clears the window title on ^Break
+* prints ranges and default values for each option, checks option correctness
+* on Windows, prohibits simultaneous writing by several compression processes to the same output file
+* prints byte-exact filesizes; speeds are measured in MiB/s
+* progress indicator is more accurate and updated only once per 0.2 seconds
 
-lzma: искать сразу матчи дл€ p и p+1, заполн€€ две таблицы. при отсутствии результатов - быстрый поиск дл€ p (до 48к)
+Compilation:
+* on Windows, compile.cmd supports many GCC/MSVC/ICL versions
+* on Linux, compile.sh now produces executables that can process files larger than 2 GB
+

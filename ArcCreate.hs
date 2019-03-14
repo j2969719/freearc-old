@@ -55,29 +55,29 @@ runArchiveCreate pretestArchive
     , opt_arccmt_file     = arccmt_file          --   файл, из которого читается новый комментарий к архиву
     , opt_data_compressor = compressor           --   алгоритм сжатия
     } = do
-  opt_testMalloc command &&& testMalloc  -- напечатать карту памяти
-  -- для суперэкономии памяти: find_files |> buffer 100_000 |> write_to_archive
+
+  -- Напечатаем карту памяти, если включена отладка
+  opt_testMalloc command &&& testMalloc
 
   -- Создаём sfx-архив сразу с расширением EXE, если только мы не должны обновить уже существующий архив
   arcname <- do archiveExists <- fileExist arcname
-                if cmd=="create" || not archiveExists
+                if is_CMD_CREATE cmd || not archiveExists
                   then return$ cmdChangeSfxExt command arcname
                   else return arcname
   command <- return command {cmd_arcname = arcname}
 
   -- Команда "create" всегда создаёт архив с нуля
-  when (cmd=="create")$  do ignoreErrors$ fileRemove arcname
+  when (is_CMD_CREATE cmd)$  do ignoreErrors$ fileRemove arcname
   -- Сообщить пользователю о начале обработки архива и запросить пароль архивации, если необходимо
-  uiStartArchive command =<< limit_compression command compressor   -- ограничить компрессор объёмом памяти и значением -lc
-  command <- (command.$ opt_cook_passwords) command ask_passwords  -- подготовить пароли в команде к использованию
+  uiStartArchive command =<< limit_compression command compressor   -- ограничить компрессор объёмом доступной памяти и значением -lc
+  command <- (command.$ opt_cook_passwords) command ask_passwords   -- подготовить пароли в команде к использованию
   debugLog "Started"
 
   -- Прочитать служебную информацию основного (обновляемого) архива, включая каталоги.
   -- Выйти, если архив залочен или содержит recovery info и повреждён.
   -- Если мы создаём новый архив, то подставить вместо старого "фантом".
   let abort_on_locked_archive archive footer = do
-          when (isNothing archive) $
-              registerError$ GENERAL_ERROR ["0478 can't modify non-"++aFreeArc++" archive"]
+          -- to do: check that archive type is updatable (f.e. non RAR)
           when (ftLocked footer) $
               registerError$ GENERAL_ERROR ["0310 can't modify archive locked with -k"]
           pretestArchive command archive footer
@@ -88,6 +88,12 @@ runArchiveCreate pretestArchive
                        then archiveReadInfo command "" "" archive_filter abort_on_locked_archive arcname
                        else return phantomArc
   debugLogList "There are %1 files in archive being updated" (arcDirectory main_archive)
+
+  -- Установить тип создаваемого архива
+  let arctype | isArcPhantom main_archive = opt_archive_type command
+              | isArcArchive main_archive = aFreeArcInternalExt
+              | otherwise                 = arcArchiveType main_archive
+  command <- return command {opt_archive_type = arctype}
 
   -- Найти на диске добавляемые архивы (для команды "j") и прочитать их служебную информацию.
   -- Выйти, если любой из этих архивов содержит recovery info и повреждён.
@@ -117,10 +123,10 @@ runArchiveCreate pretestArchive
   files_to_archive <- join_lists main_archive added_archives sorted_diskfiles command
   debugLogList "Joined filelists, %1 files" files_to_archive
 
-  if null files_to_archive                    -- Если выходной архив не содержит ни одного файла
-    then do registerWarning NOFILES           -- то сообщить об этом пользователю
-            closeInputArchives                --    закрыть входные архивы
-            ignoreErrors$ fileRemove arcname  --    удалить архив, если он существовал перед операцией (например, в случае команды "arc d archive *")
+  if null files_to_archive &&  not (is_CMD_MODIFY cmd)    -- Если выходной архив не содержит ни одного файла
+    then do registerWarning NOFILES                       -- то сообщить об этом пользователю
+            closeInputArchives                            --    закрыть входные архивы
+            ignoreErrors$ fileRemove arcname              --    удалить архив, если он существовал перед операцией (например, в случае команды "arc d archive *")
             return (1,0,0,0)
     else do
 
@@ -140,16 +146,19 @@ runArchiveCreate pretestArchive
   --   Этой датой будет проштампован архив после окончания архивации.
   last_time <- ref aMINIMUM_POSSIBLE_FILETIME
   let find_last_time dir  =  last_time .= (\time -> maximum$ time : map (fiTime.fwFileInfo) dir)
-  let processDir dir      =  do when (opt_time_to_last command) (find_last_time dir)
+  let processDir dir      =  do when (opt_time_to_last command) $ do
+                                  find_last_time dir
                                 postProcess_processDir dir  -- враппер постпроцессинга тоже должен получить список успешно сархивированных файлов
 
   -- Сообщить пользователю о начале упаковки данных
-  uiStartProcessing (map cfFileInfo files_to_archive) 0 0
+  unless (is_CMD_MODIFY$ cmd_name command)$ do
+    uiStartProcessing (length files_to_archive) (sum$ map (fiSize.cfFileInfo) files_to_archive) 0 0
   performGC   -- Почистить мусор чтобы освободить как можно больше памяти для алгоритмов сжатия данных
 
   -- Сначала мы записываем содержимое создаваемого архива во временный файл и лишь затем, при успехе архивации - переименовываем его
-  tempfile_wrapper arcname command deleteFiles pretestArchive $ \temp_arcname -> do
+  tempfile_wrapper arcname command deleteFiles pretestArchive $ \temp_arcname temp_arcnames' -> do
     ensureCtrlBreak "closeInputArchives" closeInputArchives $ do   -- Закроем входные архивы по завершении архивации
+      if (arctype /= aFreeArcInternalExt)   then szCompress command main_archive arcname temp_arcname temp_arcnames' diskfiles results   else do   -- Обратимся к 7z.dll для архивации в недефолтный формат
       bracketCtrlBreak "archiveClose:ArcCreate" (archiveCreateRW temp_arcname) (archiveClose) $ \archive -> do
         writeSFX (opt_sfx command) archive main_archive    -- Начнём создание архива с записи SFX-модуля
         -- Создание архива - последовательность отдельных процессов, передающих данные друг другу:
@@ -166,7 +175,7 @@ runArchiveCreate pretestArchive
     setFileDateTime arcname arc_time                   --   то восстановить mtime архива
   when (opt_time_to_last command) $ do                 -- Если использована опция -tl
     setFileDateTime arcname =<< val last_time          --   то установить время&дату модификации архива на время&дату модификации самого свежего файла в нём
-  renameArchiveAsSFX arcname command                   -- Переименуем архив, если в него был добавлен или из него убран SFX-модуль
+  renameArchiveAsSFX command arcname                   -- Переименуем архив, если в него был добавлен или из него убран SFX-модуль
   val results                                          -- Возвратим статистику выполнения команды
 
 
@@ -175,16 +184,16 @@ runArchiveCreate pretestArchive
 ----------------------------------------------------------------------------------------------------
 
 -- |Префикс и суффикс имён создаваемых временных файлов
-temparc_prefix = "$$temparc$$"
+temparc_prefix = "freearc"
 temparc_suffix = ".tmp"
 
--- |Выполнить `action` с именем временного файла и затем переименовать его
-tempfile_wrapper filename command deleteFiles pretestArchive action  =  find 1 >>= doit
+-- |Выполнить `action` с именем временного файла и затем переименовать его (если нет опций -v)
+tempfile_wrapper filename command deleteFiles pretestArchive action   =   find 1 >>= doit
   where -- Найти свободное имя для временного файла
         find n = do tempdir <- if opt_create_in_workdir command  then getTempDir  else return (takeDirectory filename)
                     createDirectoryHierarchy tempdir
                     let tempname = tempdir </> (temparc_prefix++show n++temparc_suffix)
-                    found <- fileExist tempname
+                    found <- liftM2 (||) (fileOrDirExist tempname) (fileOrDirExist$ tempname++".001")   -- check that both archive and multi-volume archive may be created
                     case found of
                         True  | n==999    -> registerError$ GENERAL_ERROR ["0311 can't create temporary file"]
                               | otherwise -> find (n+1)
@@ -192,36 +201,42 @@ tempfile_wrapper filename command deleteFiles pretestArchive action  =  find 1 >
 
         -- Выполнить действие, используя временное имя файла, протестировать и затем переименовать окончательный архив
         doit tempname = do old_file <- fileExist filename      -- Мы выполняем обновление существующего архива?
-                           handleCtrlBreak "fileRemove tempname" (ignoreErrors$ fileRemove tempname) $ do
-                             -- Выполнить архивацию
-                             action tempname
-                             -- Если указана опция "-t", то протестируем только что созданный архив
-                             when (opt_test command) $ do
-                                 test_archive tempname (opt_keep_broken command)
-                           handleCtrlBreak "Keeping temporary archive" (condPrintLineLn "n"$ "Keeping temporary archive "++tempname) $ do
-                             -- Удалить сархивированные файлы, если использована опция -d
-                             deleteFiles
-                             -- Заменить старый архив новым
-                             if old_file
-                                 then fileRemove filename   -- Хорошо бы проверять, что это всё ещё тот самый файл
-                                 else whenM (fileExist filename) $ do  -- Если файл с именем выходного архива создали за время архивации, то сообщить об ошибке
-                                          registerError$ GENERAL_ERROR ["0312 output archive already exists, keeping temporary file %1", tempname]
-                             fileRename tempname filename
-                                 `catch` (\_-> do condPrintLineLn "n"$ "Copying temporary archive "++tempname++" to "++filename
-                                                  fileCopy tempname filename; fileRemove tempname)
-                           -- Если указаны опции "-t" и "--create-in-workdir", то ещё раз протестируем окончательный архив
-                           when (opt_test command && opt_create_in_workdir command) $ do
-                               test_archive filename (opt_keep_broken command || opt_delete_files command /= NO_DELETE)
+                           tempnames' <- mvar [tempname]
+                           handleCtrlBreak "fileRemove tempname" (val tempnames' >>= mapM_ (ignoreErrors.fileRemove)) $ do
+                               -- Выполнить архивацию
+                               action tempname tempnames';  tempnames <- val tempnames'
+                               -- Если указана опция "-t", то протестируем только что созданный архив
+                               when (opt_test command) $ do
+                                   test_archive tempnames (opt_keep_broken command)
+                           -- Получим имена временных архивов и вычислим сответствующие им имена окончательных файлов
+                           tempnames <- val tempnames'
+                           let filenames = tempnames.$map ((filename++) . drop (length$ takeFileName tempname) . takeFileName)
+                           handleCtrlBreak "Keeping temporary archive" (condPrintLineLn "n"$ "Keeping temporary archive "++head tempnames) $ do
+                               -- Удалить сархивированные файлы, если использована опция -d
+                               deleteFiles
+                               -- Заменить старый архив новым
+                               if old_file && filename==head filenames
+                                   then fileRemove filename   -- Хорошо бы проверять, что это всё ещё тот самый файл
+                                   else whenM (fileExist filename) $ do  -- Если файл с именем выходного архива создали за время архивации, то сообщить об ошибке
+                                            registerError$ GENERAL_ERROR ["0312 output archive already exists, keeping temporary file %1", head tempnames]
+                               for (zip tempnames filenames) $ \(tempname,filename) -> do
+                                   fileRename tempname filename
+                                       `catch` (\_-> do condPrintLineLn "n"$ "Copying temporary archive "++tempname++" to "++filename
+                                                        fileCopy tempname filename; fileRemove tempname)
+                           -- Если указана опция "-t" и архивы были скопированы в другой каталог, то ещё раз протестируем окончательный архив
+                           when (opt_test command && takeDirectory tempname/=takeDirectory filename) $ do
+                               test_archive filenames (opt_keep_broken command || opt_delete_files command /= NO_DELETE)
 
         -- Протестировать архив и выйти, удалив его, если при этом возникли проблемы
-        test_archive arcname keep_broken_archive = do
+        test_archive arcnames keep_broken_archive = do
             w <- count_warnings $ do
-                     testArchive command arcname pretestArchive
+                     testArchive command (head arcnames) pretestArchive
             -- Продолжать работу только при отсутствии warning'ов
             when (w/=0) $ do
-                unless keep_broken_archive (ignoreErrors$ fileRemove arcname)
+                unless keep_broken_archive $ do
+                    for arcnames (ignoreErrors.fileRemove)
                 registerError$ GENERAL_ERROR$ if keep_broken_archive
-                                                 then ["0313 archive broken, keeping temporary file %1", arcname]
+                                                 then ["0313 archive broken, keeping temporary file %1", head arcnames]
                                                  else ["0314 archive broken, deleting"]
 
 
@@ -248,27 +263,20 @@ postProcess_wrapper command archiving = do
                       evalList dirs   `seq`  (dirs2delete  ++= dirs )
                   -- Удалить сархивированные файлы и каталоги
                   deleteFiles = when (opt_delete_files command /= NO_DELETE) $ do
-                                    -- Функция удаления, при необходимости снимающая атрибуты у файла
-                                    let superRemove removeAction fi = do
-                                            let filename = diskName fi
-                                            removeAction filename `catch` \e -> do
-                                                -- Remove readonly/hidden/system attributes and try to remove file/directory again
-                                                ignoreErrors$ clearFileAttributes filename
-                                                ignoreErrors$ removeAction filename
-                                    -- Удаление файлов
                                     condPrintLineLn "n"$ "Deleting successfully archived files"
+                                    -- Удаление файлов
                                     files <- val files2delete
                                     for files $ \fi -> do
                                         whenM (check_that_file_was_not_changed fi) $ do
-                                            superRemove fileRemove fi
+                                            forcedFileRemove (diskName fi)
                                     -- Удаление каталогов
                                     when (opt_delete_files command == DEL_FILES_AND_DIRS) $ do
                                         dirs <- val dirs2delete
-                                        for (reverse dirs) (superRemove dirRemove)   -- Каталоги обычно сохраняются в порядке обхода, то есть родительский каталог в списке раньше дочерних. Так что reverse позволяет удалить сначала дочерние каталоги
+                                        for (reverse dirs) (dirRemove.diskName)   -- Каталоги обычно сохраняются в порядке обхода, то есть родительский каталог в списке раньше дочерних. Так что reverse позволяет удалить сначала дочерние каталоги
 
               -- Выполнить архивацию, занося успешно сархивированные файлы в списки files2delete и dirs2delete.
               -- Удалить файлы после архивации, если задана опция -d[f]
-              result <- archiving processDir deleteFiles
+              results <- archiving processDir deleteFiles
               -- Сбросить атрибут "архивировано" у успешно упакованных файлов, если задана опция -ac
               when (opt_clear_archive_bit command) $ do
                   condPrintLineLn "n"$ "Clearing Archive attribute of successfully archived files"
@@ -276,7 +284,7 @@ postProcess_wrapper command archiving = do
                   for files $ \fi -> do
                       whenM (check_that_file_was_not_changed fi) $ do
                           clearArchiveBit.fpFullname.fiDiskName$ fi
-              return result
+              return results
 
 -- |Проверить, что файл не изменился с момента архивации
 check_that_file_was_not_changed fi = do
@@ -318,7 +326,7 @@ writeSFX sfxname archive old_archive = do
       oldSFXSize      = ftSFXSize (arcFooter old_archive)
   case sfxname of                                      -- В зависимости от значения опции "-sfx":
     "-"      -> return ()                              --   удалить старый sfx-модуль
-    "--"     -> unless (arcPhantom old_archive) $ do   --   скопировать sfx из исходного архива (по умолчанию)
+    "--"     -> unless (isArcPhantom old_archive) $ do   --   скопировать sfx из исходного архива (по умолчанию)
                   archiveCopyData oldArchive 0 oldSFXSize archive
     filename -> bracket (archiveOpen sfxname              --   прочитать модуль sfx из указанного файла
                           `catch` (\e -> registerError$ GENERAL_ERROR ["0315 can't open SFX module %1", sfxname]))
@@ -327,24 +335,24 @@ writeSFX sfxname archive old_archive = do
                                         archiveCopyData sfxfile 0 size archive)
 
 -- |Новое имя архива в соответствии с тем, что мы добавили или наоборот убрали из него SFX-модуль
-cmdChangeSfxExt command  =  changeSfxExt (opt_noarcext command) (opt_sfx command)
+cmdChangeSfxExt command  =  changeSfxExt (opt_noarcext command) (opt_sfx command) (opt_archive_type command)
 
-changeSfxExt opt_noarcext opt_sfx arcname =
+changeSfxExt opt_noarcext opt_sfx arctype arcname =
   case (opt_noarcext, opt_sfx) of
 --  Отключено, поскольку мешало конвертировать в SFX архивы изнутри GUI
 --  (True, _)     -> arcname                -- Не менять расширение, если указана опция --noarcext
     (_   , "--")  -> arcname                --   или не указана опция "-sfx"
-                                            -- При "-sfx-" расширение меняется на ".arc"
+                                            -- При "-sfx-" расширение меняется на ".arc/.7z"
     (_   , "-")   -> if takeExtension arcname == aDEFAULT_SFX_EXTENSION
-                       then replaceExtension arcname aDEFAULT_ARC_EXTENSION
+                       then replaceExtension arcname ("."++arctype)
                        else arcname
                                             -- При "-sfx..." расширение меняется на ".exe"
-    _             -> if takeExtension arcname == aDEFAULT_ARC_EXTENSION
+    _             -> if takeExtension arcname == "."++arctype
                        then replaceExtension arcname aDEFAULT_SFX_EXTENSION
                        else arcname
 
 -- |Переименовать архив в соответствии с его SFX-именем
-renameArchiveAsSFX arcname command = do
+renameArchiveAsSFX command arcname = do
   let newname = cmdChangeSfxExt command arcname
   when (newname/=arcname) $ do
     condPrintLineLn "n"$ "Renaming "++arcname++" to "++newname

@@ -1,6 +1,6 @@
 /* LzmaEnc.c -- LZMA Encoder
 (c) 2009-04-22 Igor Pavlov
-(c) 2008-2009 Bulat Ziganshin
+(c) 2008,2009,2013 Bulat Ziganshin
 This code made available under GPL license.
 For a commercial license write to Bulat.Ziganshin@gmail.com
 */
@@ -60,7 +60,6 @@ void LzmaEncProps_Normalize(CLzmaEncProps *p)
   if (level < 0) level = 5;
   p->level = level;
   if (p->dictSize == 0) p->dictSize = (level <= 5 ? (1 << (level * 2 + 14)) : (level == 6 ? (1 << 25) : (1 << 26)));
-  p->dictSize = mymin (p->dictSize, kMaxValForNormalize-kNormalizeStepMin-1*mb+1);   // Bulat: dict>959m doesn't work for some reason
   if (p->lc < 0) p->lc = 3;
   if (p->lp < 0) p->lp = 0;
   if (p->pb < 0) p->pb = 2;
@@ -68,7 +67,7 @@ void LzmaEncProps_Normalize(CLzmaEncProps *p)
   if (p->fb < 0) p->fb = (level < 7 ? 32 : 64);
   if (p->btMode < 0) p->btMode = (p->algo == 0 ? MF_HashChain : MF_BinaryTree);
   if (p->numHashBytes < 0) p->numHashBytes = 4;
-  if (p->mc == 0)  p->mc = 16 + p->fb / (p->btMode==MF_BinaryTree ? 2 : 4);
+  if (p->mc == 0)  p->mc = (p->btMode==MF_HashTable? (p->fb/2) : p->btMode==MF_BinaryTree? 16+(p->fb/2) : 16+(p->fb/4));
   if (p->numThreads < 0)
     p->numThreads =
       #ifdef COMPRESS_MF_MT
@@ -101,15 +100,15 @@ UInt32 LzmaEncProps_GetDictSize(const CLzmaEncProps *props2)
   return props.dictSize;
 }
 
-/* #define LZMA_LOG_BSR */
-/* Define it for Intel's CPU */
+/* Define it for Intel CPUs */
+#define LZMA_LOG_BSR
 
 
 #ifdef LZMA_LOG_BSR
 
-#define kDicLogSizeMaxCompress 30
+#define kDicLogSizeMaxCompress 32
 
-#define BSR2_RET(pos, res) { unsigned long i; _BitScanReverse(&i, (pos)); res = (i + i) + ((pos >> (i - 1)) & 1); }
+#define BSR2_RET(pos, res) { int i = lb(pos); (res) = (i + i) + (((pos) >> (i - 1)) & 1); }
 
 UInt32 GetPosSlot1(UInt32 pos)
 {
@@ -417,7 +416,8 @@ SRes LzmaEnc_SetProps(CLzmaEncHandle pp, const CLzmaEncProps *props2)
   LzmaEncProps_Normalize(&props);
 
   if (props.lc > LZMA_LC_MAX || props.lp > LZMA_LP_MAX || props.pb > LZMA_PB_MAX ||
-      props.dictSize > (1 << kDicLogSizeMaxCompress) || props.dictSize > (1 << 30))
+      props.dictSize > ((UInt64)1 << kDicLogSizeMaxCompress) ||
+      props.dictSize > 4000u*mb)  /* In fact, current code supports dictSize<4032mb */
     return SZ_ERROR_PARAM;
 
   p->dictSize = props.dictSize;
@@ -485,7 +485,7 @@ static void RangeEnc_Construct(CRangeEnc *p)
 
 #define RangeEnc_GetProcessed(p) ((p)->processed + ((p)->buf - (p)->bufBase) + (p)->cacheSize)
 
-#define RC_BUF_SIZE(dict) (compress_all_at_once? (dict)+((dict)/8) : BUFFER_SIZE)  /* output buffer size */
+#define RC_BUF_SIZE(dict) BUFFER_SIZE  /* output buffer size */
 
 static int RangeEnc_Alloc(CRangeEnc *p, UInt32 dictSize, ISzAlloc *alloc)
 {
@@ -1929,12 +1929,10 @@ static SRes LzmaEnc_CodeOneBlock(CLzmaEnc *p, Bool useLimits, UInt32 maxPackSize
 static SRes LzmaEnc_Alloc(CLzmaEnc *p, UInt32 keepWindowSize, ISzAlloc *alloc, ISzAlloc *allocBig)
 {
   UInt32 beforeSize = kNumOpts;
-  Bool btMode;
   if (!RangeEnc_Alloc(&p->rc, p->dictSize, alloc))
     return SZ_ERROR_MEM;
-  btMode = p->matchFinderBase.btMode;
   #ifdef COMPRESS_MF_MT
-  p->mtMode = (p->multiThread && !p->fastMode /*&& btMode==MF_BinaryTree*/);
+  p->mtMode = (p->multiThread && !p->fastMode /*&& p->matchFinderBase.btMode==MF_BinaryTree*/);
   #endif
 
   {

@@ -80,6 +80,7 @@ data Command = Command {
   , opt_keep_original        :: !Bool               --   не перепаковывать ни одного файла?
   , opt_noarcext             :: !Bool               --   не добавлять стандартное расширение к имени архива?
   , opt_nodir                :: !Bool               --   не записывать в архив его оглавление (для бенчмарков)?
+  , opt_nodates              :: !Bool               --   не записывать в архив даты модификации файлов?
   , opt_update_type          :: !Char               --   алгоритм обновления файлов (a/f/u/s)
   , opt_x_include_dirs       :: !Bool               --   включить каталоги в обработку (для команд листинга/распаковки)?
   , opt_no_nst_filters       :: !Bool               --   TRUE, если в команде отсутствуют опции отбора файлов по имени/размеру/времени (-n/-s../-t..)
@@ -101,11 +102,16 @@ data Command = Command {
   , opt_original             :: !String             --   перезагружать с указанного URL сбойные части архива
   , opt_save_bad_ranges      :: !String             --   записать в заданный файл список неисправных частей архива для их перевыкачки
   , opt_pause_before_exit    :: !String             --   сделать паузу перед выходом из программы
+  , opt_global_queueing      :: !Bool               --   ждать в глобальной очереди операций?
   , opt_shutdown             :: !Bool               --   выключить компьютер по окончанию работы?
   , opt_compression_cache    :: !Int                --   размер буфера упреждающего чтения при сжатии
   , opt_decompression_cache  :: !Int                --   размер буфера упреждающего чтения при распаковке
   , opt_limit_compression_memory   :: !MemSize      --   ограничение памяти при упаковке, байт
   , opt_limit_decompression_memory :: !MemSize      --   ограничение памяти при распаковке, байт
+  , opt_volumes              :: ![FileSize]         --   размеры томов создаваемого архива
+  , opt_archive_type         :: !String             --   тип обрабатываемого архива (arc/zip/rar/...)
+  , opt_archive_extension    :: !String             --   расширение архивов по умолчанию (.arc/.zip/.rar/...)
+  , opt_7z_compression       :: ![String]           --   настройки сжатия для 7z.dll
 
                                                     -- Настройки шифрования:
   , opt_encryption_algorithm :: !String             --   алгоритм шифрования.
@@ -138,20 +144,24 @@ opt_debug cmd = cmd.$opt_display.$(`contains_one_of` "$#")
 -- |Включить тестирование памяти?
 opt_testMalloc cmd = cmd.$opt_display.$(`contains_one_of` "%")
 
+
 -- |Ограничивает метод сжатия до реально доступного объёма памяти (вызывается непосредственно перед стартом алгоритма)
 -- и добавляет вызовы "tempfile" между слишком прожорливыми алгоритмами
 -- (память ограничивается до значения -lc и размера наибольшего блока свободной памяти, если не задано -lc-)
-limit_compression   = limit_de_compression opt_limit_compression_memory   limitCompressionMemoryUsage
+limit_compression   = limit_de_compression opt_limit_compression_memory   limitCompressionMem
 
 -- |Добавляет вызовы "tempfile" между слишком прожорливыми алгоритмами при распаковке
-limit_decompression = limit_de_compression opt_limit_decompression_memory limitDecompressionMemoryUsage
+limit_decompression = limit_de_compression opt_limit_decompression_memory limitDecompressionMem
 
--- Generic definition
+-- |Ограничивает размер добавляемой к архиву Recovery Record до реально доступного объёма памяти (поскольку RR при создании хранится целиком в ОЗУ)
+limit_protection    = limit_de_compression opt_limit_compression_memory   minI
+
+-- Generic algorithm
 limit_de_compression option limit_f command method = do
   let memory_limit = command.$option
   if memory_limit==CompressionLib.aUNLIMITED_MEMORY
     then return method
-    else do maxMem <- getMaxMemToAlloc
+    else do maxMem <- getMaxBlockToAlloc
             return$ limit_f (memory_limit `min` maxMem) method
 
 
@@ -159,7 +169,7 @@ limit_de_compression option limit_f command method = do
 -- |Список опций, поддерживаемых программой
 optionsList = sortOn (\(OPTION a b _) -> (a|||"zzz",b))
    [OPTION "--"    ""                   "stop processing options"
-   ,OPTION "cfg"   "config"            ("use config FILE (default: " ++ aCONFIG_FILE ++ ")")
+   ,OPTION "cfg"   "config"            ("use configuration FILES (default: " ++ aCONFIG_FILES ++ ")")
    ,OPTION "env"   ""                  ("read default options from environment VAR (default: " ++ aCONFIG_ENV_VAR ++ ")")
    ,OPTION "r"     "recursive"          "recursively collect files"
    ,OPTION "f"     "freshen"            "freshen files"
@@ -197,6 +207,7 @@ optionsList = sortOn (\(OPTION a b _) -> (a|||"zzz",b))
    ,OPTION ""      "language"           "load localisation from FILE"
    ,OPTION "tp"    "pretest"            "test archive before operation using MODE"
    ,OPTION "t"     "test"               "test archive after operation"
+   ,OPTION "t"     "type"               "archive TYPE (arc/zip/rar/...)"
    ,OPTION "d"     "delete"             "delete files & dirs after successful archiving"
    ,OPTION "df"    "delfiles"           "delete only files after successful archiving"
    ,OPTION "kb"    "keepbroken"         "keep broken extracted files"
@@ -213,7 +224,7 @@ optionsList = sortOn (\(OPTION a b _) -> (a|||"zzz",b))
    ,OPTION "to"    "TimeOlder"          "select files older than specified time PERIOD"
    ,OPTION "k"     "lock"               "lock archive"
    ,OPTION "rr"    "recovery"           "add recovery information of specified SIZE to archive"
-   ,OPTION "sfx"   ""                  ("add sfx MODULE (\""++aDEFAULT_SFX++"\" by default)")  -- to do: сделать эту опцию OptArg
+   ,OPTION "sfx"   ""                  ("add sfx MODULE (\""++default_sfx aFreeArcExt++"\" by default)")  -- to do: сделать эту опцию OptArg
    ,OPTION "z"     "arccmt"             "read archive comment from FILE or stdin"  -- to do: сделать эту опцию OptArg
    ,OPTION ""      "archive-comment"    "input archive COMMENT in cmdline"
    ,OPTION "i"     "indicator"          "select progress indicator TYPE (0/1/2)"   -- to do: сделать эту опцию OptArg
@@ -227,6 +238,7 @@ optionsList = sortOn (\(OPTION a b _) -> (a|||"zzz",b))
    ,OPTION ""      "recompress"         "recompress archive contents"
    ,OPTION ""      "dirs"               "add empty dirs to archive"
    ,OPTION "ed"    "nodirs"             "don't add empty dirs to archive"
+   ,OPTION ""      "nodates"            "don't store filetimes in archive"
    ,OPTION ""      "cache"              "use N mbytes for read-ahead cache"
    ,OPTION "lc"    "LimitCompMem"       "limit memory usage for compression to N mbytes"
    ,OPTION "ld"    "LimitDecompMem"     "limit memory usage for decompression to N mbytes"
@@ -242,10 +254,15 @@ optionsList = sortOn (\(OPTION a b _) -> (a|||"zzz",b))
    ,OPTION ""      "save-bad-ranges"    "save list of broken archive parts to the FILE"
    ,OPTION ""      "pause-before-exit"  "make a PAUSE just before closing program window"
    ,OPTION "ioff"  "shutdown"           "shutdown computer when operation completed"
+   ,OPTION "v"     "volume"             "split archive to volumes each of SIZE bytes"
+   ,OPTION ""      "queue"              "queue operations across multiple FreeArc copies"
    ]
 
+-- |Список опций, которым имеют меньший приоритет при возникновении коллизий в разборе командной строки
+aLEAST_PRIORITY_OPTIONS = words ""
+
 -- |Список опций, которым надо отдавать предпочтение при возникновении коллизий в разборе командной строки
-aPREFFERED_OPTIONS = words "method sfx charset SizeMore SizeLess overwrite shutdown"
+aPREFFERED_OPTIONS = words "method sfx charset SizeMore SizeLess overwrite shutdown type"
 
 -- |Опции из предыдущего списка, имеющий максимальный приоритет :)
 aSUPER_PREFFERED_OPTIONS = words "OldKeyfile"
@@ -285,6 +302,7 @@ commandsList = [
   , "lt       technical archive listing"
   , "m        move files and dirs to archive"
   , "mf       move files to archive"
+  , "modify   modify archive using +/-/* actions"
   , "r        recover archive using recovery record"
   , "rr       add recovery record to archive"
   , "s        convert archive to SFX"
@@ -305,6 +323,10 @@ is_COPYING_COMMAND x           = x `elem` words "c ch d j k"
 -- |Команда, у которой НЕ ДОЛЖНО быть ни одного аргумента (помимо имени архива)
 is_CMD_WITHOUT_ARGS x  =  is_COPYING_COMMAND x  &&  (x `notElem` words "d j")
 
+-- Self-explained :)
+is_CMD_CREATE = (=="create")
+is_CMD_MODIFY = (=="modify")
+
 -- |Классификация всех команд по четырём типам: команды упаковки, распаковки, тестирования и листинга
 data CmdType = ADD_CMD | EXTRACT_CMD | TEST_CMD | LIST_CMD | RECOVER_CMD  deriving (Eq)
 cmdType "t"  = TEST_CMD
@@ -320,7 +342,7 @@ cmdType  _   = ADD_CMD
 {-# NOINLINE cmdType #-}
 
 -- |Версия архиватора, записываемая в HEADER BLOCK
-aARCHIVE_VERSION = make4byte 0 0 6 6
+aARCHIVE_VERSION = make4byte 0 0 6 7
 
 {-# NOINLINE aARC_VERSION_WITH_DATE #-}
 {-# NOINLINE aARC_HEADER_WITH_DATE #-}
@@ -331,11 +353,11 @@ aARCHIVE_VERSION = make4byte 0 0 6 6
 {-# NOINLINE aARC_WEBSITE #-}
 {-# NOINLINE aARC_LICENSE #-}
 -- |Краткое наименование программы, выводимое в начале работы
-aARC_VERSION_WITH_DATE = aARC_VERSION ++ " ("++aARC_DATE++")"      -- aARC_VERSION
-aARC_HEADER_WITH_DATE  = aARC_HEADER  ++ " ("++aARC_DATE++")"      -- aARC_HEADER
+aARC_VERSION_WITH_DATE = aARC_VERSION                              -- aARC_VERSION ++ " ("++aARC_DATE++")"
+aARC_HEADER_WITH_DATE  = aARC_HEADER                               -- aARC_HEADER  ++ " ("++aARC_DATE++")"
 aARC_HEADER  = aARC_NAME++" "++aARC_VERSION++" "
-aARC_VERSION = "0.666"                                             -- "0.61 ("++aARC_DATE++")"
-aARC_DATE    = "May 20 2010"
+aARC_VERSION = (if aFreeArc == "FreeArc" then "0.67" else "1.0") ++" ("++aARC_DATE++")"                            --  "0.666"
+aARC_DATE    = "March 15 2014"
 aARC_NAME    = aFreeArc
 aARC_AUTHOR  = "Bulat Ziganshin"
 aARC_EMAIL   = "Bulat.Ziganshin@gmail.com"
@@ -373,22 +395,22 @@ data OP_TYPE = COMPRESSION | DECOMPRESSION  deriving (Eq)
 aDEFAULT_COMPRESSOR = "4"
 
 -- |Метод сжатия каталога архива
-aDEFAULT_DIR_COMPRESSION = "lzma:bt4:1m"
+aDEFAULT_DIR_COMPRESSION = "lzma:mfbt4:d1m"
 
 -- |Размер солид-блоков (один солид-блок на всех)
 aDEFAULT_DATA_GROUPING  =  ""
 
 -- |Группировка для каталогов
-aDEFAULT_DIR_GROUPING  =  GroupByNumber (20*1000)
+aDEFAULT_DIR_GROUPING  =  GroupByNumber (100*1000)
 
--- |Алгоритм сжатия данных, используемый по умолчанию
+-- |Алгоритм шифрования
 aDEFAULT_ENCRYPTION_ALGORITHM = "aes"
 
 -- |Если в командной строке не указаны имена обрабатываемых файлов - обрабатывать все, т.е. "*"
 aDEFAULT_FILESPECS = [reANY_FILE]
 
 -- |Расширение архивных файлов
-aDEFAULT_ARC_EXTENSION = ".arc"
+aDEFAULT_ARC_EXTENSION = "."++aFreeArcInternalExt
 
 -- |Расширение SFX архивных файлов
 #ifdef FREEARC_WIN
@@ -397,17 +419,21 @@ aDEFAULT_SFX_EXTENSION = ".exe"
 aDEFAULT_SFX_EXTENSION = ""
 #endif
 
--- |Файл локализации
+-- |Файл локализации по умолчанию
 aLANG_FILE = "arc.language.txt"
+
+-- |Файл локализации для непереведённых tooltips
+aENGLISH_LANG_FILE = "arc.english.txt"
 
 -- |Файл с описанием порядка сортировки имён файлов при "-og"
 aDEFAULT_GROUPS_FILE = "arc.groups"
 
--- |SFX-модуль, используемый по умолчанию
-aDEFAULT_SFX = "freearc.sfx"
+-- |SFX-модуль, используемый по умолчанию, в зависимости от типа архива
+default_sfx t | t==aFreeArcInternalExt = "freearc.sfx"
+              | otherwise              = t++".sfx"
 
--- |Файл конфигурации (хранящий опции, используемые по умолчанию)
-aCONFIG_FILE = "arc.ini"
+-- |Файлы конфигурации (хранящие опции, используемые по умолчанию)
+aCONFIG_FILES = "arc*.ini"
 
 -- |Переменная среды, содержащая опции, используемые по умолчанию
 aCONFIG_ENV_VAR = "FREEARC"
@@ -421,15 +447,15 @@ aDISPLAY_DEFAULT = "hanwrftske"
 aDISPLAY_ALL     = "hoacmnwrfdtske"
 
 -- Секции arc.ini
-compressionMethods = "[Compression methods]"
-defaultOptions     = "[Default options]"
-externalCompressor = "[External compressor:*]"
+aCOMPRESSION_METHODS = "[Compression methods]"
+aDEFAULT_OPTIONS     = "[Default options]"
+aEXTERNAL_COMPRESSOR = "[External compressor:*]"
+
+-- |Проверка того, что это - заголовок секции
+isSectionHeading  =  beginWith "[" . trim
 
 -- |Приведение имени секции к стандартизованной форме
 cleanupSectionName  =  strLower . filter (not.isSpace)
-
--- |Проверка того, что это - заголовок секции
-selectSectionHeadings  =  ("["==) . take 1 . trim
 
 
 ----------------------------------------------------------------------------------------------------
@@ -437,13 +463,13 @@ selectSectionHeadings  =  ("["==) . take 1 . trim
 ----------------------------------------------------------------------------------------------------
 
 -- |Описание опции - краткое имя, длинное имя, печатаемое описание
-data Option = OPTION String String String
+data Option = OPTION String String String  deriving Show
 
 -- |Тип опции - короткие имеют префикс "-", длинные - префикс "--"
-data OptType  =  SHORT | LONG
+data OptType  =  SHORT | LONG deriving Show
 
 -- |Наличие параметра в опции: нет/обязательно/опционально
-data ParamType  =  ParamNo | ParamReq | ParamOpt
+data ParamType  =  ParamNo | ParamReq | ParamOpt deriving Show
 
 -- |"Словарь" опций, содержащий их в удобной для разбора командной строки форме
 optionsDict  =  concatMap compileOption optionsList
@@ -480,31 +506,36 @@ paramName descr =
        _       -> error$ "option description \""++descr++"\" contains more than one uppercased word"
 
 -- |Разбор командной строки, возвращающий список опций и список "свободных аргументов"
-parseOptions []          options freeArgs  =  return (reverse options, reverse freeArgs)
-parseOptions ("--":args) options freeArgs  =  return (reverse options, reverse freeArgs ++ args)
+parseOptions []          _ options freeArgs  =  return (reverse options, reverse freeArgs)
+parseOptions ("--":args) _ options freeArgs  =  return (reverse options, reverse freeArgs ++ args)
 
-parseOptions (('-':option):args) options freeArgs = do
+parseOptions (('-':option):args) option_checks options freeArgs = do
   let check (prefix, _, ParamNo)  =  (option==prefix)
       check (prefix, _, _)        =  (startFrom prefix option /= Nothing)
+  let check2 (prefix, name, haveParam)  =  (lookup name option_checks `defaultVal` const True)  (tryToSkip "=" (tryToSkip prefix option))
   let accept (prefix, name, haveParam)  =  return (name, tryToSkip "=" (tryToSkip prefix option))
       unknown                           =  registerError$ CMDLINE_UNKNOWN_OPTION ('-':option)
-      ambiguous variants                =  registerError$ CMDLINE_AMBIGUOUS_OPTION ('-':option) (map (('-':).fst3) variants)
-  newopt <- case (filter check optionsDict) of
+      ambiguous variants                =  registerError$ CMDLINE_AMBIGUOUS_OPTION ('-':option) (map (("--"++).snd3) variants)      -- to do: "-" or "--" depending on short/long option
+  newopt <- case (filter check2 $ filter check optionsDict) of
               [opt] -> accept opt  -- принять опцию
               []    -> unknown     -- неизвестная опция.
               xs    -> -- При неоднозначности в разборе опции посмотрим на список предпочтительных опций
-                       case (filter ((`elem` aPREFFERED_OPTIONS++aSUPER_PREFFERED_OPTIONS) . snd3) xs) of
+                       case (filter ((`notElem` aLEAST_PRIORITY_OPTIONS) . snd3) xs) of
                          [opt] -> accept opt        -- принять опцию
                          []    -> ambiguous xs      -- неоднозначная опция, которой нет в списке предпочтений
                          xs    -> -- Повторим трюк! :)
-                                  case (filter ((`elem` aSUPER_PREFFERED_OPTIONS) . snd3) xs) of
+                                  case (filter ((`elem` aPREFFERED_OPTIONS++aSUPER_PREFFERED_OPTIONS) . snd3) xs) of
                                     [opt] -> accept opt        -- принять опцию
                                     []    -> ambiguous xs      -- неоднозначная опция, которой нет в списке предпочтений
-                                    xs    -> ambiguous xs      -- неоднозначный разбор даже в списке предпочтений!
+                                    xs    -> -- Повторим трюк! :)
+                                             case (filter ((`elem` aSUPER_PREFFERED_OPTIONS) . snd3) xs) of
+                                               [opt] -> accept opt        -- принять опцию
+                                               []    -> ambiguous xs      -- неоднозначная опция, которой нет в списке предпочтений
+                                               xs    -> ambiguous xs      -- неоднозначный разбор даже в списке предпочтений!
 
-  parseOptions args (newopt:options) freeArgs
+  parseOptions args option_checks (newopt:options) freeArgs
 
-parseOptions (arg:args) options freeArgs   =  parseOptions args options (arg:freeArgs)
+parseOptions (arg:args) option_checks options freeArgs   =   parseOptions args option_checks options (arg:freeArgs)
 
 
 -- |Вернуть список значений опции с названием `flag`. Пример вызова: findReqList opts "exclude"
@@ -566,10 +597,8 @@ luaInit = do
   -- Init event handler lists
   for luaEvents (addLuaEvent l)
   -- Execute configuration scripts, adding handlers for events
-  places <- configFilePlaces "arc.*.lua"
-  for places $ \place -> do
-    scripts <- dirWildcardList place `catch` (\e->return [])
-    for scripts (Lua.dofile l . (takeDirectory place </>))
+  scripts <- findFiles configFilePlaces "arc.*.lua"
+  for scripts (Lua.dofile l)
   return l
 
 -- |Execute Lua scripts assigned to the event cmd
@@ -676,6 +705,11 @@ hfGetHistory  hf tags       = handle (\_ -> return []) $ do
                        ("",b) -> return b
                        (a ,b) -> do a <- i18n a; return$ join2 ": " (a,b))
 
+-- Чтение/запись в историю целочисленного значения
+hfGetHistoryInt     hf tag deflt  =  hfGetHistory1 hf tag (show deflt)  >>==  readInt
+hfReplaceHistoryInt hf tag x      =  hfReplaceHistory hf tag (show x)
+
+
 -- Чтение/запись в историю булевского значения
 hfGetHistoryBool     hf tag deflt  =  hfGetHistory1 hf tag (bool2str deflt)  >>==  (==bool2str True)
 hfReplaceHistoryBool hf tag x      =  hfReplaceHistory hf tag (bool2str x)
@@ -699,27 +733,67 @@ hfCacheConfigFile hf =
 
 -- |Обновляет конфиг-файлы, если произошёл переход на новую версию
 hfUpdateConfigFile hf = do
-  let updates = [("000.52.01", do hfReplaceHistory hf "compressionLast" "0110 Normal: -m4 -s128m"
-                                  hfDeleteConditionalFromHistory hf (\tag value -> tag=="compression" && is_i18 value)
-                                  hfAddHistory hf "compression" "0752 No compression: -m0"
-                                  hfAddHistory hf "compression" "0127 HDD-speed: -m1 -s8m"
-                                  hfAddHistory hf "compression" "0112 Very fast: -m2 -s96m"
-                                  hfAddHistory hf "compression" "0111 Fast: -m3 -s96m"
-                                  hfAddHistory hf "compression" "0110 Normal: -m4 -s128m"
-                                  hfAddHistory hf "compression" "0109 High: -m7 -md96m -ld192m"
-                                  hfAddHistory hf "compression" "0775 Best asymmetric (with fast decompression): -m9x -ld192m -s256m"
-                                  hfAddHistory hf "compression" "0774 Maximum (require 1 gb RAM for decompression): -mx -ld800m"
-                                  hfAddHistory hf "compression" "0773 Ultra (require 2 gb RAM for decompression): -mx -ld1600m"
-
-               ),("000.60.01", do for (words "Modified Size Name") $ \colname -> do
+  let updates = [("000.60.01", do for (words "Modified Size Name") $ \colname -> do
                                     hfChangeTag hf (colname++"ColumnWidth") ("FileManager.ColumnWidth."++colname)
                                   hfChangeTag hf "ColumnOrder" "FileManager.ColumnOrder"
                                   hfReplaceHistoryBool hf "CheckNews" True
 
                ),("000.61.01", do ex <- hfGetHistory hf "extract_all_for"
-                                  for (ex ||| ["*.exe *.htm *.html"]) (hfAddHistory hf "ExtractAllFor")
+                                  for (ex ||| ["*.exe *.msi *.htm *.html"]) (hfAddHistory hf "ExtractAllFor")
                                   hfDeleteTagFromHistory hf "extract_all_for"
                                   hfChangeTag hf "Settings.Associate.Zip" "Settings.AssociateNonArc"
+
+               ),("000.67.03", do hfReplaceHistory hf "compression.7zLast" "0110 Normal: -mx5"
+                                  hfReplaceHistory hf "compression.zipLast" "0110 Normal: -mx5"
+                                  hfAddHistory hf "RunFor" "*.exe *.msi *.doc *.docx *.xls *.xlsx"
+
+               ),("000.67.04", do hfReplaceHistory hf "volumesLast" "0504 RapidShare: 200mb"
+                                  hfDeleteConditionalFromHistory hf (\tag value -> tag=="volumes" && is_i18 value)
+                                  hfAddHistory hf "volumes" "0501 DVD: 4474mb"
+                                  hfAddHistory hf "volumes" "0502 FAT: 2047mb"
+                                  hfAddHistory hf "volumes" "0503 CD: 700mb"
+                                  hfAddHistory hf "volumes" "0504 RapidShare: 200mb"
+                                  hfAddHistory hf "volumes" "0505 SkyDrive: 50mb"
+                                  hfAddHistory hf "volumes" "0506 Mail attachment: 5mb"
+
+               ),("000.67.06", do hfChangeTag  hf "Settings.Associate"            "Settings.Associate.FreeArc.Enabled"
+                                  hfChangeTag  hf "Settings.AssociateNonArc"      "Settings.Associate.OtherArc.Enabled"
+                                  hfAddHistory hf "Settings.Associate.FreeArc"     associate_FreeArc_deflt
+                                  hfAddHistory hf "Settings.Associate.SmartMenu"   associate_SmartMenu_deflt
+               ),("000.67.07", do hfAddHistory hf "Settings.Associate.OtherArc"    associate_OtherArc_deflt
+                                  hfAddHistory hf "Settings.Associate.ContextMenu" associate_ContextMenu_deflt
+
+               ),("000.67.08", do hfReplaceHistory hf "sfx.7zLast" "0765 Windows GUI: 7z.sfx"
+                                  hfAddHistory hf "sfx.7z" "0768 Convert EXE back to ARC: -"
+                                  hfAddHistory hf "sfx.7z" "0766 Windows console: 7zCon.sfx"
+                                  hfAddHistory hf "sfx.7z" "0765 Windows GUI: 7z.sfx"
+
+               ),("000.67.09", do hfDeleteConditionalFromHistory hf (\tag value -> tag=="compression.7z" && is_i18 value)
+                                  hfAddHistory hf "compression.7z" "0752 No compression: -mx0"
+                                  hfAddHistory hf "compression.7z" "0112 Fastest: -mx1"
+                                  hfAddHistory hf "compression.7z" "0111 Fast: -mx3"
+                                  hfAddHistory hf "compression.7z" "0110 Normal: -mx5"
+                                  hfAddHistory hf "compression.7z" "0108 Maximum: -mx7"
+                                  hfAddHistory hf "compression.7z" "0548 Ultra: -mx9"
+
+                                  hfDeleteConditionalFromHistory hf (\tag value -> tag=="compression.zip" && is_i18 value)
+                                  hfAddHistory hf "compression.zip" "0752 No compression: -mx0"
+                                  hfAddHistory hf "compression.zip" "0111 Fast: -mx1"
+                                  hfAddHistory hf "compression.zip" "0110 Normal: -mx5"
+                                  hfAddHistory hf "compression.zip" "0108 Maximum: -mx9"
+
+               ),("000.67.10", do hfReplaceHistory hf "compressionLast" "0110 Normal: -m4"
+                                  hfDeleteConditionalFromHistory hf (\tag value -> tag=="compression" && is_i18 value)
+                                  hfAddHistory hf "compression" "0752 No compression: -m0"
+                                  hfAddHistory hf "compression" "0527 Instant: -m1"
+                                  hfAddHistory hf "compression" "0127 HDD-speed: -m2"
+                                  hfAddHistory hf "compression" "0111 Fast: -m3"
+                                  hfAddHistory hf "compression" "0110 Normal: -m4"
+                                  hfAddHistory hf "compression" "0109 High: -m5"
+                                  hfAddHistory hf "compression" "0775 Best asymmetric (with fast decompression): -m9x -ld192m"
+                                  hfAddHistory hf "compression" "0774 Maximum (require 1 gb RAM for decompression): -mx -ld800m"
+                                  hfAddHistory hf "compression" "0773 Ultra (require 2 gb RAM for decompression): -mx -ld1600m"
+
                )]
 
   let newVersion = fst (last updates)
@@ -754,11 +828,22 @@ hfUpdateConfigFile hf = do
 -- |Записывает ArcShellExt-config.lua
 writeShellExtScript hf' = do
   hfCacheConfigFile hf' $ do
-  contextMenu  <- hfGetHistoryBool hf' "Settings.ContextMenu"          True
-  cascaded     <- hfGetHistoryBool hf' "Settings.ContextMenu.Cascaded" True
-  commands     <- getExplorerCommands >>== filter(not.null.fst3)
-  cmdEnabled   <- foreach commands $ \(cmdname,itext,imsg) -> do
-                      hfGetHistoryBool hf' ("Settings.ContextMenu.Command."++cmdname) True
+  contextMenu <- hfGetHistoryBool hf' "Settings.ContextMenu"          False
+  cascaded    <- hfGetHistoryBool hf' "Settings.ContextMenu.Cascaded" True
+  commands    <- getExplorerCommands >>== filter(not.null.fst3)
+  cmdEnabled  <- foreach commands $ \(cmdname,itext,imsg) -> do
+                     hfGetHistoryBool hf' ("Settings.ContextMenu.Command."++cmdname) True
+
+  -- Return value of setting if enabled, "" otherwise
+  let getHistory key always_enabled deflt = do
+                               enabled <- hfGetHistoryBool hf' (key++".Enabled")   False
+                               str     <- hfGetHistory1    hf' key                 deflt
+                               return ((enabled || always_enabled)  &&&  unwords (deleteIf null (words str)))   -- remove any extra spaces
+  --
+  freearc_extensions        <- getHistory "Settings.Associate.FreeArc"     True  associate_FreeArc_deflt
+  other_archive_extensions1 <- getHistory "Settings.Associate.OtherArc"    True  associate_OtherArc_deflt
+  other_archive_extensions2 <- getHistory "Settings.Associate.ContextMenu" False associate_ContextMenu_deflt
+  smart_menu_extensions     <- getHistory "Settings.Associate.SmartMenu"   False associate_SmartMenu_deflt
 
   exe <- getExeName                                -- Name of FreeArc.exe file
   let dir   =  exe.$takeDirectory                  -- FreeArc.exe directory
@@ -770,7 +855,7 @@ writeShellExtScript hf' = do
   let script = [ "-- This file uses UTF8 encoding"
                , ""
                , "-- 1 for cascaded menus, nil for flat"
-               , "cascaded = "++(iif cascaded "1" "nil")
+               , "cascaded = "++(iif cascaded "true" "false")
                , ""
                , "-- Commands"
                , "command = {}"
@@ -787,14 +872,21 @@ writeShellExtScript hf' = do
                , "-- Path to All2Arc executable file"
                , "all2arc = \"\\\""++(all2arc.$replaceAll "\\" "\\\\")++"\\\"\""
                , ""
-               , "-- FreeArc archive file extension"
-               , "freearc_ext = \""++aFreeArcExt++"\""
+               , "-- FreeArc default archive extension"
+               , "freearc_ext = \""++aFreeArcInternalExt++"\""
                , ""
-               , "-- FreeArc SFX file extension"
-               , "freearc_sfx_ext = \"exe\""
+               , "-- FreeArc SFX extension"
+               , "freearc_sfx_ext = \"exe\""     -- todo: Unix
+               , ""
+               , "-- FreeArc archive file extensions"
+               , "freearc_all_ext = \""++freearc_extensions++"\""
+               , ""
+               , "-- FreeArc SFX and possibe archive file extensions"
+               , "smart_menu_ext = \""++smart_menu_extensions++"\""
                , ""
                , "-- Other archive file extensions"
-               , "archives_ext = \""++arcShellExt_extensions++"\""
+               , "archives_ext = \""++trim(other_archive_extensions1++" "++other_archive_extensions2)++"\""
+               , ""
                ]
   -- Save script to file
   usePersonal <- hfGetHistoryBool hf' "UsePersonalSettings" False
@@ -810,16 +902,24 @@ all2arc_path = do
   let dir  = exe.$takeDirectory                  -- FreeArc.exe directory
   return (dir </> "all2arc.exe")
 
-arcShellExt_extensions = other_archive_extensions++" "++"chm msi dmg hfs iso udf"  -- should be added w/o default action/icon but with extraction actions in ArcShellExt menu
-other_archive_extensions = "7z zip gzip gz tgz bzip2 bz2 tbz2 tar arj cab cpio deb lzh lzma nsis rar rpm wim xar z"
+-- Default extension lists
+associate_FreeArc_deflt     = aFreeArcInternalExt
+associate_OtherArc_deflt    = "zip zipx jar apk rar r00 7z cab arj tar bz2 bzip2 tbz2 tbz gz gzip tgz tpz lzh lha lzma pmd xar xz txz z taz"
+associate_ContextMenu_deflt = "cpio cramfs dmg fat deb rpm mbr ntfs te swf flv squashfs scap vhd dll sys nsis chm chi chq chw hxs hxi hxr hxq hxw lit msi msp doc xls ppt hfs iso udf img wim swm xpi odt ods docx xlsx 001"
+associate_SmartMenu_deflt   = "exe"
 
 translateExplorerCommand (cmdname,etext,emsg) = do [itext,imsg] <- i18ns [etext,emsg]
                                                    return (cmdname, itext, imsg)
 
 -- |Возвращает список локализованных описаний команд, интегрируемых в Explorer
 getExplorerCommands = mapM translateExplorerCommand$
-  [ ("add2arc"    ,  "0391 Add to \"%s\""       ,  "0392 Compress the selected files using "++aFreeArc               )
+  [ (""           ,  ""                         ,  ""                                                                )
+#ifndef HAMSTER
+  , ("add2arc"    ,  "0391 Add to \"%s\""       ,  "0392 Compress the selected files using "++aFreeArc               )
   , ("add2sfx"    ,  "0393 Add to SFX \"%s\""   ,  "0394 Compress the selected files into SFX using "++aFreeArc      )
+#endif
+  , ("add2zip"    ,  "0391 Add to \"%s\""       ,  "0489 Compress the selected files to .zip"                        )
+  , ("add2_7z"    ,  "0391 Add to \"%s\""       ,  "0490 Compress the selected files to .7z"                         )
   , ("add"        ,  "0395 Add to archive..."   ,  "0396 Compress the selected files using "++aFreeArc++" via dialog")
   , (""           ,  ""                         ,  ""                                                                )
   , ("open"       ,  "0397 Open with "++aFreeArc,  "0398 Open the selected archive(s) with "++aFreeArc               )
@@ -827,6 +927,7 @@ getExplorerCommands = mapM translateExplorerCommand$
   , ("extractHere",  "0401 Extract here"        ,  "0402 Extract the selected archive(s) to the same folder"         )
   , ("extract"    ,  "0403 Extract..."          ,  "0404 Extract the selected archive(s) via dialog"                 )
   , ("test"       ,  "0405 Test"                ,  "0406 Test the selected archive(s)"                               )
+#ifndef HAMSTER
   , (""           ,  ""                         ,  ""                                                                )
   , ("arc2sfx"    ,  "0407 Convert to SFX"      ,  "0408 Convert the selected archive(s) to SFX"                     )
   , ("sfx2arc"    ,  "0409 Convert from SFX"    ,  "0410 Convert the selected SFX(es) to normal archive(s)"          )
@@ -837,6 +938,9 @@ getExplorerCommands = mapM translateExplorerCommand$
   , ("zip2arc"    ,  "0415 Convert to .arc"     ,  "0416 Convert the selected archive(s) to "++aFreeArc++" format"   )
   , ("zip2sfx"    ,  "0417 Convert to .arc SFX" ,  "0418 Convert the selected archive(s) to "++aFreeArc++" SFX"      )
   , ("zip2a"      ,  "0419 Convert to .arc..."  ,  "0420 Convert the selected archive(s) to "++aFreeArc++" format via dialog")
+#endif
+  , (""           ,  ""                         ,  ""                                                                )
+  , ("anyfile"    ,  "0491 Archive operations"  ,  "0492 Menu of archive operations for arbitrary file"              )
   ]
 
 
@@ -846,9 +950,11 @@ readGuiOptions = do
   hf' <- openHistoryFile
   logfile' <- hfGetHistory1 hf' "logfile" ""
   tempdir' <- hfGetHistory1 hf' "tempdir" ""
+  queue'   <- hfGetHistoryBool hf' "GlobalQueueing" False
   return $
        (logfile'  &&&  ["--logfile="++clear logfile'])++
        (tempdir'  &&&  ["--workdir="++clear tempdir'])++
+       (queue'    &&&  ["--queue"])++
        []
 
 #else
@@ -862,13 +968,19 @@ readGuiOptions = return []
 
 -- Выбирает один из нескольких вариантов по индексу
 opt `select` variants  =  words (split ',' variants !! opt)
+-- Выбирает один из нескольких вариантов по индексу
+select1 prefix variants opt  =  words ((variants !! opt) .$unlessNull (prefix++))
 -- Преобразует текст настройки в список опций, предварительно удаляя комментарий в её начале
 cvt1 opt  =  map (opt++) . (||| [""]) . words . clear
 -- То же самое, только имя опции добавляется только к словам, не начинающимся с "-"
 cvt  opt  =  map (\w -> (w!~"-?*" &&& opt)++w) . (||| [""]) . words . clear
 -- Удаляет комментарий вида "*: " в начале строки
-clear     =  trim . snd . splitCmt ""
+clear     =  removeQuotes . trim . snd . splitCmt ""
+-- |removeQuotes "text" возвращает просто text, остальное - без изменений
+removeQuotes ('\x22':text) | endWith "\"" text  =  dropEnd 1 text
+removeQuotes text                               =  text
 -- |Разбивает значение на описание+опции
+splitCmt "" text@('\x22':ws) | endWith "\"" ws  =  ("", text)   -- "text" возвращает просто "text" без описания
 splitCmt xs ""           = ("", reverse xs)
 splitCmt xs ":"          = (reverse xs, "")
 splitCmt xs (':':' ':ws) = (reverse xs, ws)
@@ -888,14 +1000,13 @@ foreign import ccall unsafe "Environment.h GetPhysicalMemory"
   getPhysicalMemory :: Word64
 
 -- |Size of maximum memory block we can allocate in bytes
-foreign import ccall unsafe "Environment.h GetMaxMemToAlloc"
-  getMaxMemToAlloc :: IO CUInt
+foreign import ccall unsafe "Environment.h GetMaxBlockToAlloc"
+  getMaxBlockToAlloc :: IO CUInt
 
 -- |Size of physical computer memory that is currently unused
 foreign import ccall unsafe "Environment.h GetAvailablePhysicalMemory"
-  getAvailablePhysicalMemory :: IO CUInt
+  getAvailablePhysicalMemory :: IO Word64
 
 -- |Prints detailed stats about memory available
-foreign import ccall unsafe "Environment.h TestMalloc"
+foreign import ccall safe "Environment.h TestMalloc"
   testMalloc :: IO ()
-

@@ -1,7 +1,7 @@
 // Обработка сбоев при распаковке архива
-#undef  ON_CHECK_FAIL
-#define ON_CHECK_FAIL()   UnarcQuit()
-void UnarcQuit();
+#undef  CHECK
+#define CHECK(e,a,b)   {if (!(a))  {char *s=(char*)malloc(MY_FILENAME_MAX*4);  if (s)  sprintf b;  UnarcQuit(e,s);}}
+void UnarcQuit (int errcode, char* errmsg);
 
 // Доступ к структуре архива
 #include "ArcStructure.h"
@@ -14,9 +14,17 @@ void UnarcQuit();
 #include "ArcProcess.h"
 
 // Экстренный выход из программы в случае ошибки
-void UnarcQuit()
+void UnarcQuit (int errcode, char* errmsg)
 {
-  CurrentProcess->quit(FREEARC_ERRCODE_GENERAL);
+  CurrentProcess->quit (errcode, errmsg);
+}
+
+// Запомним хендл unarc.dll, необходимый нам для правильной загрузки других dll
+extern "C" BOOL WINAPI DllMain (HINSTANCE hinstDll, DWORD fdwReason, LPVOID lpvReserved)
+{
+  if (fdwReason == DLL_PROCESS_ATTACH)
+    hinstUnarcDll = hinstDll;
+  return TRUE;
 }
 
 
@@ -27,31 +35,32 @@ class DLLUI : public BASEUI
 {
 private:
   char outdir[MY_FILENAME_MAX*4];  //unicode: utf-8 encoding
-  uint64 totalBytes;
 public:
   COMMAND *command;
-  Mutex mutex;
-  Event DoEvent, EventDone;
+  bool     callback;
+  Mutex    mutex;
+  Event    DoEvent, EventDone;
 
   char *what; Number n1, n2; int result; char *str;
-  bool event (char *_what, Number _n1, Number _n2, char *_str);
+  int event (char *_what, Number _n1, Number _n2, char *_str);
 
-  DLLUI (COMMAND *_command) : command(_command) {}
+  DLLUI (COMMAND *_command, bool _callback)  :  command(_command), callback(_callback) {}
   bool AllowProcessing (char cmd, int silent, FILENAME arcname, char* comment, int cmtsize, FILENAME outdir);
   FILENAME GetOutDir ();
-  void BeginProgress (uint64 totalBytes);
+  bool BeginProgress (uint64 totalBytes);
   bool ProgressRead  (uint64 readBytes);
   bool ProgressWrite (uint64 writtenBytes);
   bool ProgressFile  (bool isdir, const char *operation, FILENAME filename, uint64 filesize);
   char AskOverwrite  (FILENAME filename, uint64 size, time_t modified);
-  void Abort         (COMMAND *cmd, int errcode);
+  char AskPassword   (char *pwd, int pwdbuf_size);
+  void Abort         (COMMAND *cmd, int errcode, char* errmsg);
 };
 
 
 /******************************************************************************
 ** Реализация интерфейса с программой, использующей DLL ***********************
 ******************************************************************************/
-bool DLLUI::event (char *_what, Number _n1, Number _n2, char *_str)
+int DLLUI::event (char *_what, Number _n1, Number _n2, char *_str)
 {
   Lock _(mutex);
   what = _what;
@@ -61,27 +70,31 @@ bool DLLUI::event (char *_what, Number _n1, Number _n2, char *_str)
 
   DoEvent.Signal();
   EventDone.Wait();
-  return result>=FREEARC_OK;
+  return result;
 }
 
-void DLLUI::BeginProgress (uint64 totalBytes)
+bool DLLUI::BeginProgress (uint64 totalBytes)
 {
-  this->totalBytes = totalBytes;
+  return callback? event ("total", totalBytes>>20, totalBytes, "") >= 0
+                 : TRUE;
 }
 
 bool DLLUI::ProgressRead (uint64 readBytes)
 {
-  return event ("read", readBytes>>20, totalBytes>>20, "");
+  return callback? event ("read", readBytes>>20, readBytes, "") >= 0
+                 : TRUE;
 }
 
 bool DLLUI::ProgressWrite (uint64 writtenBytes)
 {
-  return event ("write", writtenBytes>>20, 0, "");
+  return callback? event ("write", writtenBytes>>20, writtenBytes, "") >= 0
+                 : TRUE;
 }
 
 bool DLLUI::ProgressFile (bool isdir, const char *operation, FILENAME filename, uint64 filesize)
 {
-  return event ("filename", 0, 0, filename);
+  return callback? event ("filename", filesize>>20, filesize, filename) >= 0
+                 : TRUE;
 }
 
 FILENAME DLLUI::GetOutDir()
@@ -97,28 +110,25 @@ bool DLLUI::AllowProcessing (char cmd, int silent, FILENAME arcname, char* comme
 
 char DLLUI::AskOverwrite (FILENAME filename, uint64 size, time_t modified)
 {
-  return 'n';
+  return callback? event ("overwrite?", size>>20, size, filename)
+                 : 's';
 }
 
-void DLLUI::Abort (COMMAND *cmd, int errcode)
+char DLLUI::AskPassword (char *pwd, int pwdbuf_size)
 {
-  event ("quit", errcode, 0, "");
+  return callback? event ("password?", pwdbuf_size, 0, pwd)
+                 : 'n';
+}
+
+void DLLUI::Abort (COMMAND *cmd, int errcode, char* errmsg)
+{
+  event ("error", errcode, 0, errmsg);
 }
 
 
 /******************************************************************************
 ** Реализация функционала DLL *************************************************
 ******************************************************************************/
-static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE timer_thread (void *paramPtr)
-{
-  DLLUI *ui = (DLLUI*) paramPtr;
-  for(;;)
-  {
-    Sleep(10);
-    ui->event ("timer", 0, 0, "");
-  }
-}
-
 static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE decompress_thread (void *paramPtr)
 {
   uint64 total_files, origsize, compsize;
@@ -127,20 +137,21 @@ static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE decompress_thread (void *param
   if (ui->command->cmd=='l')
   {
     PROCESS (ui->command, ui, total_files, origsize, compsize);
-    ui->event ("total_files", total_files,  0, "");
-    ui->event ("origsize",    origsize>>20, 0, "");
-    ui->event ("compsize",    compsize>>20, 0, "");
+    ui->event ("total_files", total_files,  0,        "");
+    ui->event ("origsize",    origsize>>20, origsize, "");
+    ui->event ("compsize",    compsize>>20, compsize, "");
   }
   else
     PROCESS (ui->command, ui);
-  ui->what = "quit";
-  ui->n1   = FREEARC_OK;
+  ui->what = "return";
   ui->DoEvent.Signal();
   return 0;
 }
 
 int __cdecl FreeArcExtract (cbtype *callback, ...)
 {
+  jmpready = FALSE;
+
   va_list argptr;
   va_start(argptr, callback);
 
@@ -156,27 +167,24 @@ int __cdecl FreeArcExtract (cbtype *callback, ...)
   }
   va_end(argptr);
 
-
-
-
+  int errcode = FREEARC_OK;
   COMMAND command (argc, argv);    // Распарсить команду
   if (command.ok) {                // Если парсинг был удачен и можно выполнить команду
     command.Prepare();
     Thread thread;
-    DLLUI *ui = new DLLUI(&command);
-    thread.Create (timer_thread,      ui);   //   Спец. тред, вызывающий callback 100 раз в секунду
+    DLLUI *ui  =  new DLLUI (&command, callback!=NULL);
     thread.Create (decompress_thread, ui);   //   Выполнить разобранную команду
 
     for(;;)
     {
       ui->DoEvent.Wait();
-      if (strequ (ui->what, "quit"))
-        return ui->n1;  // error code of command
-      ui->result = callback? callback (ui->what, ui->n1, ui->n2, ui->str) : FREEARC_OK;
+      if (strequ (ui->what, "return"))   break;
+      ui->result = callback? callback (ui->what, ui->n1, ui->n2, ui->str) : FREEARC_ERRCODE_NOT_IMPLEMENTED;
+      if (strequ (ui->what, "quit"))     errcode = ui->n1;   // error code of command
       ui->EventDone.Signal();
     }
     thread.Wait();
   }
-  return command.ok? FREEARC_OK : FREEARC_ERRCODE_GENERAL;
+  return errcode? errcode : (command.ok? FREEARC_OK : FREEARC_ERRCODE_GENERAL);
 }
 

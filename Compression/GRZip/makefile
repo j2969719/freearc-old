@@ -4,7 +4,7 @@ ALL: $(TEMPDIR)/C_GRZip.o
 
 CODE_FLAGS = -fno-exceptions -fno-rtti \
                 -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
-OPT_FLAGS   = -O2 -march=i486 -mtune=pentiumpro \
+OPT_FLAGS   = -O2 \
               -fomit-frame-pointer -fforce-addr \
               -ffast-math -fstrict-aliasing -funroll-loops
 DEBUG_FLAGS = -g0

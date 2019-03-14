@@ -1,7 +1,7 @@
 #include "../Compression.h"
 
-int rep_compress   (MemSize BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashSizeLog, int Amplifier, CALLBACK_FUNC *callback, void *auxdata);
-int rep_decompress (MemSize BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashSizeLog, int Amplifier, CALLBACK_FUNC *callback, void *auxdata);
+int rep_compress   (unsigned BlockSize, int MinCompression, int ChunkSize, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata);
+int rep_decompress (unsigned BlockSize, int MinCompression, int ChunkSize, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata);
 
 
 #ifdef __cplusplus
@@ -13,6 +13,7 @@ public:
   // Параметры этого метода сжатия
   MemSize BlockSize;        // Размер буфера. Совпадения ищутся только в пределах этой дистанции. Расход памяти - BlockSize+BlockSize/4
   int     MinCompression;   // Минимальный процент сжатия. Если выходные данные больше, то вместо них будут записаны оригинальные (несжатые) данные
+  int     ChunkSize;        // Размер блоков, КС которых заносится в хеш
   int     MinMatchLen;      // Минимальная длина строки, при которой она будет заменяться ссылкой на предыдущее вхождение
   int     Barrier;          // Граница, после которой допускается использовать совпадения меньшего размера (поскольку lzma/ppmd всё равно пропустит их)
   int     SmallestLen;      // Этот меньший размер
@@ -34,19 +35,17 @@ public:
 #ifndef FREEARC_DECOMPRESS_ONLY
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void);
+  virtual void    SetCompressionMem        (MemSize mem);
+  virtual void    SetMinDecompressionMem   (MemSize mem)        {if (mem>0)   BlockSize = mem;}
+  virtual void    SetDictionary            (MemSize dict)       {if (dict>0)  BlockSize = dict;}
+#endif
+  virtual MemSize GetDictionary            (void)               {return BlockSize;}
+  virtual MemSize GetDecompressionMem      (void)               {return BlockSize;}
+
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_REP)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void);
-  virtual MemSize GetDictionary         (void)         {return BlockSize;}
-  virtual MemSize GetBlockSize          (void)         {return 0;}
-  virtual void    SetCompressionMem     (MemSize mem);
-  virtual void    SetDecompressionMem   (MemSize mem)  {if (mem>0)   BlockSize = mem;}
-  virtual void    SetDictionary         (MemSize dict) {if (dict>0)  BlockSize = dict;}
-  virtual void    SetBlockSize          (MemSize bs)   {}
-#endif
-  virtual MemSize GetDecompressionMem   (void)         {return BlockSize;}
 };
 
 // Разборщик строки метода сжатия REP

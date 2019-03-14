@@ -39,7 +39,7 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
       display _                            =  return ()
 
   -- Процедура записи упакованных данных в архив
-  let write_to_archive (DataBuf buf len) =  do doBufChunks buf len aIO_BUFFER_SIZE (archiveWriteBuf archive)
+  let write_to_archive (DataBuf buf len) =  do archiveWriteBuf archive buf len
                                                return len
       write_to_archive  NoMoreData       =  return 0
 
@@ -57,7 +57,7 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
         debugLog str
     DebugLog0 str -> do
         debugLog0 str
-    CompressData block_type compressor real_compressor just_copy -> mdo
+    CompressData block_type compressor real_compressor just_copy -> do
         case block_type of             -- Сообщим UI какого типа данные сейчас будут паковаться
             DATA_BLOCK  ->  uiStartFiles (length real_compressor)
             DIR_BLOCK   ->  uiStartDirectory
@@ -100,6 +100,8 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
               writeArray final_compressor num newMethod
               return newMethod
 
+        ; times <- uiStartDeCompression "compression"               -- создать структуру для учёта времени упаковки
+
         -- Процесс упаковки одним алгоритмом
         let compressP = de_compress_PROCESS freearcCompress times command limit_memory
         -- Последовательность процессов упаковки, соответствующая последовательности алгоритмов `real_compressor`
@@ -118,7 +120,6 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
 
         -- Упаковать один солид-блок
         pos_begin <- archiveGetPos archive
-        ; times <- uiStartDeCompression "compression"               -- создать структуру для учёта времени упаковки
         ;   compress_f                                              -- упаковать данные
         ; uiFinishDeCompression times `on_` block_type==DATA_BLOCK  -- учесть в UI чистое время операции
         ; uiUpdateProgressIndicator 0                               -- отметить, что прочитанные данные уже обработаны

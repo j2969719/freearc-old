@@ -12,6 +12,196 @@ char *ghc_rts_opts = "-c1 -M4000m -K80m                       ";
 
 
 /* ********************************************************************************************************
+*  FreeArc.dll
+***********************************************************************************************************/
+
+#ifdef FREEARC_DLL
+#include "Compression/_TABI/tabi.h"
+
+extern "C" {
+#include "HsFFI.h"
+#include "Arc_stub.h"
+void __stginit_Main();
+
+BOOL APIENTRY DllMain (HANDLE hModule, DWORD  ul_reason_for_call, LPVOID lpReserved)
+{
+   return TRUE;
+}
+
+enum { MESSAGE_TOTAL_FILES=1
+     , MESSAGE_TOTAL_ORIGINAL
+     , MESSAGE_PROGRESS_ORIGINAL
+     , MESSAGE_PROGRESS_COMPRESSED
+     , MESSAGE_PROGRESS_MESSAGE
+     , MESSAGE_PROGRESS_FILENAME
+     , MESSAGE_WARNING_MESSAGE
+     , MESSAGE_VOLUME_FILENAME
+     , MESSAGE_CAN_BE_EXTRACTED
+
+     , MESSAGE_PASSWORD_BUF
+     , MESSAGE_PASSWORD_SIZE
+     , MESSAGE_ARCINFO_TYPE
+     , MESSAGE_ARCINFO_FILES
+     , MESSAGE_ITEMINFO
+     , MESSAGE_ARCINFO_NAME
+     };
+
+struct ItemInfo
+{
+    wchar_t *diskname;    // Filename on disk (only for "can_be_extracted?" request)
+    wchar_t *filename;    // Filename of this item
+    int64 original;       // Bytes, uncompressed
+    int64 compressed;     // Bytes, compressed
+    uint  time;           // Datetime stamp
+    uint  attr;           // DOS attributes
+    uint  is_folder;
+    uint  crc;            // CRC32
+    uint  is_encrypted;
+};
+
+
+typedef int CallBackFunc (WPARAM wParam, LPARAM lParam);
+CallBackFunc *FreeArcCallback;
+
+#define Send(msg,param) FreeArcCallback(msg, (LPARAM) (param))
+
+
+// Function called by dotnet_FreeArcExecute() to display progress indicator and interact with user
+int Callback_for_FreeArcExecute (TABI_ELEMENT* params)
+{
+    TABI_MAP p(params);
+    char *request = p._str("request");   // Operation requested from callback
+    if (strequ(request, "total"))
+    {
+        // Общий объём файлов, которые предстоит упаковать/распаковать
+        int64 files      = p._longlong("files");          // Number of files
+        int64 original   = p._longlong("original");       // Total size of files
+        Send (MESSAGE_TOTAL_FILES,    &files);
+        Send (MESSAGE_TOTAL_ORIGINAL, &original);
+    }
+    else if (strequ(request, "progress"))
+    {
+        // Информируем пользователя о ходе упаковки/распаковки
+        int64 original   = p._longlong("original");       // Bytes, uncompressed
+        int64 compressed = p._longlong("compressed");     // Bytes, compressed
+        Send (MESSAGE_PROGRESS_ORIGINAL,   &original);
+        Send (MESSAGE_PROGRESS_COMPRESSED, &compressed);
+    }
+    else if (strequ(request, "file"))
+    {
+        // Начало упаковки/распаковки нового файла
+        wchar_t *message   = p._wstr("message");
+        wchar_t *filename  = p._wstr("filename");
+        Send (MESSAGE_PROGRESS_MESSAGE,  message);
+        Send (MESSAGE_PROGRESS_FILENAME, filename);
+    }
+    else if (strequ(request, "warning") || strequ(request, "error"))
+    {
+        // Сообщшение о [не]критической ошибке
+        wchar_t *message   = p._wstr("message");
+        Send (MESSAGE_WARNING_MESSAGE, message);
+    }
+    else if (strequ(request, "volume"))
+    {
+        // Начало нового тома
+        wchar_t *filename  = p._wstr("filename");       // Filename of new archive volume
+        Send (MESSAGE_VOLUME_FILENAME, filename);
+    }
+    else if (strequ(request, "can_be_extracted?"))
+    {
+        // Можно ли извлечь этот файл?
+        ItemInfo i;
+        i.diskname      = p._wstr    ("diskname");       // Filename on disk
+        i.filename      = p._wstr    ("filename");       // Filename of this item
+        i.original      = p._longlong("original");       // Bytes, uncompressed
+        i.compressed    = p._longlong("compressed");     // Bytes, compressed
+        i.time          = p._unsigned("time");           // Datetime stamp
+        i.attr          = p._unsigned("attr");           // DOS attributes
+        i.is_folder     = p._bool    ("is_folder?");
+        i.crc           = p._unsigned("crc");            // CRC32
+        i.is_encrypted  = p._bool    ("is_encrypted?");
+        return Send (MESSAGE_CAN_BE_EXTRACTED, &i);
+    }
+    else if (strequ(request, "ask_password"))
+    {
+        // Запрос пароля расшифровки
+        wchar_t *password_buf  = (wchar_t *) p._ptr("password_buf");    // Buffer for password
+        int      password_size =             p._int("password_size");   // Buffer size
+        Send (MESSAGE_PASSWORD_BUF,  password_buf);
+        Send (MESSAGE_PASSWORD_SIZE, password_size);
+    }
+    else if (strequ(request, "archive"))
+    {
+        // Общая информация об архиве
+        wchar_t *arcname  = p._wstr("arcname");
+        char    *arctype  = p._str ("arctype");
+        int64    files    = p._longlong("files");
+        Send (MESSAGE_ARCINFO_NAME,  arcname);
+        Send (MESSAGE_ARCINFO_TYPE,  arctype);
+        Send (MESSAGE_ARCINFO_FILES, &files);
+    }
+    else if (strequ(request, "item"))
+    {
+        // Информация об очередном файле внутри архива
+        ItemInfo i;
+        i.diskname      = p._wstr    ("filename");       // Filename of this item
+        i.filename      = p._wstr    ("filename");       // Filename of this item
+        i.original      = p._longlong("original");       // Bytes, uncompressed
+        i.compressed    = p._longlong("compressed");     // Bytes, compressed
+        i.time          = p._unsigned("time");           // Datetime stamp
+        i.attr          = p._unsigned("attr");           // DOS attributes
+        i.is_folder     = p._bool    ("is_folder?");
+        i.crc           = p._unsigned("crc");            // CRC32
+        i.is_encrypted  = p._bool    ("is_encrypted?");
+        Send (MESSAGE_ITEMINFO, &i);
+    }
+    return 0;
+}
+
+// Initialize Haskell runtime
+void haskell_init (void)
+{
+  static bool initialized = FALSE;
+  if (!initialized)
+  {
+    initialized = TRUE;
+    int argc = 1;
+    char* argv[] = {"ghcDll", NULL}; // argv must end with NULL
+    char** args = argv;
+    hs_init(&argc, &args);
+    hs_add_root(__stginit_Main);
+  }
+}
+
+int FreeArcExecute (TABI_DYNAMAP arg)
+{
+  haskell_init();
+  return haskell_FreeArcExecute(arg);
+}
+
+int FreeArcOpenArchive (TABI_DYNAMAP arg)
+{
+  haskell_init();
+  return haskell_FreeArcOpenArchive(arg);
+}
+
+int dotnet_FreeArcExecute (wchar_t** arg, CallBackFunc *f)
+{
+  FreeArcCallback = f;
+  return FreeArcExecute(TABI_DYNAMAP ("command", (void*)arg) ("callback", Callback_for_FreeArcExecute));
+}
+
+int dotnet_FreeArcOpenArchive (wchar_t* arcname, CallBackFunc *f)
+{
+  FreeArcCallback = f;
+  return FreeArcOpenArchive(TABI_DYNAMAP ("arcname", arcname) ("callback", Callback_for_FreeArcExecute));
+}
+
+} // extern "C"
+#endif // FREEARC_DLL
+
+
+/* ********************************************************************************************************
 *  Find largest contiguous memory block available and dump information about all available memory blocks
 ***********************************************************************************************************/
 
@@ -72,7 +262,7 @@ void TestMalloc (void)
 
 #ifdef FREEARC_WIN
 
-#include <../HsFFI.h>
+#include <HsFFI.h>
 #include <io.h>
 #include <wchar.h>
 #include <sys/stat.h>
@@ -164,44 +354,7 @@ CFILENAME GetExeName (CFILENAME buf, int bufsize)
 }
 
 
-#if !defined(_WIN64) && defined(__GNUC__)
-
-typedef struct _MY_MEMORYSTATUSEX {
-  DWORD dwLength;
-  DWORD dwMemoryLoad;
-  DWORDLONG ullTotalPhys;
-  DWORDLONG ullAvailPhys;
-  DWORDLONG ullTotalPageFile;
-  DWORDLONG ullAvailPageFile;
-  DWORDLONG ullTotalVirtual;
-  DWORDLONG ullAvailVirtual;
-  DWORDLONG ullAvailExtendedVirtual;
-} MY_MEMORYSTATUSEX, *MY_LPMEMORYSTATUSEX;
-
-#else
-
-#define MY_MEMORYSTATUSEX MEMORYSTATUSEX
-#define MY_LPMEMORYSTATUSEX LPMEMORYSTATUSEX
-
-#endif
-
-typedef BOOL (WINAPI *GlobalMemoryStatusExP)(MY_LPMEMORYSTATUSEX lpBuffer);
-
-uint64 GetPhysicalMemory (void)
-{
-  MY_MEMORYSTATUSEX statx;
-  statx.dwLength = sizeof(statx);
-  GlobalMemoryStatusExP globalMemoryStatusEx = (GlobalMemoryStatusExP) GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GlobalMemoryStatusEx");
-  if (globalMemoryStatusEx != 0 && globalMemoryStatusEx(&statx))
-    return statx.ullTotalPhys;
-
-  MEMORYSTATUS stat;
-  stat.dwLength = sizeof(stat);
-  GlobalMemoryStatus(&stat);
-  return stat.dwTotalPhys;
-}
-
-unsigned GetMaxMemToAlloc (void)
+unsigned GetMaxBlockToAlloc (void)
 {
   MEMORYSTATUS stat;
   stat.dwLength = sizeof(stat);
@@ -219,20 +372,6 @@ unsigned GetTotalMemoryToAlloc (void)
 
   LargestMemoryBlock block;
   return mymin(block.total(), stat.dwAvailPageFile) - 5*mb;
-}
-
-unsigned GetAvailablePhysicalMemory (void)
-{
-  MEMORYSTATUS buf;
-    GlobalMemoryStatus (&buf);
-  return buf.dwAvailPhys;
-}
-
-int GetProcessorsCount (void)
-{
-  SYSTEM_INFO si;
-    GetSystemInfo (&si);
-  return si.dwNumberOfProcessors;
 }
 
 // Delete entrire subtree from Windows Registry
@@ -324,11 +463,112 @@ int PowerOffComputer()
 }
 
 
+// Заполняет буфер строкой с описанием версии ОС
+void GetOSDisplayString(char* buf)
+{
+   strcpy(buf, "Unknown Windows version");
+
+   typedef void (WINAPI *PGNSI)(LPSYSTEM_INFO);
+
+   OSVERSIONINFOEX osvi;
+   SYSTEM_INFO si;
+   PGNSI pGNSI;
+
+   ZeroMemory(&si, sizeof(SYSTEM_INFO));
+   ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
+
+   osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
+
+   if( !GetVersionEx ((OSVERSIONINFO *) &osvi) )
+      return;
+
+   // Call GetNativeSystemInfo if supported or GetSystemInfo otherwise.
+
+   pGNSI = (PGNSI) GetProcAddress(
+      GetModuleHandle(TEXT("kernel32.dll")),
+      "GetNativeSystemInfo");
+   if(NULL != pGNSI)
+      pGNSI(&si);
+   else GetSystemInfo(&si);
+
+   if ( VER_PLATFORM_WIN32_NT==osvi.dwPlatformId &&
+        osvi.dwMajorVersion > 4 )
+   {
+      // Test for the specific product.
+
+      if ( osvi.dwMajorVersion == 6 )
+      {
+         if( osvi.dwMinorVersion == 0 )
+         {
+            if( osvi.wProductType == VER_NT_WORKSTATION )
+                strcpy(buf, "Windows Vista");
+            else strcpy(buf, "Windows Server 2008");
+         }
+
+         if ( osvi.dwMinorVersion == 1 )
+         {
+            if( osvi.wProductType == VER_NT_WORKSTATION )
+                strcpy(buf, "Windows 7");
+            else strcpy(buf, "Windows Server 2008 R2");
+         }
+
+         if(osvi.dwMinorVersion == 2)
+         {
+            if( osvi.wProductType == VER_NT_WORKSTATION )
+                strcpy(buf, "Windows 8");
+            else strcpy(buf, "Windows Server 2012");
+         }
+      }
+
+      if ( osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 2 )
+      {
+         if( GetSystemMetrics(SM_SERVERR2) )
+            strcpy(buf,  "Windows Server 2003 R2");
+         else if ( osvi.wSuiteMask & VER_SUITE_STORAGE_SERVER )
+            strcpy(buf,  "Windows Storage Server 2003");
+         else if( osvi.wProductType == VER_NT_WORKSTATION &&
+                  si.wProcessorArchitecture==PROCESSOR_ARCHITECTURE_AMD64)
+         {
+            strcpy(buf,  "Windows XP Professional x64 Edition");
+         }
+         else strcpy(buf, "Windows Server 2003");
+      }
+
+      if ( osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 1 )
+      {
+         strcpy(buf, "Windows XP");
+      }
+
+      if ( osvi.dwMajorVersion == 5 && osvi.dwMinorVersion == 0 )
+      {
+         strcpy(buf, "Windows 2000");
+      }
+
+      sprintf(str_end(buf), " (%d.%d)", int(osvi.dwMajorVersion), int(osvi.dwMinorVersion));
+
+      if ( osvi.dwMajorVersion >= 6 )
+      {
+         if ( si.wProcessorArchitecture==PROCESSOR_ARCHITECTURE_AMD64 )
+            strcat(buf,  ", 64-bit");
+         else if (si.wProcessorArchitecture==PROCESSOR_ARCHITECTURE_INTEL )
+            strcat(buf, ", 32-bit");
+      }
+   }
+}
+
+
+// Operations on mutex shared by all FreeArc instances
+HANDLE myCreateMutex  (char*  name)        {return CreateMutexA (NULL, FALSE, name);}
+void   myCloseMutex   (HANDLE hMutex)      {CloseHandle(hMutex);}
+void   myWaitMutex    (HANDLE hMutex)      {WaitForSingleObject (hMutex, INFINITE);}
+void   myGrabMutex    (HANDLE hMutex)      {WaitForSingleObject (hMutex, 0);}
+void   myReleaseMutex (HANDLE hMutex)      {ReleaseMutex(hMutex);}
+
+
 #else // For Unix:
 
 
 #include <unistd.h>
-#include <sys/sysinfo.h>
 
 CFILENAME GetExeName (CFILENAME buf, int bufsize)
 {
@@ -338,35 +578,16 @@ CFILENAME GetExeName (CFILENAME buf, int bufsize)
   return buf;
 }
 
-uint64 GetPhysicalMemory (void)
-{
-  struct sysinfo si;
-    sysinfo(&si);
-  return uint64(si.totalram)*si.mem_unit;
-}
-
-unsigned GetTotalMemoryToAlloc (void)
-{
-  return INT_MAX;
-}
-
-unsigned GetMaxMemToAlloc (void)
+unsigned GetMaxBlockToAlloc (void)
 {
   //struct sysinfo si;
   //  sysinfo(&si);
   return INT_MAX;
 }
 
-unsigned GetAvailablePhysicalMemory (void)
+unsigned GetTotalMemoryToAlloc (void)
 {
-  struct sysinfo si;
-    sysinfo(&si);
-  return si.freeram*si.mem_unit;
-}
-
-int GetProcessorsCount (void)
-{
-  return get_nprocs();
+  return INT_MAX;
 }
 
 // Инициировать выключение компьютера
@@ -595,4 +816,3 @@ int systemRandomData (char *rand_buf, int rand_size)
 *                                           Random system values collection *
 *
 ****************************************************************************/
-

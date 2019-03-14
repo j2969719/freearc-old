@@ -63,7 +63,7 @@ decompress_PROCESS command count_cbytes pipe = do
 
 {-# NOINLINE decompress_block #-}
 -- |Распаковать один солид-блок
-decompress_block command cfile state count_cbytes pipe = mdo
+decompress_block command cfile state count_cbytes pipe = do
   ;   cfile'     <-  val cfile
   let size        =  fiSize      (cfFileInfo cfile')
       pos         =  cfPos        cfile'
@@ -85,12 +85,16 @@ decompress_block command cfile state count_cbytes pipe = mdo
   let writer (DataBuf buf len)  =  decompress_step cfile state pipe buf len
       writer  NoMoreData        =  return 0
 
-  let limit_memory num method   =  return method    -- ограничение памяти для метода используется только при сжатии
+  -- Уменьшает число тредов распаковки (или иначе модифицирует алгоритм, не теряя совместимости с упакованными им данными),
+  -- если в момент старта алгоритма распаковки для него не хватает памяти
+  let limit_memory num method   =  limit_decompression command method
 
   -- Добавить ключ в запись алгоритма дешифрования
   keyed_compressor <- generateDecryption compressor (opt_decryption_info command)
   when (any isNothing keyed_compressor) $ do
     registerError$ BAD_PASSWORD (cmd_arcname command) (cfile'.$cfFileInfo.$storedName)
+
+  times <- uiStartDeCompression "decompression"  -- создать структуру для учёта времени распаковки
 
   -- Превратим список методов сжатия/шифрования в конвейер процессов распаковки
   let decompress1 = de_compress_PROCESS1 freearcDecompress reader times command limit_memory  -- первый процесс в конвейере
@@ -100,7 +104,6 @@ decompress_block command cfile state count_cbytes pipe = mdo
       decompressa (p1:ps) = decompress1 (last ps) 0 |> foldl1 (|>) (map (\x->decompressN x 0) (reverse$ init ps)) |> decompressN p1 0
 
   -- И наконец процедура распаковки
-  times <- uiStartDeCompression "decompression"  -- создать структуру для учёта времени распаковки
   ; result <- ref 0   -- количество байт, записанных в последнем вызове writer
   ; runFuncP (decompressa (map fromJust keyed_compressor)) (fail "decompress_block::runFuncP") (doNothing) (writer .>>= writeIORef result) (val result)
   uiFinishDeCompression times                    -- учесть в UI чистое время операции

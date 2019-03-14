@@ -19,6 +19,7 @@ import System.IO.Unsafe
 import EncryptionLib
 import Utils
 import Errors
+import Charsets
 import Compression
 
 ---------------------------------------------------------------------------------------------------
@@ -36,8 +37,8 @@ generateEncryption encryption password = do
         let numIterations = encryptionGet "numIterations" algorithm
             checkCodeSize = 2
             (key, checkCode) = deriveKey algorithm password salt numIterations checkCodeSize
-        return (algorithm++":k"++encode16 key++":i"++encode16 initVector
-               ,algorithm++":s"++encode16 salt++":c"++encode16 checkCode
+        return (algorithm++":k"++encode16 key ++":i"++encode16 initVector       -- 0.75: ":f:k"
+               ,algorithm++":s"++encode16 salt++":c"++encode16 checkCode        -- 0.75: ":f:s"
                          ++":i"++encode16 initVector)
     return ((++map fst result), (++map snd result))
 
@@ -79,7 +80,10 @@ generateDecryption compressor decryption_info  =  mapM addKey compressor   where
             where -- Если верификация по checkCode успешна, то возвращаем найденный ключ алгоритма шифрования, иначе - Nothing
                   doCheck keyfile  =  recheckCode==checkCode  &&&  Just key
                     -- Вычислим ключ расшифровки key и recheckCode, используемый для быстрой проверки правильности пароля
-                    where (key, recheckCode) = deriveKey algorithm (password++keyfile) salt numIterations (length checkCode)
+                    where (key, recheckCode) = deriveKey algorithm (real_password++keyfile) salt numIterations (length checkCode)
+                          -- В ранних версиях FreeArc не использовалось UTF8-кодирование паролей
+                          real_password  =  if params `contains` "f"  then unicode2utf8 password  else password
+
 
       -- Процедура подбора пароля для расшифровки блока.
       -- Каждый вероятный пароль проверяется с помощью checkPwd.
@@ -134,6 +138,8 @@ addRandomnessTo prng = do
     bytes <- systemRandomData buf (i size)
     check (==aCRYPT_OK) "prng_add_entropy" $
       prng_add_entropy buf (i bytes) prng
+    check (==aCRYPT_OK) "prng_ready" $
+      prng_ready prng
 
 -- |Сгенерить случайную последовательность байт указанной длины
 generateRandomBytes bytes = do
@@ -155,4 +161,3 @@ prng_state = unsafePerformIO $ do
 -- |Fill buffer with system-generated pseudo-random data
 foreign import ccall unsafe "Environment.h systemRandomData"
   systemRandomData :: Ptr CChar -> CInt -> IO CInt
-

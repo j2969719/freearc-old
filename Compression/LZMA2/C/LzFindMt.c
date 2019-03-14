@@ -1,6 +1,6 @@
 /* LzFindMt.c -- multithreaded Match finder for LZ algorithms
 (c) 2009-05-26 Igor Pavlov
-(c) 2008-2009 Bulat Ziganshin
+(c) 2008,2009,2013 Bulat Ziganshin
 This code made available under GPL license.
 For a commercial license write to Bulat.Ziganshin@gmail.com
 */
@@ -133,10 +133,7 @@ static SRes MtSync_Create(CMtSync *p, unsigned (MY_STD_CALL *startAddress)(void 
 
 void MtSync_Init(CMtSync *p) { p->needStart = True; }
 
-//#define kMtMaxValForNormalize ((1<<24)-1)
-//#define kMtNormalizeStepMin   (1*mb)
-#define kMtMaxValForNormalize 0x3fffffff
-#define kMtNormalizeStepMin   (64*mb)
+#define kMtMaxValForNormalize(p) kMaxValForNormalize(p)
 
 #define DEF_GetHeads2(name, v, action)                                                                \
 static void GetHeads ## name(const Byte *p, UInt32 pos, UInt32 *hash, UInt32 hashMask,                \
@@ -165,14 +162,18 @@ static void GetHeadsHt4(const Byte *p, UInt32 pos, UInt32 *hash, UInt32 hashMask
   {
     const UInt32 value = (*(UInt32*)p * 1234567891) >> shiftBits;
     p++;
-    *heads++ = (UInt32) &(hash[value*cutValue]);   // First entry in hash table to check      ////64-bit!
+#ifdef FREEARC_64BIT
+    *heads++ = (UInt32) (value*cutValue);          // First entry in hash table to check, index
+#else
+    *heads++ = (UInt32) &(hash[value*cutValue]);   // First entry in hash table to check, address
+#endif
   }
 }
 
 // Тред, сканирующий входной блок, и запоминающий в heads[] значение хеш-функции для каждой позиции
 void HashThreadFunc(CMatchFinderMt *mt)
 {
-  BeginCompressionThreadPriority();  // уменьшим приоритет для треда сжатия (функция из Common.cpp)
+  SetCompressionThreadPriority();  // уменьшим приоритет для треда сжатия (функция из Common.cpp)
   CMtSync *p = &mt->hashSync;
   for (;;)
   {
@@ -212,12 +213,12 @@ void HashThreadFunc(CMatchFinderMt *mt)
         Semaphore_Wait(&p->freeSemaphore);
 
         MatchFinder_ReadIfRequired(mf);
-        if (mf->pos > (kMtMaxValForNormalize - kMtHashBlockSize))
+        if (mf->pos > (kMtMaxValForNormalize(mf) - kMtHashBlockSize))
         {
-          UInt32 subValue = mymax(mf->pos - mf->historySize - 1, kMtNormalizeStepMin);
+          UInt32 subValue = (mf->pos - mf->historySize - 1);
           MatchFinder_ReduceOffsets(mf, subValue);
           if (mf->btMode != MF_HashTable)  // HT matchfinder uses MatchFinder->hash in other thread
-            MatchFinder_Normalize3(subValue, mf->hash + mf->fixedHashSize, mf->hashSizeSum - mf->fixedHashSize, mf->btMode);
+            MatchFinder_Normalize3(mf, subValue, mf->hash + mf->fixedHashSize, mf->hashSizeSum - mf->fixedHashSize, mf->btMode);
         }
         {
           UInt32 *heads = mt->hashBuf + ((numProcessedBlocks++) & kMtHashNumBlocksMask) * kMtHashBlockSize;
@@ -252,88 +253,178 @@ void MatchFinderMt_GetNextBlock_Hash(CMatchFinderMt *p)
 
 #define kEmptyHashValue 0
 
-/* #define MFMT_GM_INLINE */
+#define MFMT_GM_INLINE
 
 #ifdef MFMT_GM_INLINE
 
-#define NO_INLINE MY_FAST_CALL
-
-Int32 NO_INLINE GetMatchesSpecN(UInt32 lenLimit, UInt32 pos, const Byte *cur, CLzRef *son,
+UInt32 *GetMatchesSpecN(CMatchFinderMt *p, UInt32 lenLimit, UInt32 pos, const Byte *cur, CLzRef *son,
     UInt32 _cyclicBufferPos, UInt32 _cyclicBufferSize, UInt32 _cutValue,
-    UInt32 *_distances, UInt32 _maxLen, const UInt32 *hash, Int32 limit, UInt32 size, UInt32 *posRes)
+    UInt32 *distances, UInt32 *maxDistances, UInt32 _maxLen, const UInt32 *hash, UInt32 size, UInt32 *posRes)
 {
+  struct Context  { CLzRef *ptr0, *ptr1, *pair;  const Byte *cur, *pb;  UInt32 pos, cyclicBufferPos, curMatch, len, len0, len1, cutValue, maxLen, delta; };
+  UInt32 local_distances_buf[900];  UInt32 *local_distances = local_distances_buf,  *local_distances_head = NULL;
+
   do
   {
-  UInt32 *distances = _distances + 1;
-  UInt32 curMatch = pos - *hash++;
+    Context x,y;  y.pb = NULL;  UInt32 *distances_head = distances++;
 
-  CLzRef *ptr0 = son + (_cyclicBufferPos << 1) + 1;
-  CLzRef *ptr1 = son + (_cyclicBufferPos << 1);
-  UInt32 len0 = 0, len1 = 0;
-  UInt32 cutValue = _cutValue;
-  UInt32 maxLen = _maxLen;
-  for (;;)
-  {
-    UInt32 delta = pos - curMatch;
-    if (cutValue-- == 0 || delta >= _cyclicBufferSize)
+    x.cyclicBufferPos = _cyclicBufferPos++;  x.pos = pos++;  x.cur = cur++;
+    x.ptr0 = son + ((size_t)x.cyclicBufferPos << 1) + 1;
+    x.ptr1 = son + ((size_t)x.cyclicBufferPos << 1);
+    x.delta = *hash++;
+    if (x.delta >= _cyclicBufferSize-100)    { *x.ptr0 = *x.ptr1 = kEmptyHashValue;  *distances_head = 0;  continue; }
+
+    x.pb  = x.cur - x.delta;
+    x.len = 0;  prefetch(x.pb[x.len]);
+
+    {size_t index = (x.cyclicBufferPos - x.delta + ((x.delta > x.cyclicBufferPos) ? _cyclicBufferSize : 0));
+    x.pair = son + (index << 1);  prefetch(*x.pair);}
+
+    x.curMatch = x.pos - x.delta;
+    x.len0 = x.len1 = 0;  x.cutValue = _cutValue;  x.maxLen = _maxLen;
+
+
+ynext:  // verify that we have match to check, it doesn't belong to the same hash bucket as x.pos, and there is enough space in distances[] & local_distances[]
+    if (size == 1  ||  (y.curMatch = pos - (y.delta = *hash))  ==  x.pos
+                   ||  pos >= x.pos+90
+                   ||  maxDistances - distances  <  (p->matchMaxLen * 4) + (local_distances-local_distances_buf)  // *4 because we save len&dist for x&y
+                   ||  local_distances_buf+sizeof(local_distances_buf)/sizeof(*local_distances_buf) - local_distances  <  (p->matchMaxLen * 2))
     {
-      *ptr0 = *ptr1 = kEmptyHashValue;
-      break;
+      y.pb = NULL;
     }
+    else
     {
-      CLzRef *pair = son + ((_cyclicBufferPos - delta + ((delta > _cyclicBufferPos) ? _cyclicBufferSize : 0)) << 1);
-      const Byte *pb = cur - delta;
-      UInt32 len = (len0 < len1 ? len0 : len1);
-      if (pb[len] == cur[len])
+      size--;  hash++;  local_distances_head = local_distances++;
+      y.cyclicBufferPos = _cyclicBufferPos++;  y.pos = pos++;  y.cur = cur++;
+
+      y.ptr0 = son + ((size_t)y.cyclicBufferPos << 1) + 1;
+      y.ptr1 = son + ((size_t)y.cyclicBufferPos << 1);
+      if (y.delta >= _cyclicBufferSize-100)    { *y.ptr0 = *y.ptr1 = kEmptyHashValue;  *local_distances_head = 0;  goto ynext; }
+
+      y.pb  = y.cur - y.delta;
+      y.len = 0;  prefetch(y.pb[y.len]);
+
+      {size_t index = (y.cyclicBufferPos - y.delta + ((y.delta > y.cyclicBufferPos) ? _cyclicBufferSize : 0));
+      y.pair = son + (index << 1);  prefetch(*y.pair);}
+
+      y.len0 = y.len1 = 0;  y.cutValue = _cutValue;  y.maxLen = _maxLen;
+    }
+
+    for(;;)
+    {
+      if (x.pb[x.len] == x.cur[x.len])
       {
-        if (++len != lenLimit && pb[len] == cur[len])
-          while (++len != lenLimit)
-            if (pb[len] != cur[len])
+        if (++x.len != lenLimit  &&  x.pb[x.len] == x.cur[x.len])
+          while (++x.len != lenLimit)
+            if (x.pb[x.len] != x.cur[x.len])
               break;
-        if (maxLen < len)
+        if (x.maxLen < x.len)
         {
-          *distances++ = maxLen = len;
-          *distances++ = delta - 1;
-          if (len == lenLimit)
-          {
-            *ptr1 = pair[0];
-            *ptr0 = pair[1];
-            break;
-          }
+          *distances++ = x.maxLen = x.len;
+          *distances++ = x.delta - 1;
+          if (x.len == lenLimit)       { *x.ptr1 = x.pair[0];  *x.ptr0 = x.pair[1];  goto xdone; }
         }
       }
-      if (pb[len] < cur[len])
+      if (x.pb[x.len] < x.cur[x.len])    *x.ptr1 = x.curMatch,  x.ptr1 = x.pair+1,  x.curMatch = *x.ptr1,  x.len1 = x.len;
+      else                               *x.ptr0 = x.curMatch,  x.ptr0 = x.pair,    x.curMatch = *x.ptr0,  x.len0 = x.len;
+
+      x.delta = x.pos - x.curMatch;
+      if (--x.cutValue == 0  ||  x.delta >= _cyclicBufferSize-100)    { *x.ptr0 = *x.ptr1 = kEmptyHashValue;  goto xdone; }
+      {size_t index = (x.cyclicBufferPos - x.delta + ((x.delta > x.cyclicBufferPos) ? _cyclicBufferSize : 0));
+      x.pair = son + (index << 1);  prefetch(*x.pair);}
+      x.pb   = x.cur - x.delta;
+      x.len  = (x.len0 < x.len1 ? x.len0 : x.len1);  prefetch(x.pb[x.len]);
+//-----------------------------------------------------------------------------
+      if (y.pb == NULL)  continue;
+      if (y.pb[y.len] == y.cur[y.len])
       {
-        *ptr1 = curMatch;
-        ptr1 = pair + 1;
-        curMatch = *ptr1;
-        len1 = len;
+        if (++y.len != lenLimit  &&  y.pb[y.len] == y.cur[y.len])
+          while (++y.len != lenLimit)
+            if (y.pb[y.len] != y.cur[y.len])
+              break;
+        if (y.maxLen < y.len)
+        {
+          *local_distances++ = y.maxLen = y.len;
+          *local_distances++ = y.delta - 1;
+          if (y.len == lenLimit)       { *y.ptr1 = y.pair[0];  *y.ptr0 = y.pair[1];  goto ydone; }
+        }
       }
-      else
-      {
-        *ptr0 = curMatch;
-        ptr0 = pair;
-        curMatch = *ptr0;
-        len0 = len;
-      }
+      if (y.pb[y.len] < y.cur[y.len])    *y.ptr1 = y.curMatch,  y.ptr1 = y.pair+1,  y.curMatch = *y.ptr1,  y.len1 = y.len;
+      else                               *y.ptr0 = y.curMatch,  y.ptr0 = y.pair,    y.curMatch = *y.ptr0,  y.len0 = y.len;
+
+      y.delta = y.pos - y.curMatch;
+      if (--y.cutValue == 0  ||  y.delta >= _cyclicBufferSize-100)    { *y.ptr0 = *y.ptr1 = kEmptyHashValue;  goto ydone; }
+      {size_t index = (y.cyclicBufferPos - y.delta + ((y.delta > y.cyclicBufferPos) ? _cyclicBufferSize : 0));
+      y.pair = son + (index << 1);  prefetch(*y.pair);}
+      y.pb   = y.cur - y.delta;
+      y.len  = (y.len0 < y.len1 ? y.len0 : y.len1);  prefetch(y.pb[y.len]);
     }
+
+
+ydone:
+    *local_distances_head = UInt32(local_distances - local_distances_head) - 1;
+    goto ynext;
+
+
+xdone:
+    *distances_head = UInt32(distances - distances_head) - 1;
+
+    // Move y.len/y.delta values, temporarily stored in the local_distances_buf[], to the global distances[] buffer
+    memcpy(distances, local_distances_buf, (local_distances - local_distances_buf)*sizeof(*local_distances_buf));
+    distances_head = distances + (local_distances_head - local_distances_buf);
+    distances += local_distances - local_distances_buf;
+    local_distances = local_distances_buf;
+
+    // If the second Context y is active - continue to process it
+    if (y.pb)  { x = y;  goto ynext; }
   }
-  pos++;
-  _cyclicBufferPos++;
-  cur++;
-  {
-    UInt32 num = (UInt32)(distances - _distances);
-    *_distances = num - 1;
-    _distances += num;
-    limit -= num;
-  }
-  }
-  while (limit > 0 && --size != 0);
+  while (distances < maxDistances  &&  --size != 0);
+
+
   *posRes = pos;
-  return limit;
+  return distances;
 }
 
 #endif
+
+/* HT matchfinder helper */
+UInt32 *getMatchPtr(CMatchFinderMt *p, const UInt32 *pos)
+{
+#ifdef FREEARC_64BIT
+  CMatchFinder *mf = p->MatchFinder;
+  UInt32 *hash = mf->hash + mf->fixedHashSize;
+  return hash + *pos;
+#else
+  return (UInt32 *) *pos;    // First entry in hash table to check
+#endif
+}
+
+UInt32 *Ht_GetMatchesSpecN(CMatchFinderMt *p, UInt32 lenLimit, UInt32 pos, const Byte *cur, CLzRef *son,
+    UInt32 _cyclicBufferPos, UInt32 _cyclicBufferSize, UInt32 _cutValue,
+    UInt32 *distances, UInt32 *maxDistances, UInt32 _maxLen, const UInt32 *hash, UInt32 size, UInt32 *posRes)
+{
+  const int HASHES_PER_ROW = CACHE_ROW/sizeof(UInt32);
+  const int PREFETCH_WINDOW = 200 / (_cutValue+1);   // 200 is the maximum memory latency (500-1000 cycles), divided by the minimum time required to check one match (3-4 cycles). OTOH, it's the maximum number of lines we are allowed to fill in the L1 cache: 200*64=12800 bytes
+  const int HASH_ROWS = (_cutValue-1) / HASHES_PER_ROW + 1;
+  do
+  {
+    if (size > PREFETCH_WINDOW)
+    {
+      // Prefetch head[] array
+      UInt32 *mp = getMatchPtr(p, hash+PREFETCH_WINDOW);
+      for (int i=0;  i<HASH_ROWS;  i++)  // fetch multiple cache rows if necessary
+        prefetch(mp[i*HASHES_PER_ROW]);
+    }
+    UInt32 *curMatchPtr = getMatchPtr(p, hash++),  *distances_head = distances;
+    distances = Ht_GetMatchesSpec(p->MatchFinder, lenLimit, curMatchPtr, pos, cur, son, _cyclicBufferPos, _cyclicBufferSize, _cutValue, distances+1, _maxLen);
+    *distances_head = distances - distances_head - 1;
+    pos++;  cur++;  _cyclicBufferPos++;
+  }
+  while (distances < maxDistances  &&  --size != 0);
+
+  *posRes = pos;
+  return distances;
+}
 
 void BtGetMatches(CMatchFinderMt *p, UInt32 *distances)
 {
@@ -387,8 +478,8 @@ void BtGetMatches(CMatchFinderMt *p, UInt32 *distances)
         #else
         {
           UInt32 posRes;
-          curPos = limit - GetMatchesSpecN(lenLimit, pos, p->buffer, p->son, cyclicBufferPos, p->cyclicBufferSize, p->cutValue,
-            distances + curPos, p->numHashBytes - 1, p->hashBuf + p->hashBufPos, (Int32)(limit - curPos) , size, &posRes);
+          curPos = GetMatchesSpecN(p, lenLimit, pos, p->buffer, p->son, cyclicBufferPos, p->cyclicBufferSize, p->cutValue,
+                                   distances + curPos, distances + limit, p->numHashBytes - 1, p->hashBuf + p->hashBufPos, size, &posRes)  -  distances;
           p->hashBufPos += posRes - pos;
           cyclicBufferPos += posRes - pos;
           p->buffer += posRes - pos;
@@ -398,18 +489,13 @@ void BtGetMatches(CMatchFinderMt *p, UInt32 *distances)
       }
       else if (p->MatchFinder->btMode == MF_HashTable)
       {
-        while (curPos < limit && size-- != 0)
-        {
-          UInt32 *startDistances = distances + curPos;
-          UInt32 num = (UInt32)(Ht_GetMatchesSpec(lenLimit, (UInt32 *) (p->hashBuf[p->hashBufPos++]),
-            pos, p->buffer, p->son, cyclicBufferPos, p->cyclicBufferSize, p->cutValue,
-            startDistances + 1, p->numHashBytes - 1) - startDistances);
-          *startDistances = num - 1;
-          curPos += num;
-          cyclicBufferPos++;
-          pos++;
-          p->buffer++;
-        }
+        UInt32 posRes;
+        curPos = Ht_GetMatchesSpecN(p, lenLimit, pos, p->buffer, p->son, cyclicBufferPos, p->cyclicBufferSize, p->cutValue,
+                                    distances + curPos, distances + limit, p->numHashBytes - 1, p->hashBuf + p->hashBufPos, size, &posRes)  -  distances;
+        p->hashBufPos += posRes - pos;
+        cyclicBufferPos += posRes - pos;
+        p->buffer += posRes - pos;
+        pos = posRes;
       }
       else // if (p->MatchFinder->btMode == MF_HashChain)
       {
@@ -440,6 +526,7 @@ void BtGetMatches(CMatchFinderMt *p, UInt32 *distances)
 
 void BtFillBlock(CMatchFinderMt *p, UInt32 globalBlockIndex)
 {
+  CMatchFinder *mf = p->MatchFinder;
   CMtSync *sync = &p->hashSync;
   if (!sync->needStart)
   {
@@ -449,12 +536,12 @@ void BtFillBlock(CMatchFinderMt *p, UInt32 globalBlockIndex)
 
   BtGetMatches(p, p->btBuf + (globalBlockIndex & kMtBtNumBlocksMask) * kMtBtBlockSize);
 
-  if (p->pos > kMtMaxValForNormalize - kMtBtBlockSize)
+  if (p->pos > kMtMaxValForNormalize(mf) - kMtBtBlockSize)
   {
-    UInt32 subValue = mymax(p->pos - p->cyclicBufferSize, kMtNormalizeStepMin);
-    if (p->MatchFinder->btMode == MF_HashTable)   // HT matchfinder uses MatchFinder->hash in this thread
-      MatchFinder_Normalize3(subValue, p->MatchFinder->hash + p->MatchFinder->fixedHashSize, p->MatchFinder->hashSizeSum - p->MatchFinder->fixedHashSize, p->MatchFinder->btMode);
-    MatchFinder_Normalize3(subValue, p->son, p->MatchFinder->numSons, p->MatchFinder->btMode);
+    UInt32 subValue = p->pos - p->cyclicBufferSize;
+    if (mf->btMode == MF_HashTable)   // HT matchfinder uses MatchFinder->hash in this thread
+      MatchFinder_Normalize3(mf, subValue, mf->hash + mf->fixedHashSize, mf->hashSizeSum - mf->fixedHashSize, mf->btMode);
+    MatchFinder_Normalize3(mf, subValue, p->son, mf->numSons, mf->btMode);
     p->pos -= subValue;
   }
 
@@ -467,7 +554,7 @@ void BtFillBlock(CMatchFinderMt *p, UInt32 globalBlockIndex)
 
 void BtThreadFunc(CMatchFinderMt *mt)
 {
-  BeginCompressionThreadPriority();  // уменьшим приоритет для треда сжатия (функция из Common.cpp)
+  SetCompressionThreadPriority();  // уменьшим приоритет для треда сжатия (функция из Common.cpp)
   CMtSync *p = &mt->btSync;
   for (;;)
   {
@@ -584,8 +671,8 @@ void MatchFinderMt_ReleaseStream(CMatchFinderMt *p)
 
 void MatchFinderMt_Normalize(CMatchFinderMt *p)
 {
-  UInt32 subValue = mymax(p->lzPos - p->historySize - 1, kMtNormalizeStepMin);
-  MatchFinder_Normalize3(subValue, p->hash, p->fixedHashSize, p->MatchFinder->btMode);
+  UInt32 subValue = (p->lzPos - p->historySize - 1);
+  MatchFinder_Normalize3(p->MatchFinder, subValue, p->hash, p->fixedHashSize, MF_BinaryTree);
   p->lzPos -= subValue;
 }
 
@@ -597,7 +684,7 @@ void MatchFinderMt_GetNextBlock_Bt(CMatchFinderMt *p)
   p->btBufPosLimit = p->btBufPos = blockIndex * kMtBtBlockSize;
   p->btBufPosLimit += p->btBuf[p->btBufPos++];
   p->btNumAvailBytes = p->btBuf[p->btBufPos++];
-  if (p->lzPos >= kMtMaxValForNormalize - kMtBtBlockSize)
+  if (p->lzPos >= kMtMaxValForNormalize(p->MatchFinder) - kMtBtBlockSize)
     MatchFinderMt_Normalize(p);
 }
 

@@ -27,19 +27,19 @@ public:
 #ifndef FREEARC_DECOMPRESS_ONLY
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void)               {return BlockSize*2;}
+  virtual void    SetCompressionMem        (MemSize mem)        {if (mem>0)   BlockSize = mem/2;}
+  virtual void    SetMinDecompressionMem   (MemSize mem)        {if (mem>0)   BlockSize = mem/2;}
+  virtual void    SetDictionary            (MemSize dict)       {if (dict>0)  BlockSize = dict;}
+  virtual void    SetBlockSize             (MemSize bs)         {if (bs>0)    BlockSize = bs;}
+#endif
+  virtual MemSize GetDictionary            (void)               {return BlockSize;}
+  virtual MemSize GetBlockSize             (void)               {return BlockSize;}
+  virtual MemSize GetDecompressionMem      (void)               {return BlockSize*2;}
+
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DICT)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return BlockSize*2;}
-  virtual MemSize GetDictionary         (void)         {return BlockSize;}
-  virtual MemSize GetBlockSize          (void)         {return BlockSize;}
-  virtual void    SetCompressionMem     (MemSize mem)  {if (mem>0)   BlockSize = mem/2;}
-  virtual void    SetDecompressionMem   (MemSize mem)  {if (mem>0)   BlockSize = mem/2;}
-  virtual void    SetDictionary         (MemSize dict) {if (dict>0)  BlockSize = dict;}
-  virtual void    SetBlockSize          (MemSize bs)   {if (bs>0)    BlockSize = bs;}
-#endif
-  virtual MemSize GetDecompressionMem   (void)         {return BlockSize*2;}
 };
 
 // Разборщик строки препроцессора DICT

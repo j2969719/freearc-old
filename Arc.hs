@@ -31,10 +31,13 @@ import Prelude hiding (catch)
 import Control.Concurrent
 import Control.OldException
 import Control.Monad
+import Foreign
+import Foreign.C
 import Data.List
 import System.Mem
 import System.IO
 
+import TABI
 import Utils
 import Process
 import Errors
@@ -44,6 +47,7 @@ import Charsets
 import Options
 import Cmdline
 import UI
+import Arhive7zLib
 import ArcCreate
 import ArcExtract
 import ArcRecover
@@ -95,12 +99,16 @@ run command @ Command
                 { cmd_name            = cmd
                 , cmd_setup_command   = setup_command
                 , opt_scan_subdirs    = scan_subdirs
+                , opt_global_queueing = global_queueing
                 } = do
+  uiStage "0547 Waiting for other FreeArc copy to finish operation..."
+  use_global_queue global_queueing "org.FreeArc.GlobalQueue" $ do   -- Начнём как только нам предоставят глобальный Mutex
   performGC       -- почистить мусор после обработки предыдущих команд
   setup_command   -- выполнить настройки, необходимые перед началом выполнения команды
   luaLevel "Command" [("command", cmd)] $ do
   case (cmd) of
     "create" -> find_archives  False           run_add     command
+    "modify" -> find_archives  False           run_modify  command
     "a"      -> find_archives  False           run_add     command
     "f"      -> find_archives  False           run_add     command
     "m"      -> find_archives  False           run_add     command
@@ -163,11 +171,12 @@ run_add cmd = do
 
 
 -- |Команда слияния архивов: j
-run_join cmd @ Command { cmd_filespecs = filespecs
-                       , opt_noarcext  = noarcext
+run_join cmd @ Command { cmd_filespecs         = filespecs
+                       , opt_noarcext          = noarcext
+                       , opt_archive_extension = archive_extension
                        } = do
   msg <- i18n"0247 Found %1 archives"
-  let arcspecs  =  map (addArcExtension noarcext) filespecs   -- добавим к именам расширение по умолчанию (".arc")
+  let arcspecs  =  map (addArcExtension noarcext archive_extension) filespecs   -- добавим к именам расширение по умолчанию (".arc/.zip/.rar/...")
       arcnames  =  map diskName ==<< find_and_filter_files arcspecs (uiScanning msg) find_criteria
       find_criteria  =  FileFind{ ff_ep             = opt_add_exclude_path cmd
                                 , ff_scan_subdirs   = opt_scan_subdirs     cmd
@@ -181,6 +190,8 @@ run_join cmd @ Command { cmd_filespecs = filespecs
                    , cmd_archive_filter = const True }  -- фильтр отбора файлов из открываемых архивов
 
 
+-- |Команда "modify"
+run_modify  = runArchiveAdd                    . (\cmd -> cmd{cmd_archive_filter = const True})
 -- |Команды копирования архива с внесением изменений: ch, c, k. s, rr
 run_copy    = runArchiveAdd                    . setArcFilter full_file_filter
 -- |Команда удаления из архива: d
@@ -243,4 +254,28 @@ overwrite_f cmd  =  in_arclist_or_temparc . fiDiskName
 test_dirs filter_f cmd fi  =  if fiIsDir fi
                                 then opt_x_include_dirs cmd
                                 else filter_f cmd fi
+
+
+----------------------------------------------------------------------------------------------------
+---- Экспорт
+----------------------------------------------------------------------------------------------------
+
+#ifdef FREEARC_DLL
+foreign export ccall haskell_FreeArcExecute     :: TABI.C_FUNCTION
+foreign export ccall haskell_FreeArcOpenArchive :: TABI.C_FUNCTION
+
+haskell_FreeArcExecute p = do
+  c_args       <- TABI.required p "command"      -- command to execute
+  gui_callback <- TABI.required p "callback"     -- UI callback
+  var_gui_callback =: gui_callback
+  peekArray0 nullPtr c_args  >>= mapM peekCWString >>= doMain
+  return 0
+
+haskell_FreeArcOpenArchive p = do
+  W arcname    <- TABI.required p "arcname"      -- filename of archive to open
+  callback     <- TABI.required p "callback"     -- callback returning info about archive items
+  szListArchive arcname callback
+  return 0
+#endif
+
 

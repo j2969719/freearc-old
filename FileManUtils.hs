@@ -11,6 +11,8 @@ import Data.Char
 import Data.IORef
 import Data.List
 import Data.Maybe
+import Foreign.C
+import Foreign.Marshal
 import System.IO.Unsafe
 
 import Graphics.UI.Gtk
@@ -166,34 +168,65 @@ urlNormalize url relname =  dropTrailingPathSeparator$ concat$ reverse$ remove$ 
 
 -- |Структура, хранящая всю необходимую нам информацию о файле
 data FileData = FileData
-  { fdPackedDirectory       :: !MyPackedString   -- Имя каталога
-  , fdPackedBasename        :: !MyPackedString   -- Имя файла без каталога, но с расширением
-  , fdSize  :: {-# UNPACK #-}  !FileSize         -- Размер файла (0 для каталогов)
-  , fdTime  :: {-# UNPACK #-}  !FileTime         -- Дата/время создания файла
-  , fdIsDir :: {-# UNPACK #-}  !Bool             -- Это каталог?
+  { fdPackedDirectory      :: !MyPackedString  -- Имя каталога
+  , fdPackedBasename       :: !MyPackedString  -- Имя файла без каталога, но с расширением
+  , fdSize  :: {-# UNPACK #-} !FileSize        -- Размер файла (0 для каталогов)
+  , fdTime  :: {-# UNPACK #-} !FileTime        -- Дата/время создания файла
+  , fdAttr  :: {-# UNPACK #-} !FileAttr        -- Досовские атрибуты файла
+  , fdIsDir :: {-# UNPACK #-} !Bool            -- Это каталог?
   }
 
 fiToFileData fi = FileData { fdPackedDirectory = fpPackedDirectory (fiStoredName fi)
                            , fdPackedBasename  = fpPackedBasename  (fiStoredName fi)
                            , fdSize            = fiSize  fi
                            , fdTime            = fiTime  fi
+                           , fdAttr            = fiAttr  fi
                            , fdIsDir           = fiIsDir fi }
 
 fdDirectory  =  myUnpackStr.fdPackedDirectory
 fdBasename   =  myUnpackStr.fdPackedBasename
-
--- |Виртуальное поле: полное имя файла, включая каталог и расширение
-fdFullname fd  =  fdDirectory fd </> fdBasename fd
+fdExt        =  takeExtension.fdBasename
 
 -- |Имя файла. Должно быть fdFullname для поддержки режима "плоского вывода" архивов/деревьев файлов
 fmname = fdBasename
+
+-- |Виртуальное поле: полное имя файла, включая каталог и расширение
+fdFullname fd  =  fdDirectory fd </> fdBasename fd
 
 -- |Возвращает искусственный каталог с базовым именем name
 fdArtificialDir name = FileData { fdPackedDirectory = myPackStr ""
                                 , fdPackedBasename  = name
                                 , fdSize            = 0
                                 , fdTime            = aMINIMUM_POSSIBLE_FILETIME
+                                , fdAttr            = 0
                                 , fdIsDir           = True }
+
+
+
+-- |Тип файла. Берётся из хеша, если в нём нет - запрашивается у Windows
+fdType fd | fdIsDir fd = ""
+          | otherwise  = unsafePerformIO$ do
+                           let ext = fdExt fd ||| "file"
+                           types <- val filetypeList
+                           case ext `lookup` types of
+                             Just typ -> return typ
+                             Nothing  -> do typ <- guiGetFileType ext
+                                            filetypeList =: (ext,typ):types
+                                            return typ
+
+-- |Глобальная переменная, хранящая уже выявленные соответствия расширение -> тип файла
+filetypeList = unsafePerformIO$ mvar [] :: MVar [(String,String)]
+
+-- |Получить тип файла по его расширению
+guiGetFileType ext = do
+  withCWString ext  $ \c_ext -> do
+  allocaBytes 1000 $ \buf -> do
+  c_GuiGetFileType c_ext buf
+  peekCWString buf
+
+foreign import ccall safe "Environment.h GuiGetFileType"
+  c_GuiGetFileType :: CWString -> CWString -> IO ()
+
 
 
 
@@ -232,4 +265,3 @@ splitt n x = x
 
 -- Имя n-й части каталога
 dirPart n = myPackStr.(!!n).(++[""]).splitDirectories.fdDirectory
-

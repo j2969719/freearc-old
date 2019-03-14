@@ -33,7 +33,7 @@ aEXIT_CODE_BAD_PASSWORD = 21
 aEXIT_CODE_USER_BREAK   = 255
 
 -- |Все возможные типы ошибок и предупреждений
-data ErrorTypes = GENERAL_ERROR                 [String]
+data ErrorType  = GENERAL_ERROR                 [String]
                 | CMDLINE_GENERAL               [String]
                 | CMDLINE_SYNTAX                String
                 | CMDLINE_INCOMPATIBLE_OPTIONS  String String
@@ -126,8 +126,8 @@ shutdown msg exitCode = do
         _ -> condPrintLineLn "n"$ "There were "++show w++" warning(s)"
       ignoreErrors (msg &&& condPrintLineLn "n" msg)
       condPrintLineLn "e" ""
-#if !defined(FREEARC_WIN) && !defined(FREEARC_GUI)
-    putStrLn ""  -- в Unix отсутствует автоматический перевод строки в терминале по завершению программы
+#if !defined(FREEARC_GUI)
+    putStrLn ""
 #endif
 
     ignoreErrors$ closeLogFile
@@ -232,7 +232,7 @@ pauseAction = unsafePerformIO (ref$ return ()) :: IORef (IO())
 
 -- |Выключить компьютер по окончанию работы?
 perform_shutdown = unsafePerformIO (ref False)
-{-# NOINLINE shutdown #-}
+{-# NOINLINE perform_shutdown #-}
 
 
 ---------------------------------------------------------------------------------------------------
@@ -357,15 +357,15 @@ errcode _              = aEXIT_CODE_FATAL_ERROR
 ---- Ввод/вывод на экран в кодировке, заданной опцией -sct -----------------------------------------
 ----------------------------------------------------------------------------------------------------
 
-#ifdef FREEARC_GUI
-myPutStr      = doNothing
-myPutStrLn    = doNothing
-myFlushStdout = doNothing0
-#else
+#if !defined(FREEARC_GUI) && !defined(FREEARC_DLL)
 myGetLine     = getLine >>= terminal2str
 myPutStr      = putStr   =<<. str2terminal
 myPutStrLn    = putStrLn =<<. str2terminal
 myFlushStdout = hFlush stdout
+#else
+myPutStr      = doNothing
+myPutStrLn    = doNothing
+myFlushStdout = doNothing0
 #endif
 
 
@@ -383,7 +383,7 @@ printLineC c str = do
       makeLower xs                    =  xs
   let handle "w" = stderr
       handle _   = stdout
-#ifndef FREEARC_GUI
+#if !defined(FREEARC_GUI) && !defined(FREEARC_DLL)
   hPutStr (handle oldc) =<< str2terminal separator
   hPutStr (handle c)    =<< str2terminal ((oldc=="h" &&& makeLower) str)
   hFlush  (handle c)
@@ -428,7 +428,10 @@ openLogFile logfilename = do
   closeLogFile  -- закрыть предыдущий, если был
   logfile <- case logfilename of
                  ""  -> return Nothing
-                 log -> fileAppendText log >>== Just
+                 log -> (do buildPathTo log
+                            fileAppendText log >>== Just)
+                        `catch` (\e -> do registerWarning (CANT_OPEN_FILE log)
+                                          return Nothing)
   logfile' =: logfile
 
 -- Вывести строку в логфайл
@@ -466,6 +469,8 @@ loggingHandlers = unsafePerformIO$ newIORef [] :: IORef [String -> IO ()]
 
 -- |Запись сообщения об ошибке в логфайл и аварийное завершение программы с этим сообщением
 registerError err = do
+  unless (err `elem` [TERMINATED,OP_TERMINATED]) $ do
+    val errcodeHandler >>= ($err)
   msg <- errormsg err
   msg <- if err `elem` [TERMINATED,OP_TERMINATED]
            then return msg
@@ -505,6 +510,7 @@ registerThreadError err = do
   (iif isFM registerWarning registerError) err
 
 -- Операции, выполняемые при появлении ошибки/предупреждения (регистрируются в других частях программы)
+errcodeHandler  = unsafePerformIO$ newIORef doNothing :: IORef (ErrorType -> IO ())
 errorHandlers   = unsafePerformIO$ newIORef [] :: IORef [String -> IO ()]
 warningHandlers = unsafePerformIO$ newIORef [] :: IORef [String -> IO ()]
 

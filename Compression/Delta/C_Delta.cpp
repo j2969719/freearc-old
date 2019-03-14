@@ -41,6 +41,8 @@ int DELTA_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
                           (BlockSize, ExtendedTables, callback, auxdata);
 }
 
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DELTA)
 void DELTA_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
@@ -48,8 +50,6 @@ void DELTA_METHOD::ShowCompressionMethod (char *buf, bool purify)
     showMem (BlockSize, BlockSizeStr+1);
     sprintf (buf, "delta%s%s", BlockSize!=defaults.BlockSize? BlockSizeStr:"", ExtendedTables? ":x":"");
 }
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа DELTA_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах

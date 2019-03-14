@@ -7,6 +7,7 @@ module CUI where
 import Prelude hiding (catch)
 import Control.Monad
 import Control.Concurrent
+import Control.OldException
 import Data.Char
 import Data.IORef
 import Foreign
@@ -40,12 +41,20 @@ import UIBase
 guiStartProgram = do
   -- Обновляем индикатор прогресса и заголовок окна раз в 0.5 секунды
   indicatorThread 0.5 $ \updateMode indicator indType title b bytes total processed p -> do
-    myPutStr$ back_percents indicator ++ p
-    myFlushStdout
     setConsoleTitle title
+    taskbar_SetProgressValue (i bytes) (i total)
+    withConsoleAccess $ do
+      myPutStr$ back_percents indicator ++ p
+      myFlushStdout
 
 -- |Вызывается в начале обработки архива
 guiStartArchive = doNothing0
+
+-- |Отметить начало упаковки или распаковки данных
+guiStartProcessing = doNothing0
+
+-- |Начало следующего тома архива
+guiStartVolume filename = doNothing0
 
 -- |Вызывается в начале обработки файла
 guiStartFile = do
@@ -59,6 +68,9 @@ guiStartFile = do
     myPutStr$    left_justify 72 ("  "++format imsg filename)
     uiResumeProgressIndicator
     hFlush stdout
+
+-- |Текущий объём исходных/сжатых данных
+guiUpdateProgressIndicator = doNothing0
 
 -- |Приостановить вывод индикатора прогресса и стереть его следы
 uiSuspendProgressIndicator = do
@@ -83,6 +95,9 @@ guiPauseAtEnd = do
 -- |Завершить выполнение программы
 guiDoneProgram = do
   return ()
+
+-- |Pause progress indicator & timing while dialog runs
+pauseEverything  =  pauseTiming . pauseTaskbar
 
 {-# NOINLINE guiStartProgram #-}
 {-# NOINLINE guiStartFile #-}
@@ -113,7 +128,7 @@ ask question ref_answer answer_on_u =  do
     _   -> return (new_answer `elem` ["y","a"])
 
 -- |Собственно общение с пользователем происходит здесь
-ask_user question = syncUI $ pauseTiming go  where
+ask_user question = syncUI $ pauseEverything go  where
   go = do myPutStr$ "\n  "++question++"?\n  "++commented_answers++"? "
           hFlush stdout
           answer  <-  getLine >>== strLower
@@ -148,7 +163,7 @@ bad_decryption_password = myPutStrLn "Incorrect password"
 
 -- |Запрос пароля при сжатии. Используется невидимый ввод
 -- и запрос повторяется дважды для исключения ошибки при его вводе
-ask_encryption_password opt_parseData = syncUI $ pauseTiming $ do
+ask_encryption_password opt_parseData = syncUI $ pauseEverything $ do
   withoutEcho $ go where
     go = do myPutStr "\n  Enter encryption password:"
             hFlush stdout
@@ -162,7 +177,7 @@ ask_encryption_password opt_parseData = syncUI $ pauseTiming $ do
               else return answer
 
 -- |Запрос пароля для распаковки. Используется невидимый ввод
-ask_decryption_password opt_parseData = syncUI $ pauseTiming $ do
+ask_decryption_password opt_parseData = syncUI $ pauseEverything $ do
   withoutEcho $ do
   myPutStr "\n  Enter decryption password:"
   hFlush stdout
@@ -217,7 +232,7 @@ uiPrintArcComment arcComment = do
     myPutStrLn arcComment
 
 -- |Ввести с stdin комментарий к архиву
-uiInputArcComment old_comment = syncUI $ pauseTiming $ do
+uiInputArcComment old_comment = syncUI $ pauseEverything $ do
   myPutStrLn "Enter archive comment, ending with \".\" on separate line:"
   hFlush stdout
   let go xs = do line <- myGetLine
@@ -241,6 +256,7 @@ withTString  = withCString
 type TString = CString
 #endif
 
+
 -- |Set console title
 setConsoleTitle title = do
   withTString title c_SetConsoleTitle
@@ -252,4 +268,14 @@ foreign import ccall safe "Environment.h EnvSetConsoleTitle"
 -- |Reset console title
 foreign import ccall safe "Environment.h EnvResetConsoleTitle"
   resetConsoleTitle :: IO ()
+
+
+-- |Synchronize console access
+withConsoleAccess  =  bracket_ c_SynchronizeConio_Enter c_SynchronizeConio_Leave
+
+-- |Enter & leave console access mutex
+foreign import ccall safe "Compression/External/C_External.h SynchronizeConio_Enter"
+  c_SynchronizeConio_Enter :: IO ()
+foreign import ccall safe "Compression/External/C_External.h SynchronizeConio_Leave"
+  c_SynchronizeConio_Leave :: IO ()
 

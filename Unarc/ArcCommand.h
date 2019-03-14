@@ -5,8 +5,8 @@
 #define NAME           "unpacker"
 #endif
 
-#define HEADER1        "FreeArc 0.666 "
-#define HEADER2        "  http://freearc.org  2010-05-20\n"
+#define HEADER1        "FreeArc 0.67 "
+#define HEADER2        "  http://freearc.org  2014-03-16\n"
 
 
 /******************************************************************************
@@ -27,16 +27,17 @@ public:
   virtual void DisplayHeader (char* header) {}
   virtual bool AllowProcessing (char cmd, int silent, MYFILENAME arcname, char* comment, int cmtsize, FILENAME outdir)  {return TRUE;}
   virtual FILENAME GetOutDir() {return "";}
-  virtual void BeginProgress (uint64 totalBytes)    {}
+  virtual bool BeginProgress (uint64 totalBytes)    {return TRUE;}
   virtual bool ProgressRead  (uint64 readBytes)     {return TRUE;}
   virtual bool ProgressWrite (uint64 writtenBytes)  {return TRUE;}
   virtual bool ProgressFile  (bool isdir, const char *operation, MYFILENAME filename, uint64 filesize)  {return TRUE;}
   virtual void EndProgress(COMMAND*) {}
   virtual char AskOverwrite (MYFILENAME filename, uint64 size, time_t modified) {return 'n';}
+  virtual char AskPassword  (char *pwd, int pwdbuf_size) {return 'n';}
   virtual void ListHeader (COMMAND &) {}
   virtual void ListFooter (COMMAND &) {}
   virtual void ListFiles (DIRECTORY_BLOCK*, COMMAND &) {}
-  virtual void Abort (COMMAND*, int errcode)  {exit (FREEARC_EXIT_ERROR);}
+  virtual void Abort (COMMAND*, int errcode, char* errmsg)  {exit (FREEARC_EXIT_ERROR);}
 };
 
 
@@ -58,6 +59,7 @@ public:
   BOOL ok;              // Команда выполняется успешно?
   BOOL noLimitMem;      // Не ограничивать потребление памяти для распаковки?
   MemSize limitMem;     // Лимит использования памяти при распаковке
+  char *pwd;            // Опция -p (пароль расшифровки)
   int  silent;          // Опция -s
   BOOL yes;             // Опция -o+
   BOOL no;              // Опция -o-
@@ -70,6 +72,7 @@ public:
   BOOL accept_file (DIRECTORY_BLOCK *dirblock, int i);   // TRUE, если i-й файл каталога dirblock следует включить в обработку
 };
 
+#define PASSWORDBUF_SIZE 2000
 
 /******************************************************************************
 ** External compressors support ***********************************************
@@ -149,6 +152,8 @@ COMMAND::COMMAND (int argc, char *argv[])
   outpath.setname("");
   workdir.setname("");
   runme.setname("");
+  pwd = (char*) malloc_msg(PASSWORDBUF_SIZE+1);
+  strcpy (pwd, "");
   wipeoutdir = FALSE;
   tempdir = FALSE;
   yes = FALSE;
@@ -164,7 +169,7 @@ COMMAND::COMMAND (int argc, char *argv[])
   cmd     = 'x';
 
 #ifdef FREEARC_INSTALLER
-  // Installer by default extracts itself into some temp directory, runs setup.exe and then remove directory's contents
+  // Installer by default extracts itself into some temp directory, runs setup.exe and then removes the directory's contents
   if (argv[1] == NULL)
   {
       silent = 2;
@@ -189,9 +194,9 @@ COMMAND::COMMAND (int argc, char *argv[])
       wipeoutdir = TRUE;
 #endif
   }
-#endif
+#endif // FREEARC_INSTALLER
 
-  // Parse options
+  // Parse SFX options
   for (ok=TRUE; ok && *++argv; )
   {
     if (!nooptions && (argv[0][0]=='-' || strequ(argv[0],"/?") || strequ(argv[0],"/help")))
@@ -205,9 +210,10 @@ COMMAND::COMMAND (int argc, char *argv[])
       else if (strequ(argv[0],"-n"))       no  = TRUE;
       else if (start_with(argv[0],"-d"))   outpath.setname(argv[0]+2);
       else if (start_with(argv[0],"-w"))   workdir.setname(argv[0]+2);
+      else if (start_with(argv[0],"-p"))   strncopy (pwd, argv[0]+2, PASSWORDBUF_SIZE);
       else if (start_with(argv[0],"-ap"))  strcpy (arc_base_dir, argv[0]+3),  (arc_base_dir[0]  &&  is_path_char(last_char(arc_base_dir))  &&  (last_char(arc_base_dir) = '\0'));
       else if (strequ(argv[0],"-ld-"))     noLimitMem = TRUE;
-      else if (start_with(argv[0],"-ld"))  limitMem = parseMem(argv[0]+3, &error), ok=!error;
+      else if (start_with(argv[0],"-ld"))  limitMem = parseMem(argv[0]+3, &error, 'm'), ok=!error;
       else if (start_with(argv[0],"-cfg")) cfg = argv[0]+4,  (strequ(cfg,"-")  &&  (cfg = ""));
       else if (strequ(argv[0],"-s"))       silent = 1;
       else if (strequ(argv[0],"-s0"))      silent = 0;
@@ -233,21 +239,22 @@ COMMAND::COMMAND (int argc, char *argv[])
          "Usage: %s [options] [filenames...]\n"
          "Available options:\n"
 #ifndef FREEARC_GUI
-         "  -l         - display archive listing\n"
-         "  -v         - display verbose archive listing\n"
+         "  -l          - display archive listing\n"
+         "  -v          - display verbose archive listing\n"
 #endif
-         "  -x         - extract files\n"
-         "  -e         - extract files without pathnames\n"
-         "  -t         - test archive integrity\n"
-         "  -ap{Path}  - set base directory inside archive\n"
-         "  -d{Path}   - set destination path\n"
-         "  -w{Path}   - set temporary files directory\n"
-         "  -ld{Mem}   - limit memory used for decompression (-ld- means no limit)\n"
-         "  -y         - answer Yes on all overwrite queries\n"
-         "  -n         - answer No  on all overwrite queries\n"
-         "  -s[1,2]    - silent mode\n"
-         "  -cfg{Path} - config file name (default: arc.ini, -cfg- means no config)\n"
-         "  --         - no more options\n"
+         "  -x          - extract files\n"
+         "  -e          - extract files without pathnames\n"
+         "  -t          - test archive integrity\n"
+         "  -ap{Path}   - set base directory inside archive\n"
+         "  -d{Path}    - set destination path\n"
+         "  -w{Path}    - set temporary files directory\n"
+         "  -p{Pwd}     - set decryption password\n"
+         "  -ld{Mem}    - limit memory used for decompression (-ld- means no limit)\n"
+         "  -y          - answer Yes on all overwrite queries\n"
+         "  -n          - answer No  on all overwrite queries\n"
+         "  -s[1,2]     - silent mode\n"
+         "  -cfg{Path}  - config file name (default: arc.ini, -cfg- means no config)\n"
+         "  --          - no more options\n"
          , drop_dirname(arcname));
 #ifdef FREEARC_GUI
   MessageBoxW (NULL, MYFILE(helpMsg).displayname(), _T("Command-line help"), MB_OK | MB_ICONERROR);
@@ -255,8 +262,11 @@ COMMAND::COMMAND (int argc, char *argv[])
   printf("%s", MYFILE(helpMsg).displayname());
 #endif
 
-#else
-  // unarc.exe or unarc.dll
+
+#else  // !FREEARC_SFX
+
+
+  // Parse unarc.exe/unarc.dll options
   cmd     = ' ';
   arcname = NULL;
   for (ok=TRUE; ok && *++argv; )
@@ -267,10 +277,11 @@ COMMAND::COMMAND (int argc, char *argv[])
       else if (strequ(argv[0],"-o+"))      yes        = TRUE;
       else if (strequ(argv[0],"-o-"))      no         = TRUE;
       else if (strequ(argv[0],"-ld-"))     noLimitMem = TRUE;
-      else if (start_with(argv[0],"-ld"))  limitMem   = parseMem(argv[0]+3, &error),  ok=!error;
+      else if (start_with(argv[0],"-ld"))  limitMem   = parseMem(argv[0]+3, &error, 'm'),  ok=!error;
       else if (start_with(argv[0],"-ap"))  strcpy (arc_base_dir, argv[0]+3),  (arc_base_dir[0]  &&  is_path_char(last_char(arc_base_dir))  &&  (last_char(arc_base_dir) = '\0'));
       else if (start_with(argv[0],"-dp"))  outpath.setname(argv[0]+3);
       else if (start_with(argv[0],"-w"))   workdir.setname(argv[0]+2);
+      else if (start_with(argv[0],"-p"))   strncopy (pwd, argv[0]+2, PASSWORDBUF_SIZE);
       else if (start_with(argv[0],"-cfg")) cfg = argv[0]+4,  (strequ(cfg,"-")  &&  (cfg = ""));
       else if (strequ(argv[0],"--"))       nooptions=TRUE;
       else ok=FALSE;
@@ -283,6 +294,7 @@ COMMAND::COMMAND (int argc, char *argv[])
   filenames = argv;            // the rest of arguments are filenames
   ok = ok && strchr("lvtex",cmd) && arcname;
   if (ok)  {RegisterExternalCompressors (progname, cfg);  return;}
+#ifndef FREEARC_LIBRARY
   printf(HEADER2
          "Usage: unarc command [options] archive[.arc] [filenames...]\n"
          "Available commands:\n"
@@ -295,12 +307,14 @@ COMMAND::COMMAND (int argc, char *argv[])
          "  -ap{Path}   - set base directory inside archive\n"
          "  -dp{Path}   - set destination path\n"
          "  -w{Path}    - set temporary files directory\n"
+         "  -p{Pwd}     - set decryption password\n"
          "  -ld{Mem}    - limit memory used for decompression (-ld- means no limit)\n"
          "  -o+         - overwrite existing files\n"
          "  -o-         - don't overwrite existing files\n"
          "  --noarcext  - don't add default extension to archive name\n"
          "  -cfg{Path}  - config file name (default: arc.ini, -cfg- means no config)\n"
          "  --          - no more options\n");
+#endif // FREEARC_LIBRARY
 #endif
 }
 
@@ -324,4 +338,3 @@ BOOL COMMAND::accept_file (DIRECTORY_BLOCK *dirblock, int i)
   }
   return FALSE;                             // Совпадающего имени не найдено
 }
-

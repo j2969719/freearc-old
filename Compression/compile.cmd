@@ -1,5 +1,8 @@
 @echo off
 make
+cd LZ4
+make
+cd ..
 cd LZP
 make
 cd ..
@@ -40,5 +43,8 @@ cd CLS
 make
 cd ..
 cd _Encryption
+make
+cd ..
+cd _Examples
 make
 cd ..

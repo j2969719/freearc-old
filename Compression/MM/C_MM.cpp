@@ -35,6 +35,9 @@ int MM_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
     return mm_compress (mode, skip_header, is_float, num_chan, word_size, offset, reorder, callback, auxdata);
 }
 
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
+
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_MM)
 void MM_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
@@ -50,8 +53,6 @@ void MM_METHOD::ShowCompressionMethod (char *buf, bool purify)
     sprintf (dStr, mode!=defaults.mode? ":d%d" : "", mode);
     sprintf (buf, "mm%s%s%s", dStr, cStr, rStr);
 }
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа MM_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах

@@ -1,10 +1,10 @@
 #include "../CELS.h"
 
-namespace CELS
-{
-
 #define REP_LIBRARY
 #include "rep.cpp"
+
+namespace CELS
+{
 
 // Реализация стандартного интерфейса методов сжатия COMPRESSION_METHOD
 struct REP_METHOD : COMPRESSION_METHOD
@@ -12,6 +12,7 @@ struct REP_METHOD : COMPRESSION_METHOD
   // Параметры этого метода сжатия
   MemSize BlockSize;        // Размер буфера. Совпадения ищутся только в пределах этой дистанции. Расход памяти - BlockSize+BlockSize/4
   int     MinCompression;   // Минимальный процент сжатия. Если выходные данные больше, то вместо них будут записаны оригинальные (несжатые) данные
+  int     ChunkSize;        // Размер блоков, КС которых заносится в хеш
   int     MinMatchLen;      // Минимальная длина строки, при которой она будет заменяться ссылкой на предыдущее вхождение
   int     Barrier;          // Граница, после которой допускается использовать совпадения меньшего размера (поскольку lzma/ppmd всё равно пропустит их)
   int     SmallestLen;      // Этот меньший размер
@@ -23,6 +24,7 @@ struct REP_METHOD : COMPRESSION_METHOD
   {
     BlockSize      = 64*mb;
     MinCompression = 100;
+    ChunkSize      = 0;
     MinMatchLen    = 512;
     Barrier        = INT_MAX;
     SmallestLen    = 512;
@@ -33,14 +35,14 @@ struct REP_METHOD : COMPRESSION_METHOD
   // Функция распаковки
   virtual int decompress (CALLBACK_FUNC *callback, void *auxdata)
   {
-    return rep_decompress (BlockSize, MinCompression, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
+    return rep_decompress (BlockSize, MinCompression, ChunkSize, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
   }
 
 #ifndef FREEARC_DECOMPRESS_ONLY
   // Функция упаковки
   virtual int compress (CALLBACK_FUNC *callback, void *auxdata)
   {
-    return rep_compress (BlockSize, MinCompression, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
+    return rep_compress (BlockSize, MinCompression, ChunkSize, MinMatchLen, Barrier, SmallestLen, HashSizeLog, Amplifier, callback, auxdata);
   }
 
   // Разбирает строку с параметрами метода
@@ -61,9 +63,11 @@ struct REP_METHOD : COMPRESSION_METHOD
     while (*++parameters && !error)
     {
       char* param = *parameters;
+      if (strequ (param, "max"))  {Amplifier = 99;  continue;}
       switch (*param) {                    // Параметры, содержащие значения
         case 'b':  BlockSize   = parseMem (param+1, &error); continue;
         case 'l':  MinMatchLen = parseInt (param+1, &error); continue;
+        case 'c':  ChunkSize   = parseInt (param+1, &error); continue;
         case 'd':  Barrier     = parseMem (param+1, &error); continue;
         case 's':  SmallestLen = parseInt (param+1, &error); continue;
         case 'h':  HashSizeLog = parseInt (param+1, &error); continue;
@@ -89,37 +93,32 @@ struct REP_METHOD : COMPRESSION_METHOD
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_method)
   virtual void ShowCompressionMethod (char *buf, bool purify)
   {
-    REP_METHOD defaults(NULL); char BlockSizeStr[100], MinCompressionStr[100], BarrierTempStr[100], BarrierStr[100], SmallestLenStr[100], HashSizeLogStr[100], AmplifierStr[100], MinMatchLenStr[100];
+    REP_METHOD defaults(NULL); char BlockSizeStr[100], MinCompressionStr[100], BarrierTempStr[100], BarrierStr[100], SmallestLenStr[100], HashSizeLogStr[100], AmplifierStr[100], ChunkSizeStr[100], MinMatchLenStr[100];
     showMem (BlockSize, BlockSizeStr);
     showMem (Barrier,   BarrierTempStr);
     sprintf (MinCompressionStr, MinCompression!=defaults.MinCompression? ":%d%%" : "", MinCompression);
+    sprintf (MinMatchLenStr, MinMatchLen!=defaults.MinMatchLen? ":%d"  : "", MinMatchLen);
+    sprintf (ChunkSizeStr,   ChunkSize  !=defaults.ChunkSize  ? ":c%d" : "", ChunkSize);
     sprintf (BarrierStr,     Barrier    !=defaults.Barrier    ? ":d%s" : "", BarrierTempStr);
     sprintf (SmallestLenStr, SmallestLen!=defaults.SmallestLen? ":s%d" : "", SmallestLen);
     sprintf (AmplifierStr,   Amplifier  !=defaults.Amplifier  ? ":a%d" : "", Amplifier);
     sprintf (HashSizeLogStr, HashSizeLog!=defaults.HashSizeLog? ":h%d" : "", HashSizeLog);
-    sprintf (MinMatchLenStr, MinMatchLen!=defaults.MinMatchLen? ":%d"  : "", MinMatchLen);
-    sprintf (buf, "rep:%s%s%s%s%s%s%s", BlockSizeStr, MinCompressionStr, MinMatchLenStr, BarrierStr, SmallestLenStr, HashSizeLogStr, AmplifierStr);
+    sprintf (buf, "rep:%s%s%s%s%s%s%s%s", BlockSizeStr, MinCompressionStr, MinMatchLenStr, ChunkSizeStr, BarrierStr, SmallestLenStr, HashSizeLogStr, AmplifierStr);
   }
 
   // Настроить метод сжатия на использование заданного объёма памяти
   virtual void SetCompressionMem (MemSize mem)
   {
-    // Скопировано из rep_compress
-    int L = roundup_to_power_of (mymin(SmallestLen,MinMatchLen)/2, 2);  // Размер блоков, КС которых заносится в хеш
-    int k = sqrtb(L*2);
-    int HashSize = CalcHashSize (HashSizeLog, mem/5*4, k);
-
+    int L;   // Размер блоков, КС которых заносится в хеш
+    int HashSize = CalcHashSize (HashSizeLog, mem/5*4, SmallestLen, MinMatchLen, ChunkSize, Amplifier, &L);
     BlockSize = mem - HashSize*sizeof(int);
   }
 
   // Посчитать, сколько памяти требуется для упаковки заданным методом
   virtual MemSize GetCompressionMem()
   {
-    // Скопировано из rep_compress
-    int L = roundup_to_power_of (mymin(SmallestLen,MinMatchLen)/2, 2);  // Размер блоков, КС которых заносится в хеш
-    int k = sqrtb(L*2);
-    int HashSize = CalcHashSize (HashSizeLog, BlockSize, k);
-
+    int L;   // Размер блоков, КС которых заносится в хеш
+    int HashSize = CalcHashSize (HashSizeLog, BlockSize, SmallestLen, MinMatchLen, ChunkSize, Amplifier, &L);
     return BlockSize + HashSize*sizeof(int);
   }
 

@@ -69,23 +69,27 @@ purifyCompressionMethod :: Method -> Method
 purifyCompressionMethod = doWithMethod (\a b -> c_CanonizeCompressionMethod a b 1)
 
 -- |Returns memory used to compress/decompress, dictionary or block size of method given
-getCompressionMem, getDecompressionMem, getDictionary, getBlockSize :: Method -> MemSize
+getCompressionMem, getDecompressionMem, getMinCompressionMem, getMinDecompressionMem, getDictionary, getBlockSize :: Method -> MemSize
 getCompressionMem      =  getWithMethod c_GetCompressionMem
 getDecompressionMem    =  getWithMethod c_GetDecompressionMem
+getMinCompressionMem   =  getWithMethod c_GetMinCompressionMem
+getMinDecompressionMem =  getWithMethod c_GetMinDecompressionMem
 getDictionary          =  getWithMethod c_GetDictionary
 getBlockSize           =  getWithMethod c_GetBlockSize
 
 -- |Set memory used to compress/decompress, dictionary or block size of method given
-setCompressionMem, setDecompressionMem, setDictionary, setBlockSize :: MemSize -> Method -> Method
+setCompressionMem, setDecompressionMem, setMinDecompressionMem, setDictionary, setBlockSize :: MemSize -> Method -> Method
 setCompressionMem      =  setWithMethod c_SetCompressionMem
 setDecompressionMem    =  setWithMethod c_SetDecompressionMem
+setMinDecompressionMem =  setWithMethod c_SetMinDecompressionMem
 setDictionary          =  setWithMethod c_SetDictionary
 setBlockSize           =  setWithMethod c_SetBlockSize
 
 -- |Put upper limit to memory used to compress/decompress, dictionary or block size of method given
-limitCompressionMem, limitDecompressionMem, limitDictionary, limitBlockSize :: MemSize -> Method -> Method
+limitCompressionMem, limitDecompressionMem, limitMinDecompressionMem, limitDictionary, limitBlockSize :: MemSize -> Method -> Method
 limitCompressionMem    =  setWithMethod c_LimitCompressionMem
 limitDecompressionMem  =  setWithMethod c_LimitDecompressionMem
+limitMinDecompressionMem= setWithMethod c_LimitMinDecompressionMem
 limitDictionary        =  setWithMethod c_LimitDictionary
 limitBlockSize         =  setWithMethod c_LimitBlockSize
 
@@ -185,7 +189,7 @@ compressionErrorMessage x
   | x==aFREEARC_ERRCODE_INVALID_COMPRESSOR    = "0366 invalid compression method or parameters in %1"
   | x==aFREEARC_ERRCODE_ONLY_DECOMPRESS       = "program build with FREEARC_DECOMPRESS_ONLY, so don't try to use compress"
   | x==aFREEARC_ERRCODE_OUTBLOCK_TOO_SMALL    = "output block size in (de)compressMem is not enough for all output data in %1"
-  | x==aFREEARC_ERRCODE_NOT_ENOUGH_MEMORY     = "0367 can't allocate memory required for (de)compression in %1"
+  | x==aFREEARC_ERRCODE_NOT_ENOUGH_MEMORY     = "0498 can't allocate memory required for (de)compression in %1, use -lc/-ld to limit memory usage"
   | x==aFREEARC_ERRCODE_READ                  = "0430 read error (bad media?) in compression algorithm %1"
   | x==aFREEARC_ERRCODE_BAD_COMPRESSED_DATA   = "0369 bad compressed data in %1"
   | x==aFREEARC_ERRCODE_NOT_IMPLEMENTED       = "requested feature isn't supported in %1"
@@ -247,6 +251,10 @@ foreign import ccall unsafe  "Compression.h  GetCompressionThreads"
 foreign import ccall unsafe  "Compression.h  SetCompressionThreads"
    setCompressionThreads :: Int -> IO ()
 
+-- |¬ключить/выключить режим отладочного вывода
+foreign import ccall unsafe  "Compression.h  Set_debug_mode"
+   setDebugMode :: Int -> IO ()
+
 -- |Clear external compressors table
 foreign import ccall unsafe  "Compression.h  ClearExternalCompressorsTable"
    clearExternalCompressorsTable  :: IO ()
@@ -266,22 +274,26 @@ foreign import ccall unsafe  "Compression.h compressionLib_cleanup"
    compressionLib_cleanup :: IO ()
 
 -- |Returns memory used to compress/decompress, dictionary or block size of method given
-foreign import ccall unsafe  "Compression.h GetCompressionMem"   c_GetCompressionMem   :: CMethod -> IO MemSize
-foreign import ccall unsafe  "Compression.h GetDecompressionMem" c_GetDecompressionMem :: CMethod -> IO MemSize
-foreign import ccall unsafe  "Compression.h GetDictionary"       c_GetDictionary       :: CMethod -> IO MemSize
-foreign import ccall unsafe  "Compression.h GetBlockSize"        c_GetBlockSize        :: CMethod -> IO MemSize
+foreign import ccall unsafe  "Compression.h GetCompressionMem"        c_GetCompressionMem        :: CMethod -> IO MemSize
+foreign import ccall unsafe  "Compression.h GetDecompressionMem"      c_GetDecompressionMem      :: CMethod -> IO MemSize
+foreign import ccall unsafe  "Compression.h GetMinCompressionMem"     c_GetMinCompressionMem     :: CMethod -> IO MemSize
+foreign import ccall unsafe  "Compression.h GetMinDecompressionMem"   c_GetMinDecompressionMem   :: CMethod -> IO MemSize
+foreign import ccall unsafe  "Compression.h GetDictionary"            c_GetDictionary            :: CMethod -> IO MemSize
+foreign import ccall unsafe  "Compression.h GetBlockSize"             c_GetBlockSize             :: CMethod -> IO MemSize
 
 -- |Set memory used to compress/decompress, dictionary or block size of method given
-foreign import ccall unsafe  "Compression.h SetCompressionMem"   c_SetCompressionMem   :: CMethod -> MemSize -> CMethod -> IO Int
-foreign import ccall unsafe  "Compression.h SetDecompressionMem" c_SetDecompressionMem :: CMethod -> MemSize -> CMethod -> IO Int
-foreign import ccall unsafe  "Compression.h SetDictionary"       c_SetDictionary       :: CMethod -> MemSize -> CMethod -> IO Int
-foreign import ccall unsafe  "Compression.h SetBlockSize"        c_SetBlockSize        :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h SetCompressionMem"        c_SetCompressionMem        :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h SetDecompressionMem"      c_SetDecompressionMem      :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h SetMinDecompressionMem"   c_SetMinDecompressionMem   :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h SetDictionary"            c_SetDictionary            :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h SetBlockSize"             c_SetBlockSize             :: CMethod -> MemSize -> CMethod -> IO Int
 
 -- |Put upper limit to memory used to compress/decompress, dictionary or block size of method given
-foreign import ccall unsafe  "Compression.h LimitCompressionMem"   c_LimitCompressionMem   :: CMethod -> MemSize -> CMethod -> IO Int
-foreign import ccall unsafe  "Compression.h LimitDecompressionMem" c_LimitDecompressionMem :: CMethod -> MemSize -> CMethod -> IO Int
-foreign import ccall unsafe  "Compression.h LimitDictionary"       c_LimitDictionary       :: CMethod -> MemSize -> CMethod -> IO Int
-foreign import ccall unsafe  "Compression.h LimitBlockSize"        c_LimitBlockSize        :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h LimitCompressionMem"      c_LimitCompressionMem      :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h LimitDecompressionMem"    c_LimitDecompressionMem    :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h LimitMinDecompressionMem" c_LimitMinDecompressionMem :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h LimitDictionary"          c_LimitDictionary          :: CMethod -> MemSize -> CMethod -> IO Int
+foreign import ccall unsafe  "Compression.h LimitBlockSize"           c_LimitBlockSize           :: CMethod -> MemSize -> CMethod -> IO Int
 
 
 ----------------------------------------------------------------------------------------------------

@@ -1,17 +1,18 @@
 EXPORTS
   SetCompressionThreads
   Set_compress_all_at_once
-  UpdateCRC
-  CalcCRC
-  lzma_compress
-  lzma_decompress
+  CrcUpdate
+  Fast_AesCtr_Code
+  lzma_compress2
+  lzma_decompress2
   ppmd_compress2
   ppmd_decompress2
-  grzip_compress
-  grzip_decompress
+  GRZip_CompressBlock
+  GRZip_DecompressBlock
+  GRZip_GetAdaptiveBlockSize
   lzp_compress
   lzp_decompress
   dict_compress
   dict_decompress
-  rep_compress
-  rep_decompress
+;  rep_compress
+;  rep_decompress

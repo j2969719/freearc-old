@@ -17,19 +17,17 @@ extern "C" {
 #define INSERT(routine,locking)                                                                                               \
                                                                                                                               \
 extern "C" {                                                                                                                  \
-int routine (int ENCODE, int order, MemSize mem, int MRMethod, MemSize chunk, CALLBACK_FUNC *callback, void *auxdata)         \
+int routine (int ENCODE, int order, MemSize mem, int MRMethod, MemSize, CALLBACK_FUNC *callback, void *auxdata)               \
 {                                                                                                                             \
   locking;                                                                                                                    \
-  _PPMD_FILE fpIn (callback, auxdata, compress_all_at_once? (ENCODE? chunk : chunk/8*9+1000) : BUFFER_SIZE);                  \
-  fpIn.fill();                                                                                                                \
-  _PPMD_FILE fpOut(callback, auxdata, compress_all_at_once? (ENCODE? chunk/8*9+1000 : chunk) : BUFFER_SIZE);                  \
+  _PPMD_FILE fpIn (callback, auxdata, BUFFER_SIZE);                                                                           \
+  _PPMD_FILE fpOut(callback, auxdata, BUFFER_SIZE);                                                                           \
   if ( !StartSubAllocator(mem) ) {                                                                                            \
     return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;                                                                                 \
   }                                                                                                                           \
   ENCODE? EncodeFile (&fpOut, &fpIn, order, MR_METHOD(MRMethod))                                                              \
         : DecodeFile (&fpOut, &fpIn, order, MR_METHOD(MRMethod));                                                             \
   StopSubAllocator();                                                                                                         \
-  fpIn.free();                                                                                                                \
   fpOut.flush();                                                                                                              \
   return mymin(_PPMD_ERROR_CODE(&fpIn), _PPMD_ERROR_CODE (&fpOut));                                                           \
 }                                                                                                                             \
@@ -119,6 +117,18 @@ int PPMD_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
   return ppmd_dispatch (TRUE, order, mem, MRMethod, chunk, callback, auxdata);
 }
 
+// Изменить потребность в памяти, заодно оттюнинговав order
+void PPMD_METHOD::SetCompressionMem (MemSize _mem)
+{
+  if (_mem==0)  return;
+  _mem = (_mem>1*mb+MIN_MEM? _mem-1*mb : MIN_MEM);
+  order  =  mymax(MIN_O, mymin(MAX_O, order + int (log(double(_mem)/mem) / log(double(2)) * 4)));
+  mem = _mem;
+}
+
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
+
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_PPMD)
 void PPMD_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
@@ -127,17 +137,6 @@ void PPMD_METHOD::ShowCompressionMethod (char *buf, bool purify)
   showMem (chunk, ChunkStr);
   sprintf (buf, "ppmd:%d:%s%s%s%s", order, MemStr, MRMethod==2? ":r2": (MRMethod==1? ":r":""), chunk?":c":"", chunk?ChunkStr:"");
 }
-
-// Изменить потребность в памяти, заодно оттюнинговав order
-void PPMD_METHOD::SetCompressionMem (MemSize _mem)
-{
-  if (_mem==0)  return;
-  order  +=  int (log(double(_mem)/mem) / log(double(2)) * 4);
-  mem = _mem;
-}
-
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа PPMD_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах

@@ -4,7 +4,7 @@ ALL: $(TEMPDIR)/C_Dict.o
 
 CODE_FLAGS = -fno-rtti -Wall \
                 -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
-OPT_FLAGS   = -O3 -march=i486 -mtune=pentiumpro \
+OPT_FLAGS   = -O3 \
               -fomit-frame-pointer -fstrict-aliasing \
               -ffast-math -fforce-addr
 DEBUG_FLAGS = -g0

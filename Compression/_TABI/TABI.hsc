@@ -4,6 +4,7 @@ module TABI (
   FUNCTION,
   C_FUNCTION,
   ELEMENT(..),
+  WideString(..),
 --  dump,
 --  dump_n,
   callret,               -- :: Value a => C_FUNCTION -> [ELEMENT] -> IO a
@@ -18,6 +19,7 @@ import Control.OldException
 import Control.Monad
 import Data.IORef
 import Data.Int
+import Data.Maybe
 import Data.Word
 import Foreign
 import Foreign.C
@@ -97,6 +99,16 @@ instance Value String where
   peekValue t ptr | t == #{const TABI_STRING}   =  peek (castPtr ptr :: Ptr CString) >>= peekCAString >>= return.Just
                   | otherwise                   =  return Nothing
 
+newtype WideString a = W a
+
+instance Value (WideString String) where
+  typeOf _ = #{const TABI_WIDE_STRING}
+  pokeValue ptr (W str)  =  do cstr <- raiseIfNull "failed malloc for TABI_WIDE_STRING" (newCWString str)
+                               poke (castPtr ptr) cstr
+                               return (free cstr)
+  peekValue t ptr | t == #{const TABI_WIDE_STRING}   =  peek (castPtr ptr :: Ptr CWString) >>= peekCWString >>= return.Just. W
+                  | otherwise                        =  return Nothing
+
 instance Value (Ptr a) where
   typeOf _ = #{const TABI_PTR}
   pokeValue ptr a  =  poke (castPtr ptr) a >> return doNothing
@@ -120,19 +132,27 @@ foreign import ccall safe "wrapper"
 foreign import ccall "dynamic"
    mkFUNCTION_DYNAMIC :: FunPtr C_FUNCTION -> C_FUNCTION
 
+instance Value C_FUNCTION where
+  typeOf _ = #{const TABI_FUNCPTR}
+  -- Write pointer to C_FUNCTION to memory
+  pokeValue ptr c_callback =  do funptr_c_callback <- mkFUNCTION_WRAPPER c_callback
+                                 poke (castPtr ptr) funptr_c_callback
+                                 return (freeHaskellFunPtr funptr_c_callback)
+  -- Read pointer to C_FUNCTION
+  peekValue t ptr | t == #{const TABI_FUNCPTR}  =
+                                                   do c_callback <- mkFUNCTION_DYNAMIC `fmap` peek (castPtr ptr)
+                                                      return (Just c_callback)
+                  | otherwise                   =  return Nothing
+
+
 instance Value FUNCTION where
   typeOf _ = #{const TABI_FUNCPTR}
   -- Write to memory C wrapper around Haskell FUNCTION
   pokeValue ptr callback =  do let c_callback params  =  fromIntegral `fmap` callback params
-                               funptr_c_callback <- mkFUNCTION_WRAPPER c_callback
-                               poke (castPtr ptr) funptr_c_callback
-                               return (freeHaskellFunPtr funptr_c_callback)
+                               pokeValue ptr (c_callback :: C_FUNCTION)
   -- Read pointer to C_FUNCTION and convert it to Haskell FUNCTION
-  peekValue t ptr | t == #{const TABI_FUNCPTR}  =
-                                                   do c_callback <- mkFUNCTION_DYNAMIC `fmap` peek (castPtr ptr)
-                                                      let callback params  =  fromIntegral `fmap` c_callback params
-                                                      return (Just callback)
-                  | otherwise                   =  return Nothing
+  peekValue t ptr = do c_callback  <- peekValue t ptr
+                       return$ fmap (fmap fromIntegral.) (c_callback :: Maybe C_FUNCTION)
 
 
 
@@ -186,7 +206,7 @@ call server params = do
 
 
 -- |Unmarshall required parameter
-required params name        =  parameter params name (raise ("required parameter "++name++" not found"))
+required params name        =  parameter params name (raise ("required parameter <<"++name++">> not found"))
 
 -- |Unmarshall optional parameter with default value deflt
 optional params name deflt  =  parameter params name (return deflt)
@@ -199,7 +219,7 @@ parameter params name default_action = do
   v <- peekValue t (valueField ptr)
   case v of
     Just value -> return value
-    Nothing    -> raise ("parameter "++name++": type mismatch ("++show t++")")
+    Nothing    -> raise ("parameter <<"++name++">>: type mismatch (expected "++show (typeOf (fromJust v))++", actual "++show t++")")
 
 -- |Search C array of TABI_ELEMENTs for element having given name
 find c_params name = go c_params

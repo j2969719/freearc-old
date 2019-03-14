@@ -272,6 +272,7 @@ int SETUP(const unsigned char *key, int keylen, int num_rounds, symmetric_key *s
     *rk++ = *rrk++;
     *rk   = *rrk;
 #endif /* ENCRYPT_ONLY */
+    j++; /* suppress unused-var warning */
 
     return CRYPT_OK;
 }

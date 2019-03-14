@@ -1,5 +1,5 @@
 make
-cd External
+cd LZ4
 make
 cd ..
 cd LZP
@@ -11,9 +11,6 @@ cd ..
 cd Delta
 make
 cd ..
-cd DisPack
-make
-cd ..
 cd MM
 make
 cd ..
@@ -21,6 +18,9 @@ cd Tornado
 make
 cd ..
 cd Dict
+make
+cd ..
+cd DisPack
 make
 cd ..
 cd PPMD
@@ -32,9 +32,18 @@ cd ..
 cd LZMA2
 make
 cd ..
+cd External
+make
+cd ..
 cd 4x4
 make
 cd ..
+cd CLS
+make
+cd ..
 cd _Encryption
+make
+cd ..
+cd _Examples
 make
 cd ..

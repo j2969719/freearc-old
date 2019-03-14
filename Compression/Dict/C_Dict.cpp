@@ -16,7 +16,7 @@ int dict_compress (MemSize BlockSize, int MinCompression, int MinWeakChars, int 
         unsigned InSize, OutSize;     // количество байт во входном и выходном буфере, соответственно
         InSize=x;                     // impossible: In = (BYTE*) realloc(In,InSize=x);
         x = DictEncode(In,InSize,&Out,&OutSize,MinWeakChars,MinLargeCnt,MinMediumCnt,MinSmallCnt,MinRatio);
-        if (x || OutSize/MinCompression>=InSize/100) {
+        if (x  ||  MinCompression>0 && OutSize>=(double(InSize)*MinCompression)/100) {
             // упаковать данные [достаточно хорошо] не удалось, запишем вместо них исходные данные
             int WrSize=-InSize;
             BigFreeAndNil(Out);
@@ -47,7 +47,7 @@ int dict_decompress (MemSize BlockSize, int MinCompression, int MinWeakChars, in
   int x;            // код произошедшей ошибки
   for(;;) {
     int InSize; unsigned OutSize;   // количество байт во входном и выходном буфере, соответственно
-    checked_read (&InSize, sizeof(InSize));
+    checked_eof_read (&InSize, sizeof(InSize));
     if (InSize<0) {
         // скопируем неупакованные данные
         In = (BYTE*) BigAlloc(-InSize);
@@ -114,6 +114,8 @@ int DICT_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
                   (BlockSize, MinCompression, MinWeakChars, MinLargeCnt, MinMediumCnt, MinSmallCnt, MinRatio, callback, auxdata);
 }
 
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DICT)
 void DICT_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
@@ -129,8 +131,6 @@ void DICT_METHOD::ShowCompressionMethod (char *buf, bool purify)
     sprintf (buf, "dict:%s%s%s%s%s%s%s", BlockSizeStr, MinCompressionStr, MinWeakCharsStr,
                                          MinLargeCntStr, MinMediumCntStr, MinSmallCntStr, MinRatioStr);
 }
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа DICT_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах

@@ -1,6 +1,8 @@
 #include "URL.h"
 #include "Compression/Compression.h"
 
+#define FREEARC_USER_AGENT "FreeArc/0.67"
+
 // ****************************************************************************
 // ** URL reading library
 // ****************************************************************************
@@ -81,14 +83,14 @@ URL *url_init (char *_url)
     // инициализируем WinInet
     hInternet = hInternet? hInternet :
            InternetOpenA(
-             "FreeArc/0.666",
+             FREEARC_USER_AGENT,
              proxy? INTERNET_OPEN_TYPE_PROXY : INTERNET_OPEN_TYPE_PRECONFIG,
              proxy, bypass_list,
              0);
     if (!hInternet)  {url_close(url); return NULL;}
 
     // True, если это ftp url
-    url->isFTP = start_with (_url, "ftp://");
+    url->isFTP  =  (start_with (_url, "ftp://") != NULL);
 
     if (url->isFTP) {
         char *server = url->url + 6;
@@ -219,8 +221,16 @@ URL *url_open (char *_url)
 {
     URL *url = url_init(_url);
 
-    url->size = url_detect_size (url);
-    if (url->size < 0)   {url_close(url); return NULL;}
+    url->IsCheckNews  =  (strstr(_url,"freearc.org/CheckNews.") != NULL);
+
+    url->size = URL_BUFSIZE;
+    if (url->IsCheckNews) {
+        url->size = url_readp (url, 0, url->buf, URL_BUFSIZE);
+        url_seek (url, 0); }
+    if (url->size >= URL_BUFSIZE)
+        url->size = url_detect_size (url);
+    if (url->size < 0)
+        {url_close(url); return NULL;}
 
     return url;
 }
@@ -231,6 +241,13 @@ int url_readp (URL *url, int64 offset, char *buf, int size)
     if (size==0)  return 0;
     if (!url)     return -1;
 
+    // Small files/reads for CheckNews are served directly from url->buf
+    if (url->IsCheckNews && offset==0 && url->size<URL_BUFSIZE) {
+        int bytes = min(size,min(url->size,URL_BUFSIZE));
+        memcpy (buf, url->buf, bytes);
+        return bytes;
+    }
+
     // End of data that should be read by the new operation.
     // If we asked exactly for 64kb/256kb/8mb - this is probably just beginning of large block,
     // so we switch to reading all the data until file end
@@ -240,7 +257,7 @@ int url_readp (URL *url, int64 offset, char *buf, int size)
     // Make connection to desired url. Continue previous read operation
     // if it finished exactly where we want to start, otherwise close its handle
     if (url->hURL && url->curpos!=offset)
-        InternetCloseHandle (url->hURL), url->hURL=NULL;
+        url_reset(url);
 
     BOOL new_hURL = (url->hURL==NULL);
     if (new_hURL) {
@@ -278,16 +295,23 @@ int url_readp (URL *url, int64 offset, char *buf, int size)
     }
 
     // Close read handle if we've read all the data asked by calling procedure
-    if (url->curpos == endpos)  InternetCloseHandle (url->hURL), url->hURL=NULL;
-
+    if (url->curpos == endpos)  url_reset(url);
     // If not all the data are read and we have chances to read something more - try it!
-    if (bytes<size && !(new_hURL && bytes==0))
+    if (!url->IsCheckNews && bytes<size && !(new_hURL && bytes==0))
     {
-        InternetCloseHandle (url->hURL), url->hURL=NULL;
+        url_reset(url);
         int ret = url_readp (url, offset+bytes, buf, size-bytes);
         return ret>=0? bytes+ret : ret;
     }
-    return bytes;
+     return bytes;
+}
+
+
+void url_reset (URL *url)
+{
+    if (!url) return;
+    InternetCloseHandle (url->hURL);
+    url->hURL = NULL;
 }
 
 
@@ -345,7 +369,7 @@ URL* url_open (char *_url)
 
     /* some servers don't like requests that are made without a user-agent
        field, so we provide one */
-    curl_easy_setopt (url->curl_handle, CURLOPT_USERAGENT, "FreeArc/0.666");
+    curl_easy_setopt (url->curl_handle, CURLOPT_USERAGENT, FREEARC_USER_AGENT);
 
     /* specify URL to get */
     curl_easy_setopt (url->curl_handle, CURLOPT_URL, url->url);
@@ -398,6 +422,10 @@ int url_readp (URL *url, int64 offset, char *buf, int size)
     return ptr-buf;
 }
 
+void url_reset (URL *url)
+{
+}
+
 void url_close (URL *url)
 {
     if (!url) return;
@@ -414,6 +442,5 @@ void url_close (URL *url)
 
 int64 url_size (URL *url)                      {return url? url->size   : 0;}
 int64 url_pos  (URL *url)                      {return url? url->curpos : 0;}
-void  url_seek (URL *url, int64 newpos)        {if (url)  url->curpos = newpos;}
+void  url_seek (URL *url, int64 newpos)        {if (url)  url->curpos = newpos, url_reset(url);}
 int   url_read (URL *url, char *buf, int size) {return url? url_readp (url, url->curpos, buf, size) : -1;}
-

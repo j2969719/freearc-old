@@ -38,20 +38,6 @@ import ArhiveStructure
 import Arhive7zLib
 
 
-{-# NOINLINE arcOpen #-}
--- |Открыть архив FreeArc/7z.dll
-arcOpen command arcname = do
-  szArc <- try$ szOpenArchive command arcname   -- попробуем открыть архив через 7z.dll
-  let Right (sz,szFooter) = szArc               -- временно: пока myOpenArchive завершает программу вместо генерации исключения
-  if isRight szArc   then return (Left sz, szFooter)  else do
-  myArc <- try$ myOpenArchive command arcname   -- ... а теперь как архив FreeArc
-  case (szArc,myArc) of                         -- а теперь выберем из них тот, что начинается раньше (поскольку внутри одного архива может быть другой и притом без сжатия)
-       (Left _,               Left my)              ->  throwIO my
-       (Right (sz,szFooter),  Left _)               ->  return (Left  sz, szFooter)
-       (Left _,               Right (my,myFooter))  ->  return (Right my, myFooter)
-       (Right (sz,szFooter),  Right (my,myFooter))  ->  return$ if ftSFXSize szFooter <= ftSFXSize myFooter  then (Left sz, szFooter)  else (Right my, myFooter)
-
-
 {-# NOINLINE archiveReadInfo #-}
 -- |Прочитать каталог архива FreeArc/7z.dll
 archiveReadInfo command               -- выполняемая команда со всеми её опциями
@@ -65,6 +51,26 @@ archiveReadInfo command               -- выполняемая команда со всеми её опциями
   case archive of
     Left  sz -> szReadInfo        sz footer filter_f processFooterInfo arcname
     Right my -> myArchiveReadInfo my footer command arc_basedir disk_basedir filter_f processFooterInfo
+
+
+{-# NOINLINE arcOpen #-}
+-- |Открыть архив FreeArc/7z.dll
+arcOpen command arcname = do
+  savedErr <- ref Nothing
+  savedErrcodeHandler <- val errcodeHandler
+  errcodeHandler =: (\err -> do savedErr =: Just err; fail "")
+  szArc <- try$ szOpenArchive (Left command) arcname   -- попробуем открыть архив через 7z.dll
+  myArc <- try$ myOpenArchive command arcname          -- ... а теперь как архив FreeArc
+  errcodeHandler =: savedErrcodeHandler
+  err <- val savedErr
+  case (szArc,myArc,err) of                                -- а теперь выберем из них тот, что начинается раньше (поскольку внутри одного архива может быть другой и притом без сжатия)
+       (Left _,               Left _,       Just err)  ->  registerError err
+       (Left _,               Left my,             _)  ->  throwIO my
+       (Right (sz,szFooter),  Left _,              _)  ->  return (Left  sz, szFooter)
+       (Left _,               Right (my,myFooter), _)  ->  return (Right my, myFooter)
+       (Right (sz,szFooter),  Right (my,myFooter), _)  ->  if ftSFXSize szFooter < ftSFXSize myFooter  &&  False   -- fix01: на данный момент FreeArc распознаёт свои архивы только если сигнатура архива находится в самом конце файла
+                                                             then do archiveClose my; return (Left sz, szFooter)
+                                                             else do szArcClose   sz; return (Right my, myFooter)
 
 
 -- |Закрытие архива FreeArc/7z.dll
@@ -126,7 +132,9 @@ archiveWriteDir dirdata     -- список пар (block :: ArchiveBlock, directory :: [
                 arcpos      -- позиция в архиве, где начинается этот каталог
                 (receiveBuf -- "(buf,size) <- receiveBuf" получает для работы очередной буфер размером `size`
                 ,sendBuf)   -- "sendBuf buf size len" посылает сформированные в буфере данные на выход
+                nodates     -- не записывать в архив даты модификации файлов?
                 = do
+#ifndef FREEARC_DLL
   debugLog "\n  Writing directory"
   let blocks      = map fst dirdata            :: [ArchiveBlock]  -- список солид-блоков, попавших в данный каталог
       crcfilelist = concatMap snd dirdata      :: [FileWithCRC]   -- объединённый список файлов - в том порядке, в каком они расположены в блоках!
@@ -158,11 +166,12 @@ archiveWriteDir dirdata     -- список пар (block :: ArchiveBlock, directory :: [
   writeList   (map unixifyPath dirnames)
 
   -- 3. Закодируем отдельно каждое оставшееся поле в CompressedFile/FileInfo
-    -- to do: добавить RLE-кодирование полей?
+  -- to do: добавить RLE-кодирование полей?
+  let fiTimeInternal  =  (if nodates  then const aMINIMUM_POSSIBLE_FILETIME  else fiTime)
   writeList$ map (fpBasename.fiStoredName)  filelist     -- имена файлов
   writeIntegers                             dir_numbers  -- номера каталогов
   writeList$ map fiSize                     filelist     -- размеры файлов
-  writeList$ map fiTime                     filelist     -- времена создания
+  writeList$ map fiTimeInternal             filelist     -- времена модификации
   writeList$ map fiIsDir                    filelist     -- признаки каталога
   -- cfArcBlock и cfPos кодируются неявно, путём сортировки по этим двум полям
   writeList$ map fwCRC                      crcfilelist  -- CRC
@@ -175,6 +184,8 @@ archiveWriteDir dirdata     -- список пар (block :: ArchiveBlock, directory :: [
   -- Это приводит к вылету Arc.exe!!! - всё ещё?
   when (length filelist >= 10000) performGC  -- Соберём мусор, если блок содержит достаточно много файлов
   debugLog "  Directory written"
+#endif
+  return ()
 
 
 -- Создание по списку файлов - списка уникальных каталогов + номер каталога для каждого файла в списке
@@ -241,7 +252,7 @@ archiveReadDir arc_basedir   -- базовый каталог в архиве
 
   -- 2. Прочитаем имена каталогов
   total_dirs    <-  readLength                    -- Сколько всего имён каталогов сохранено в этом оглавлении архива
-  storedName    <-  readList total_dirs >>== toP >>== fmap make_OS_native_path -- Массив имён каталогов
+  storedName    <-  readList total_dirs >>== map (remove_unsafe_dirs>>>make_OS_native_path) >>== toP -- Массив имён каталогов
 
   -- 3. Прочитаем списки данных для каждого поля в CompressedFile/FileInfo
   let total_files = sum num_of_files              -- суммарное кол-во файлов в каталоге
@@ -289,8 +300,8 @@ archiveReadDir arc_basedir   -- базовый каталог в архиве
   let make_fi dir name size time dir_flag =
         if dirIncluded dir && filter_f fileinfo  then Just fileinfo  else Nothing
 
-        where fileinfo = FileInfo { fiFilteredName  =  if arc_basedir>""           then fiFilteredName  else fiStoredName
-                                  , fiDiskName      =  if disk_basedir>"" || ep/=3 then fiDiskName      else fiFilteredName
+        where fileinfo = FileInfo { fiFilteredName  =  fiFilteredName
+                                  , fiDiskName      =  fiDiskName
                                   , fiStoredName    =  fiStoredName
                                   , fiSize          =  size
                                   , fiTime          =  time
@@ -298,9 +309,9 @@ archiveReadDir arc_basedir   -- базовый каталог в архиве
                                   , fiIsDir         =  dir_flag
                                   , fiGroup         =  fiUndefinedGroup
                                   }
-              fiStoredName    =  packFilePathPacked2 stored   (fpPackedFullname stored)   name
-              fiFilteredName  =  packFilePathPacked2 filtered (fpPackedFullname filtered) name
-              fiDiskName      =  packFilePathPacked2 disk     (fpPackedFullname disk)     name
+              fiStoredName    =                                   packFilePathPacked2 stored   (fpPackedFullname stored)   name
+              fiFilteredName  =  if arc_basedir>""           then packFilePathPacked2 filtered (fpPackedFullname filtered) name  else fiStoredName
+              fiDiskName      =  if disk_basedir>"" || ep/=3 then packFilePathPacked2 disk     (fpPackedFullname disk)     name  else fiFilteredName
               stored   = storedInfo  !:dir
               filtered = filteredInfo!:dir
               disk     = diskInfo    !:dir

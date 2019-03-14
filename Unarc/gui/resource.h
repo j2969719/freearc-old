@@ -17,6 +17,7 @@
 #define IDS_STRING_SPEED                112
 #define IDS_STRING_PROGRESS_CAPTION     113
 #define IDS_STRING_MAIN_CAPTION         114
+#define IDD_DIALOG_PASSWORD             115
 #define IDC_STATIC_DESTINATION_DIRECTORY 1001
 #define IDBROWSE                        1002
 #define IDC_EDIT_PATH                   1003
@@ -42,14 +43,15 @@
 #define IDC_STATIC_SPEED                1025
 #define IDC_STATIC_FOLDER               1028
 #define IDC_STATIC_URL                  1029
+#define IDC_PASSWORD_EDIT               1030
 
 // Next default values for new objects
-// 
+//
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        109
+#define _APS_NEXT_RESOURCE_VALUE        116
 #define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1030
+#define _APS_NEXT_CONTROL_VALUE         1031
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

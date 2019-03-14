@@ -149,10 +149,17 @@ runFuncP p receive_f send_back_f send_f receive_back_f  =
           (PairFunc undefined      send_f)
           (PairFunc receive_back_f undefined))
 
+-- |Создать pipe, состоящий просто из каналов "туда" и "обратно"
+newPipe = do
+  chan      <- newChan    -- Канал "туда"
+  chan_back <- newChan    -- Канал "обратно"
+  return (Pipe Nothing Nothing chan chan_back chan chan_back)
+
 {-# NOINLINE createP #-}
 {-# NOINLINE runP #-}
 {-# NOINLINE runAsyncP #-}
 {-# NOINLINE runFuncP #-}
+{-# NOINLINE newPipe #-}
 
 
 -- Пример использования:

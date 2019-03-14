@@ -37,19 +37,15 @@ public:
 #ifndef FREEARC_DECOMPRESS_ONLY
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
-  // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_TTA)
-  virtual void ShowCompressionMethod (char *buf, bool purify);
-
   // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return 2*mb;}
-  virtual MemSize GetDictionary         (void)         {return 0;}
-  virtual MemSize GetBlockSize          (void)         {return 0;}
-  virtual void    SetCompressionMem     (MemSize mem)  {}
-  virtual void    SetDecompressionMem   (MemSize mem)  {}
-  virtual void    SetDictionary         (MemSize dict) {}
-  virtual void    SetBlockSize          (MemSize bs)   {}
+  virtual MemSize GetCompressionMem        (void)               {return 2*mb;}
+  virtual void    SetCompressionMem        (MemSize mem)        {}
+  virtual void    SetMinDecompressionMem   (MemSize mem)        {}
 #endif
-  virtual MemSize GetDecompressionMem   (void)         {return 1*mb;}
+  virtual MemSize GetDecompressionMem      (void)               {return 1*mb;}
+
+  // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_MM)
+  virtual void ShowCompressionMethod (char *buf, bool purify);
 };
 
 // Разборщик строки метода сжатия MM

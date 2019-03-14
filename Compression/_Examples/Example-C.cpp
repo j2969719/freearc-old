@@ -1,7 +1,7 @@
 /*
- *  Example program of using Compression-2005 library with C/C++
+ *  Example program of using FreeArc Unified Compression Library with C/C++
  *
- *  This program implements simple file-to-file compressor and decompressor
+ *  This program implements simplest compressor/decompressor
  *  Run program without parameters to see it's syntax
  */
 
@@ -11,61 +11,35 @@
 
 #include "../Compression.h"
 
-#if defined(WIN32) || defined(OS2) || defined(MSDOS)
-#include <fcntl.h>
-#include <io.h>
-#define set_binary_mode(file)                   setmode(fileno(file),O_BINARY)
-#else
-#define set_binary_mode(file)
-#endif
-
-// Input/output files and callbacks for (de)compression functions
-FILE *infile, *outfile;
-int read_func (void *buf, int size)
+// Callback for compression/decompression functions
+static int callback (const char *what, void *buf, int size, void *)
 {
-  return fread(buf,1,size,infile);
-}
-int write_func (void *buf, int size)
-{
-  return fwrite(buf,1,size,outfile)==size? size : FREEARC_ERRCODE_WRITE;
-}
-
-int process (char *method)
-{
-  int result;  double t;
-  if (strcmp (method, "d"))
-    result = CompressWithHeader (method, read_func, write_func, &t);
-  else
-    result = DecompressWithHeader (read_func, write_func, &t);
-  if (result) {fprintf (stderr, "(De)compression error %d!\n", result); return EXIT_FAILURE;}
-  return EXIT_SUCCESS;
+  if      (strequ(what,"read"))    return fread(buf,1,size,stdin);
+  else if (strequ(what,"write"))   return fwrite(buf,1,size,stdout)==size? size : FREEARC_ERRCODE_WRITE;
+  else                             return FREEARC_ERRCODE_NOT_IMPLEMENTED;
 }
 
 int main(int argc, char *argv[])
 {
+  SetCompressionThreads(8);
   if (argc==2)
   {
-    infile  = stdin;   set_binary_mode(infile);
-    outfile = stdout;  set_binary_mode(outfile);
-    int result = process (argv[1]);
-    return result;
-  }
-  else if (argc==4)
-  {
-    infile  = fopen (argv[2], "rb");   if (infile==NULL)  {printf ("Can't open input file %s!\n", argv[2]); return EXIT_FAILURE;}
-    outfile = fopen (argv[3], "wb");   if (outfile==NULL) {printf ("Can't create output file %s!\n", argv[3]); return EXIT_FAILURE;}
-    int result = process (argv[1]);
-    fclose (infile);
-    fclose (outfile);
-    return result;
+    set_binary_mode(stdin);
+    set_binary_mode(stdout);
+    int result = strcasecmp (argv[1], "d")? CompressWithHeader (argv[1], callback, NULL)
+                                          : DecompressWithHeader (callback, NULL);
+    if (result) {fprintf (stderr, "(De)compression error %d!\n", result); return EXIT_FAILURE;}
+    return EXIT_SUCCESS;
   }
   else
   {
-    puts("Usage, compression: Compressor method <infile >outfile\n"
-         "                 or Compressor method infile outfile\n"
-         "       decompression: Compressor d <infile >outfile\n"
-         "                   or Compressor d infile outfile\n"
-         "Supported methods are \"ppmd:...\", \"lzma:...\", \"grzip:...\"");
+    printf ("Compressor v2.2 (2012-01-15) - demonstration of FreeArc Unified Compression Library\n"
+            "\n"
+            "Usage, compression: Compressor method <infile >outfile\n"
+            "       decompression: Compressor d <infile >outfile\n"
+            "\n"
+            "Note: all FreeArc compression methods are supported, for example rep:512m+4x4:lzma:ht4:8m\n"
+           );
     return argc==1? EXIT_SUCCESS : EXIT_FAILURE;
   }
 }

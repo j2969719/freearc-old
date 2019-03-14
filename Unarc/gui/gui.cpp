@@ -17,8 +17,9 @@
 
 #pragma warning(disable: 4996)
 
-static const UINT WM_SETOBJECT = WM_USER + 1;
+static const UINT WM_SETOBJECT       = WM_USER + 1;
 static const UINT WM_CONFIRM_REPLACE = WM_USER + 2;
+static const UINT WM_ASK_PASSWORD    = WM_USER + 3;
 static const WORD MAX_PROGRESS_VALUE = 65535U;
 static const size_t MAX_MESSAGE_LENGTH = MY_FILENAME_MAX+256;
 bool GUI::isInitialized = false;
@@ -39,6 +40,7 @@ static GUI *globalGUI = 0;
 static BOOL CALLBACK DialogProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static BOOL CALLBACK ProgressProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static BOOL CALLBACK ConfirmReplaceProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+static BOOL CALLBACK PasswordDialogProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static void ConvertSecondsToHMS(int seconds, int *h, int *m, int *s);
 static void InitConfirmReplaceDialog(HWND hWnd, TCHAR *filename, uint64 size, time_t modified, HICON *hIcon);
 static void CenterWindow(HWND hWnd);
@@ -107,7 +109,7 @@ GUI::GUI()
 		isInitialized = true;
 
 		// Load hand cursor
-		hCursorHand = LoadCursor(NULL, MAKEINTRESOURCE(IDC_HAND));
+		hCursorHand = LoadCursor(NULL, IDC_HAND);
 	}
 
 	button = 0;
@@ -123,6 +125,7 @@ GUI::GUI()
 	hEvent = 0;
 	*filename = 0;
 	msg = 0;
+	silent = 1;     // Until main window is created
 }
 
 GUI::~GUI()
@@ -282,14 +285,15 @@ char* GUI::GetOutDir()
 	return destinationDirectory_utf8;
 }
 
-void GUI::BeginProgress(uint64 totalBytes)
+bool GUI::BeginProgress(uint64 totalBytes)
 {
 	this->totalBytes = totalBytes;
 	hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-	if (silent==1)  return;
+	if (silent==1)  return progressResult;
 	thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ProgressThread, this, 0, NULL);
 	WaitForSingleObject(hEvent, INFINITE);
 	tickCountOfBegin = GetTickCount();
+        return progressResult;
 }
 
 bool GUI::ProgressFile(bool isdir, const char *operation, TCHAR *_filename, uint64 filesize)
@@ -301,7 +305,7 @@ bool GUI::ProgressFile(bool isdir, const char *operation, TCHAR *_filename, uint
 bool GUI::ProgressWrite(uint64 _writtenBytes)
 {
 	writtenBytes = _writtenBytes;
-	if (writtenBytes - lastWrittenBytes >= 65536)
+	if (writtenBytes - lastWrittenBytes >= PROGRESS_CHUNK_SIZE)
 		ShowProgress();
 	return progressResult;
 }
@@ -322,10 +326,11 @@ bool GUI::ShowProgress()
 	// Show name of file currently extracted
 	SetDlgItemText(hWndProgress, IDC_STATIC_FILENAME, filename);
 
-	// Show progress window caption
+	// Show progress window caption and Win7 taskbar progress indicator
 	int percents = (totalBytes == 0)? 0 : (int)(double(readBytes) * 100/totalBytes);
 	_stprintf(msg, formatProgressCaption, percents, archiveFileName);
 	SetWindowText(hWndProgress, msg);
+	Taskbar_SetWindowProgressValue(hWndProgress, readBytes, totalBytes);
 
 	// Show elapsed and estimated times
 	double elapsedSeconds = ((GetTickCount() - tickCountOfBegin)/1000);
@@ -398,6 +403,28 @@ char GUI::AskOverwrite(TCHAR *filename, uint64 size, time_t modified)
 	WaitForSingleObject(hEvent, INFINITE);
 
 	return replaceDialogResult;
+}
+
+char GUI::AskPassword (char *_pwd, int _pwdSize)
+{
+	pwd     = _pwd;
+	pwdSize = _pwdSize;
+	ResetEvent(hEvent);
+
+	//Silent mode: duplicated DialogBox call code
+	globalGUI = this;
+	if (silent==1)
+	{
+		AskPasswordResult = (char)DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_DIALOG_PASSWORD), NULL, PasswordDialogProc);
+		SetEvent(hEvent);
+	} else
+	{
+		PostMessage(hWndProgress, WM_ASK_PASSWORD, 0, 0);
+	}
+
+	WaitForSingleObject(hEvent, INFINITE);
+
+	return AskPasswordResult;
 }
 
 static void InitConfirmReplaceDialog(HWND hWnd, TCHAR *filename, uint64 size, time_t modified, HICON *hIcon)
@@ -537,6 +564,10 @@ static BOOL CALLBACK ProgressProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
 		gui->replaceDialogResult = (char)DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_DIALOG_CONFIRM), hWnd, ConfirmReplaceProc);
 		SetEvent(gui->hEvent);
 		return TRUE;
+	case WM_ASK_PASSWORD:
+		gui->AskPasswordResult = (char)DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_DIALOG_PASSWORD), hWnd, PasswordDialogProc);
+		SetEvent(gui->hEvent);
+		return TRUE;
 	case WM_INITDIALOG:
 		CenterWindow(hWnd);
 		Animate_OpenEx(GetDlgItem(hWnd, IDC_ANIMATE_COPY), GetModuleHandle(_T("shell32.dll")), MAKEINTRESOURCE(161));
@@ -599,9 +630,44 @@ static BOOL CALLBACK ConfirmReplaceProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 		return TRUE;
 	case WM_DESTROY:
 		DestroyIcon(gui->hFileIcon);
-		return true;
+		return TRUE;
 	}
 
+	return FALSE;
+}
+
+static BOOL CALLBACK PasswordDialogProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	GUI *gui = globalGUI;
+
+	switch (uMsg)
+	{
+	case WM_INITDIALOG:
+		CenterWindow(hWnd);
+		return TRUE;
+	case WM_COMMAND:
+		switch (LOWORD(wParam))
+		{
+		case IDOK:
+		        TCHAR *password = (TCHAR*) malloc(gui->pwdSize * sizeof(TCHAR));
+			if (GetDlgItemText (hWnd, IDC_PASSWORD_EDIT, password, gui->pwdSize))
+			{
+				utf16_to_utf8 (password, gui->pwd);
+			}
+			free(password);
+			EndDialog(hWnd, (INT_PTR)'y');
+			return TRUE;
+        	case IDCANCEL:
+			EndDialog(hWnd, (INT_PTR)'q');
+			return TRUE;
+		}
+		return FALSE;
+	case WM_CLOSE:
+		EndDialog(hWnd, (INT_PTR)'q');
+		return TRUE;
+	case WM_DESTROY:
+		return TRUE;
+	}
 	return FALSE;
 }
 

@@ -132,11 +132,12 @@ indicatorThread secs output =
         bytes <- bytes' b;  total <- total'
         bytes <- return (bytes `min` total)   -- bytes не должно превышать total
         -- Отношение объёма обработанных данных к общему объёму
-        let processed = total>0 &&& (fromIntegral bytes / fromIntegral total :: Double)
+        let processed | total>0   =  fromIntegral bytes / fromIntegral total :: Double
+                      | otherwise =  1   -- "Processed 0 bytes of 0 == 100%"
         secs <- return_real_secs
         sec0 <- val indicator_start_real_secs
         let remains  = if processed>0.001  then " "++showHMS(sec0+(secs-sec0)/processed-secs)  else ""
-            winTitle = "{"++trimLeft p++remains++"} " ++ (format winTitleMsg (takeFileName arcname))
+            winTitle = trimLeft p++remains++" | " ++ (format winTitleMsg (takeFileName arcname))
             p        = percents indicator bytes total
         output updateMode indicator indType winTitle b bytes total processed p
 
@@ -152,13 +153,13 @@ indicatorThread secs output =
 -- |Типы индикатора прогресса (молчаливый, проценты, десятые процента)
 data Indicator = NoIndicator | ShortIndicator | LongIndicator   deriving (Eq)
 
-bytes_per_sec = 1*mb  -- Typical (de)compression speed
+bytes_per_sec = 10*mb  -- Typical (de)compression speed
 
 -- |Выбрать индикатор прогресса, основываясь на показаниях свидетелей :)
 select_indicator command total_bytes  =  case (opt_indicator command)
   of "0"                                    ->  NoIndicator      -- опция "-i" - отключить индикатор!
-     _ | i total_bytes < bytes_per_sec*100  ->  ShortIndicator   -- индикатор в процентах, если общий объём данных меньше 100 мб (при этом в секунду обрабатывается больше одного процента данных)
-       | otherwise                          ->  LongIndicator    -- индикатор в десятых долях процента, если данных больше 100 мб
+     _ | i total_bytes < bytes_per_sec*100  ->  ShortIndicator   -- индикатор в процентах, если общий объём данных меньше 1000 мб (при этом в секунду обрабатывается больше одного процента данных)
+       | otherwise                          ->  LongIndicator    -- индикатор в десятых долях процента, если данных больше 1000 мб
 
 -- |Вывести индикатор прогресса в соответствии с выбранной точностью
 percents NoIndicator    current total  =  ""
@@ -178,14 +179,26 @@ indicator_len ShortIndicator = 4
 indicator_len LongIndicator  = 6
 
 -- |Format percent ratio with 2 digits
-ratio2 count 0     =  "0"
-ratio2 count total =  show$ count*100 `div` total
+ratio2 count 0     =  "100"     -- "Processed 0 bytes of 0 == 100%"
+ratio2 count total =  show$ ((toInteger count)*100) `div` (toInteger total)
 
 -- |Format percent ratio with 2+1 digits
-ratio3 count 0     =  "0.0"
-ratio3 count total =  case (show$ count*1000 `div` total) of
+ratio3 count 0     =  "100.0"   -- "Processed 0 bytes of 0 == 100%"
+ratio3 count total =  case (show$ ((toInteger count)*1000) `div` (toInteger total)) of
                         [digit]  -> "0." ++ [digit]
                         digits   -> init digits ++ ['.', last digits]
+
+-- |Format percent ratio with 2+2 digits
+ratio4 count 0     =  "100.00"   -- "Processed 0 bytes of 0 == 100%"
+ratio4 count total =  case (show$ ((toInteger count)*10000) `div` (toInteger total)) of
+                        [digit]          ->  "0.0" ++ [digit]
+                        [digit1,digit2]  ->  "0." ++ [digit1,digit2]
+                        digits           ->  dropEnd 2 digits ++ "." ++ lastElems 2 digits
+
+-- |Format percent ratio with 2+2 digits and rounding
+compression_ratio count 0     =  "100%"   -- "Processed 0 bytes of 0 == 100%"
+compression_ratio count total =  showFFloat (Just 2) ((i count)/(i total)*100::Double) "%"
+
 
 -- |Вывести число, отделяя тысячи, миллионы и т.д.: "1.234.567"
 show3 :: (Show a) => a -> [Char]
@@ -195,6 +208,8 @@ show3 = reverse.xxx.reverse.show
 
 {-# NOINLINE ratio2 #-}
 {-# NOINLINE ratio3 #-}
+{-# NOINLINE ratio4 #-}
+{-# NOINLINE compression_ratio #-}
 {-# NOINLINE show3 #-}
 
 
@@ -221,13 +236,13 @@ getUnixTime = do
 show_ratio cmd bytes cbytes =
   ""        ++ show3       (if (cmdType cmd == ADD_CMD) then bytes else cbytes) ++
    " => "   ++ show_bytes3 (if (cmdType cmd == ADD_CMD) then cbytes else bytes) ++ ". " ++
-   "Ratio " ++ ratio3 cbytes bytes ++ "%"
+   "Ratio " ++ compression_ratio cbytes bytes
 
 -- |Возвратить строку, описывающую заданное время
-showTime secs  =  showFFloat (Just 2) secs " secs"
+showTime secs  =  showFFloat (Just 2) secs " sec"
 
 -- |Возвратить строку, описывающую заданную скорость
-showSpeed bytes secs  =  show3(round$ i bytes/1000/secs) ++ " kB/s"
+showSpeed bytes secs  =  showFFloat (Just 2) (i bytes/secs/10^6) " mB/s"
 
 -- |Отформатировать время как H:MM:SS
 showHMS secs  =  show hour++":"++left_fill '0' 2 (show min)++":"++left_fill '0' 2 (show sec)
@@ -258,7 +273,6 @@ return_real_secs = do
   current_time  <- getClockTime
   return$ diffTimes current_time start_time
 
--- Вычитаем время, проведённое в паузе, из реального времени выполнения команды
 pause_real_secs = do
   refStartPauseTime =:: getClockTime
 
@@ -268,7 +282,11 @@ resume_real_secs = do
   let pause = diffTimes current_time start_time :: Double
   refStartArchiveTime .= (`addTime` pause)
 
+-- |Вычитает время, проведённое в паузе, из реального времени выполнения команды
 pauseTiming = bracket_ pause_real_secs resume_real_secs
+
+-- |На время переводит Win7+ индикатор прогресса в состояние паузы
+pauseTaskbar = bracket_ taskbar_Pause taskbar_Resume
 
 {-# NOINLINE diffTimes #-}
 {-# NOINLINE show_ratio #-}
@@ -290,42 +308,42 @@ msgStart cmd arcExist =
 
 msgStartGUI cmd arcExist =
                 case (cmd, cmdType cmd, arcExist) of
-                  ("ch", _,           _)      ->  "0433 Modifying archive %1"
+                  ("ch", _,           _)      ->  "0433 Modifying %1"
                   ("j",  _,           _)      ->  "0240 Joining archives to %1"
-                  ("d",  _,           _)      ->  "0435 Deleting files from archive %1"
-                  ("k",  _,           _)      ->  "0300 Locking archive %1"
-                  (_,    ADD_CMD,     False)  ->  "0437 Creating archive %1"
-                  (_,    ADD_CMD,     True)   ->  "0438 Updating archive %1"
-                  (_,    LIST_CMD,    _)      ->  "0439 Listing archive %1"
-                  (_,    TEST_CMD,    _)      ->  "0440 Testing archive %1"
-                  (_,    EXTRACT_CMD, _)      ->  "0441 Extracting files from archive %1"
-                  (_,    RECOVER_CMD, _)      ->  "0382 Repairing archive %1"
+                  ("d",  _,           _)      ->  "0435 Deleting from %1"
+                  ("k",  _,           _)      ->  "0300 Locking %1"
+                  (_,    ADD_CMD,     False)  ->  "0437 Creating %1"
+                  (_,    ADD_CMD,     True)   ->  "0438 Updating %1"
+                  (_,    LIST_CMD,    _)      ->  "0439 Listing %1"
+                  (_,    TEST_CMD,    _)      ->  "0440 Testing %1"
+                  (_,    EXTRACT_CMD, _)      ->  "0441 Extracting from %1"
+                  (_,    RECOVER_CMD, _)      ->  "0382 Repairing %1"
 
 msgFinishGUI cmd arcExist warnings@0 =
                 case (cmd, cmdType cmd, arcExist) of
                   ("ch", _,           _)      ->  "0238 SUCCESFULLY MODIFIED %1"
                   ("j",  _,           _)      ->  "0241 SUCCESFULLY JOINED ARCHIVES TO %1"
-                  ("d",  _,           _)      ->  "0229 FILES SUCCESFULLY DELETED FROM %1"
-                  ("k",  _,           _)      ->  "0301 SUCCESFULLY LOCKED ARCHIVE %1"
+                  ("d",  _,           _)      ->  "0229 FILES WERE SUCCESFULLY DELETED FROM %1"
+                  ("k",  _,           _)      ->  "0301 SUCCESFULLY LOCKED %1"
                   (_,    ADD_CMD,     False)  ->  "0443 SUCCESFULLY CREATED %1"
                   (_,    ADD_CMD,     True)   ->  "0444 SUCCESFULLY UPDATED %1"
                   (_,    LIST_CMD,    _)      ->  "0445 SUCCESFULLY LISTED %1"
                   (_,    TEST_CMD,    _)      ->  "0232 SUCCESFULLY TESTED %1"
-                  (_,    EXTRACT_CMD, _)      ->  "0235 FILES SUCCESFULLY EXTRACTED FROM %1"
-                  (_,    RECOVER_CMD, _)      ->  "0383 SUCCESFULLY REPAIRED ARCHIVE %1"
+                  (_,    EXTRACT_CMD, _)      ->  "0235 FILES WERE SUCCESFULLY EXTRACTED FROM %1"
+                  (_,    RECOVER_CMD, _)      ->  "0383 SUCCESFULLY REPAIRED %1"
 
 msgFinishGUI cmd arcExist warnings =
                 case (cmd, cmdType cmd, arcExist) of
                   ("ch", _,           _)      ->  "0239 %2 WARNINGS WHILE MODIFYING %1"
                   ("j",  _,           _)      ->  "0242 %2 WARNINGS WHILE JOINING ARCHIVES TO %1"
                   ("d",  _,           _)      ->  "0230 %2 WARNINGS WHILE DELETING FROM %1"
-                  ("k",  _,           _)      ->  "0302 %2 WARNINGS WHILE LOCKING ARCHIVE %1"
+                  ("k",  _,           _)      ->  "0302 %2 WARNINGS WHILE LOCKING %1"
                   (_,    ADD_CMD,     False)  ->  "0434 %2 WARNINGS WHILE CREATING %1"
                   (_,    ADD_CMD,     True)   ->  "0436 %2 WARNINGS WHILE UPDATING %1"
                   (_,    LIST_CMD,    _)      ->  "0442 %2 WARNINGS WHILE LISTING %1"
                   (_,    TEST_CMD,    _)      ->  "0233 %2 WARNINGS WHILE TESTING %1"
                   (_,    EXTRACT_CMD, _)      ->  "0236 %2 WARNINGS WHILE EXTRACTING FILES FROM %1"
-                  (_,    RECOVER_CMD, _)      ->  "0384 %2 WARNINGS WHILE REPAIRING ARCHIVE %1"
+                  (_,    RECOVER_CMD, _)      ->  "0384 %2 WARNINGS WHILE REPAIRING %1"
 
 msgDo cmd    =  case (cmdType cmd) of
                   ADD_CMD     -> "0480 Compressing %1"
@@ -355,6 +373,44 @@ show_archives3 n = show3 n ++ " archives"
 -- |Напечатать "byte" или "bytes", в зависимости от кол-ва
 show_bytes3 1 = "1 byte"
 show_bytes3 n = show3 n ++ " bytes"
+
+----------------------------------------------------------------------------------------------------
+----- External functions ---------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+
+-- |Win7+ taskbar: display progress indicator
+foreign import ccall safe "Compression/Common.h Taskbar_SetWindowProgressValue"
+  taskbar_SetWindowProgressValue :: Ptr () -> Word64 -> Word64 -> IO ()
+
+foreign import ccall safe "Compression/Common.h Taskbar_SetProgressValue"
+  taskbar_SetProgressValue :: Word64 -> Word64 -> IO ()
+
+-- |Win7+ taskbar: normal-state progress indicator
+foreign import ccall safe "Compression/Common.h Taskbar_Normal"
+  taskbar_Normal :: IO ()
+
+-- |Win7+ taskbar: error-state progress indicator
+foreign import ccall safe "Compression/Common.h Taskbar_Error"
+  taskbar_Error :: IO ()
+
+-- |Win7+ taskbar: pause progress indicator
+foreign import ccall safe "Compression/Common.h Taskbar_Pause"
+  taskbar_Pause :: IO ()
+
+-- |Win7+ taskbar: restore progress indicator after pause
+foreign import ccall safe "Compression/Common.h Taskbar_Resume"
+  taskbar_Resume :: IO ()
+
+-- |Win7+ taskbar: remove progress indicator
+foreign import ccall safe "Compression/Common.h Taskbar_Done"
+  taskbar_Done :: IO ()
+
+#ifdef FREEARC_WIN
+-- |Returns Windows HWND of top-level window having the provided title
+foreign import ccall safe "Compression/Common.h FindWindowHandleByTitle"
+  findWindowHandleByTitle :: Ptr CChar -> IO (Ptr ())
+#endif
+
 
 
 {-

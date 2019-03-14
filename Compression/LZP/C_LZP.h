@@ -32,19 +32,19 @@ public:
 #ifndef FREEARC_DECOMPRESS_ONLY
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void)               {return BlockSize*2 + (1<<HashSizeLog)*sizeof(BYTE*);}
+  virtual void    SetCompressionMem        (MemSize mem);
+  virtual void    SetMinDecompressionMem   (MemSize mem)        {SetCompressionMem(mem);}
+  virtual void    SetDictionary            (MemSize dict)       {SetBlockSize (dict);}
+  virtual void    SetBlockSize             (MemSize bs);
+#endif
+  virtual MemSize GetDictionary            (void)               {return BlockSize;}
+  virtual MemSize GetBlockSize             (void)               {return BlockSize;}
+  virtual MemSize GetDecompressionMem      (void)               {return BlockSize*2 + (1<<HashSizeLog)*sizeof(BYTE*);}
+
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_LZP)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return BlockSize*2 + (1<<HashSizeLog)*sizeof(BYTE*);}
-  virtual MemSize GetDictionary         (void)         {return BlockSize;}
-  virtual MemSize GetBlockSize          (void)         {return BlockSize;}
-  virtual void    SetCompressionMem     (MemSize mem);
-  virtual void    SetDecompressionMem   (MemSize mem)  {SetCompressionMem(mem);}
-  virtual void    SetDictionary         (MemSize dict) {SetBlockSize (dict);}
-  virtual void    SetBlockSize          (MemSize bs);
-#endif
-  virtual MemSize GetDecompressionMem   (void)         {return BlockSize*2 + (1<<HashSizeLog)*sizeof(BYTE*);}
 };
 
 // Разборщик строки метода сжатия LZP

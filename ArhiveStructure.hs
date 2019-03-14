@@ -294,13 +294,13 @@ archiveReadFooter command               -- выполняемая команда со всеми её опция
 
 -- |Блок архива
 data ArchiveBlock = ArchiveBlock
-       { blArchive     :: !Archive      -- архив, к которому принадлежит данный блок
+       { blArchive     ::  Archive      -- архив, к которому принадлежит данный блок
        , blType        :: !BlockType    -- тип блока
        , blCompressor  :: !Compressor   -- метод сжатия
        , blPos         :: !FileSize     -- позиция блока в файле архива
        , blOrigSize    :: !FileSize     -- размер блока в распакованном виде
        , blCompSize    :: !FileSize     -- размер блока в упакованном виде
-       , blCRC         :: !CRC          -- CRC распакованных данных (только для служебных блоков)
+       , blCRC         ::  CRC          -- CRC распакованных данных (только для служебных блоков)
        , blFiles       ::  Int          -- количество файлов (только для блоков данных)
        , blIsEncrypted ::  Bool         -- блок зашифрован?
        }
@@ -384,30 +384,23 @@ archiveMallocReadBuf pool archive pos size = do
   archiveReadBuf archive buf size
   return buf
 
--- |Рпаспаковать в памяти блок, который может быть упакован несколькими алгоритмами и вдобавок зашифрован
+-- |Распаковать в памяти блок, который может быть упакован несколькими алгоритмами и вдобавок зашифрован
 decompressInMemory mainPool compressor decryption_info archive pos compsize origsize = do
   withPool $ \tempPool -> do
-  let process srcbuf srcsize [] = return (srcbuf, srcsize)
-      process srcbuf srcsize (algorithm:algorithms) = do
-        let (dstsize, pool) = if null algorithms
-                                then (origsize, mainPool)
-                                else ((max compsize origsize)*2+100*kb, tempPool)
-        dstbuf <- pooledMallocBytes pool (dstsize+8)  -- +8 - из-за недоработок в ByteStream :(
-        decompressed_size <- decompressMem algorithm srcbuf srcsize dstbuf dstsize
-        pooledReallocBytes tempPool srcbuf 0
-        process dstbuf decompressed_size algorithms
-  --
   if compressor==aNO_COMPRESSION
-    then do compbuf <- archiveMallocReadBuf mainPool archive pos (compsize+8)
+    then do compbuf <- archiveMallocReadBuf mainPool archive pos (compsize+8)   -- +8 - из-за недоработок в ByteStream :(
             return (compbuf, compsize)
     else do
   -- Дополнить алгоритмы шифрования ключами, необходимыми для расшифровки
   keyed_compressor <- generateDecryption compressor decryption_info
   when (any isNothing keyed_compressor) $ do
     registerError$ BAD_PASSWORD (archiveName archive) ""
-  -- Прочитать исходный блок из архива
+  compressor <- return (map fromJust keyed_compressor)
+  -- Прочитать исходный блок из архива и распаковать его в памяти
   compbuf <- archiveMallocReadBuf tempPool archive pos compsize
-  process compbuf compsize (reverse (map fromJust keyed_compressor))
+  origbuf <- pooledMallocBytes mainPool (origsize+8)   -- +8 - из-за недоработок в ByteStream :(
+  decompressed_size <- decompressMem (join_compressor compressor) compbuf compsize origbuf origsize
+  return (origbuf,decompressed_size)
 
 
 {-# NOINLINE archiveBlockReadAll #-}

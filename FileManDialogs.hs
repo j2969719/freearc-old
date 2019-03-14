@@ -90,6 +90,9 @@ extractDialog fm' exec winoptions cmd arcnames arcdir files = do
     keepBrokenButton <- fmCheckButtonWithHistory fm' "KeepBroken" False "0425 Keep broken extracted files"
     ; boxPackStart upbox (widget keepBrokenButton) PackNatural 0  `on_` cmd/="t"
 
+    globalQueueing <- fmCheckButtonWithHistory  fm' "GlobalQueueing" False global_queueing_msg
+    ; boxPackStart upbox (widget globalQueueing) PackNatural 0
+
     shutdown <- checkBox shutdown_msg
     ; boxPackStart upbox (widget shutdown)    PackNatural 0
 
@@ -110,16 +113,19 @@ extractDialog fm' exec winoptions cmd arcnames arcdir files = do
                 else return ResponseOk
     when (choice `elem` [ResponseOk, aResponseDetach]) $ do
       overwriteOption    <- val overwrite
-      dir'               <- val dir;         saveHistory dir
+      dir'               <- val dir;                saveHistory dir
       isAddDir           <- val addDirButton
       isOpenOutDir       <- val openOutDirButton
       decryptionOptions  <- decryptionOnOK
       keepBroken         <- val keepBrokenButton
+      globalQueueing'    <- val globalQueueing -- don't save to history - this selection is for one command only
       shutdown'          <- val shutdown
       optionsEnabled     <- val options
-      ; optionsStr'        <- val optionsStr;  saveHistory optionsStr  `on_`  optionsEnabled
+      ; optionsStr'        <- val optionsStr;       saveHistory optionsStr  `on_`  optionsEnabled
       let outdir = dir' .$ (isAddDir &&& length(arcnames)==1 &&& (</> takeBaseName(head arcnames)))
+          use_winrar = False
       exec (choice == aResponseDetach)                                               -- Запустить команду в отдельной копии FreeArc?
+           use_winrar
            (\ok -> when isOpenOutDir (runFile (outdir++[pathSeparator]) "" False))   -- post-operation action: open outdir in Explorer
            ((arcnames ||| ["*"]) .$map (\arcname ->
                 [cmd]++
@@ -132,6 +138,7 @@ extractDialog fm' exec winoptions cmd arcnames arcdir files = do
                 decryptionOptions++
                 ["--fullnames"]++
                 ["--noarcext"]++
+                (globalQueueing'  &&&  ["--queue"])++
                 (shutdown'        &&&  ["--shutdown"])++
                 (optionsEnabled   &&&  words (clear optionsStr'))++
                 ["--", clear arcname]++files))
@@ -165,7 +172,9 @@ arcinfoDialog fm' exec mode arcnames arcdir files = do
     for (zip [10,0,10,0,10] tables) $ \(n,table) -> do
       pack n (twoColumnTable table)
 
+
 ------ Закладка с описаниями солид-блоков ----------------------------------------------------------
+#ifndef HAMSTER
     vBox <- newPage "0449 Solid blocks"
     let columnTitles = ["0450 Position", "0451 Size", "0452 Compressed", "0453 Files", "0454 Method"]
         n = map i18no columnTitles
@@ -181,6 +190,7 @@ arcinfoDialog fm' exec mode arcnames arcdir files = do
     changeList listModel listSelection dataBlocks
     -- При закрытии диалога сохраним порядок и ширину колонок, при открытии восстановим их
     restoreColumnsOrderAndWidths fm' "SolidBlocks" listView columns
+#endif
 
 
 ------ Закладка комментария архива -----------------------------------------------------------------
@@ -192,16 +202,19 @@ arcinfoDialog fm' exec mode arcnames arcdir files = do
     widgetShowAll dialog
     notebookSetCurrentPage nb 1    `on_` mode==CommentMode
     choice <- fmDialogRun fm' dialog "ArcInfoDialog"
+#ifndef HAMSTER
     saveColumnsOrderAndWidths fm' "SolidBlocks" listView columns
+#endif
     when (choice==ResponseOk) $ do
       newComment <- val comment
       when (newComment /= ftComment footer) $ do
-        exec False doNothing [["ch"
-                              ,"--noarcext"
-                              ,newComment &&& ("--archive-comment="++newComment)
-                                          ||| "-z-"
-                              ,"--"
-                              ,arcname]]
+        let use_winrar = False
+        exec False use_winrar doNothing [["ch"
+                                         ,"--noarcext"
+                                         ,newComment &&& ("--archive-comment="++newComment)
+                                                     ||| "-z-"
+                                         ,"--"
+                                         ,arcname]]
 
 
 ----------------------------------------------------------------------------------------------------
@@ -294,7 +307,7 @@ settingsDialog fm' = do
       choice <- New.comboBoxGetActive langComboBox
       when (choice /= -1) $ do
         langFile   <- getCurrentLangFile
-        localeInfo <- parseLocaleFile langFile
+        localeInfo <- parseLocaleFiles [langFile]
         showLang (i18n_general (return localeInfo) .>>== fst)
 
     -- Редактирование текущего файла локализации/логфайла
@@ -322,21 +335,31 @@ settingsDialog fm' = do
 ------ Закладка настроек интерфейса -----------------------------------------------------------
     vbox <- newPage "0466 Interface";  let pack x = boxPackStart vbox x PackNatural 1
 
-    toolbarTextButton       <- fmCheckButtonWithHistory  fm' "ToolbarCaptions" True  "0361 Add captions to toolbar buttons";            pack (widget toolbarTextButton)
-    showTestDialogButton    <- fmCheckButtonWithHistory  fm' "ShowTestDialog"  False "0469 Show \"Test archive\" dialog";               pack (widget showTestDialogButton)
-    targzButton             <- fmCheckButtonWithHistory  fm' "QuickOpenTarGz"  True  "0485 Open .tar.gz-like archives in single step";  pack (widget targzButton)
-    (hbox, extract_all_for) <- fmLabeledEntryWithHistory fm' "ExtractAllFor"         "0467 Unpack whole archive when running:";         pack hbox
+    toolbarTextButton          <- fmCheckButtonWithHistory  fm' "ToolbarCaptions"       True  "0361 Add captions to toolbar buttons";            pack (widget toolbarTextButton)
+    horizontalGridLinesButton  <- fmCheckButtonWithHistory  fm' "HorizontalGridLines"   False "0507 Grid lines in filelist";                     pack (widget horizontalGridLinesButton)
+    showHiddenFilesButton      <- fmCheckButtonWithHistory  fm' "ShowHiddenFiles"       False "0499 Show hidden files, folders and disks";       pack (widget showHiddenFilesButton)
+    showTestDialogButton       <- fmCheckButtonWithHistory  fm' "ShowTestDialog"        False "0469 Show \"Test archive\" dialog";               pack (widget showTestDialogButton)
+    targzButton                <- fmCheckButtonWithHistory  fm' "QuickOpenTarGz"        True  "0485 Open .tar.gz-like archives in single step";  pack (widget targzButton)
+    (hbox, extract_all_for)    <- fmLabeledEntryWithHistory fm' "ExtractAllFor"               "0467 Unpack whole archive when running:";         pack hbox
+    (hbox, run_for)            <- fmLabeledEntryWithHistory fm' "RunFor"                      "0500 Run instead of open as archive:";            pack hbox
+    globalQueueingButton       <- fmCheckButtonWithHistory  fm' "GlobalQueueing"        False global_queueing_msg;                               pack (widget globalQueueingButton)
 
 ------ Закладка интеграции с Explorer ---------------------------------------------------------
 #if defined(FREEARC_WIN)
     vbox <- newPage "0421 Explorer integration";  let pack x = boxPackStart vbox x PackNatural 1
 
-    associateArcButton <- fmCheckButtonWithHistory fm' "Settings.Associate"             False  ("0172 Associate "++aFreeArc++" with .arc files")
-    associateZipButton <- fmCheckButtonWithHistory fm' "Settings.AssociateNonArc"       False  ("0471 Associate "++aFreeArc++" with other archives")
+    (associateFreeArcBox,     associateFreeArc,     associateFreeArcExtensions)     <- fmCheckedEntryWithHistory2 fm' "Settings.Associate.FreeArc"      False  "0543 Associate with FreeArc archives:"
+    (associateOtherArcBox,    associateOtherArc,    associateOtherArcExtensions)    <- fmCheckedEntryWithHistory2 fm' "Settings.Associate.OtherArc"     False  "0544 Associate with other archives:"
+    (associateContextMenuBox, associateContextMenu, associateContextMenuExtensions) <- fmCheckedEntryWithHistory2 fm' "Settings.Associate.ContextMenu"  False  "0545 Context menu for container files:"
+    (associateSmartMenuBox,   associateSmartMenu,   associateSmartMenuExtensions)   <- fmCheckedEntryWithHistory2 fm' "Settings.Associate.SmartMenu"    False  "0546 Smart context menu for files:"
+
     contextMenuButton  <- fmCheckButtonWithHistory fm' "Settings.ContextMenu"           False   "0422 Enable context menu in Explorer"
     cascadedButton     <- fmCheckButtonWithHistory fm' "Settings.ContextMenu.Cascaded"  True    "0423 Make it cascaded"
     empty              <- label ""
-    mapM_ (pack.widget) [associateArcButton, associateZipButton, empty]
+#ifndef HAMSTER
+    pack `mapM_` [associateFreeArcBox]
+#endif
+    pack `mapM_` [associateOtherArcBox, associateContextMenuBox, associateSmartMenuBox, widget empty]
 
     frame <- frameNew;  frameSetLabelWidget frame (widget contextMenuButton)
     boxPackStart vbox frame PackGrow 1
@@ -355,14 +378,8 @@ settingsDialog fm' = do
     notes <- label =<< i18n"0424 Enable individual commands:"
     mapM_ (pack.widget) [cascadedButton, empty, notes]
 
-    -- Put all subsequent checkboxes to scrolled window
-    scrolledWindow <- scrolledWindowNew Nothing Nothing
-    boxPackStart vbox scrolledWindow PackGrow 1
-    vbox <- vBoxNew False 0
-    scrolledWindowAddWithViewport scrolledWindow vbox
-    scrolledWindowSetPolicy scrolledWindow PolicyAutomatic PolicyAutomatic
-    Just viewport <- binGetChild scrolledWindow
-    viewportSetShadowType (castToViewport viewport) ShadowNone
+    -- Put all subsequent checkboxes into scrolled window
+    vbox <- createScroller vbox
     let pack x = boxPackStart vbox x PackNatural 1
 
     let makeButton ("",_,_)             = do pack =<< hSeparatorNew; return []
@@ -384,7 +401,7 @@ settingsDialog fm' = do
     vbox <- newPage "0388 Info";  let pack n makeControl = do control <- makeControl
                                                               boxPackStart vbox control PackNatural n
 
-    maxBlock <- getMaxMemToAlloc
+    maxBlock <- getMaxBlockToAlloc
     pack 10 $twoColumnTable [("0461 Largest address space block:", showMem (maxBlock `roundDown` mb))]
 
 
@@ -396,12 +413,13 @@ settingsDialog fm' = do
       langFile <- getCurrentLangFile
       fmReplaceHistory fm' aINITAG_LANGUAGE (takeFileName langFile)
       loadTranslation
-      saveHistory `mapM_` [logfile, tempdir, extract_all_for]
-      saveHistory `mapM_` [checkNewsButton, toolbarTextButton, showTestDialogButton, targzButton]
-      saveCompressionHistories "partial"
-      saveEncryptionHistories  "partial" ""
+      saveHistory `mapM_` [logfile, tempdir, extract_all_for, run_for]
+      saveHistory `mapM_` [checkNewsButton, toolbarTextButton, horizontalGridLinesButton, showHiddenFilesButton, showTestDialogButton, targzButton, globalQueueingButton]
+      saveCompressionHistories
+      saveEncryptionHistories
 #if defined(FREEARC_WIN)
-      saveHistory `mapM_` ([associateArcButton, associateZipButton, contextMenuButton, cascadedButton] ++ commands)
+      saveHistory `mapM_` ([associateFreeArc, associateOtherArc, associateContextMenu, associateSmartMenu, contextMenuButton, cascadedButton] ++ commands)
+      saveHistory `mapM_` ([associateFreeArcExtensions, associateOtherArcExtensions, associateContextMenuExtensions, associateSmartMenuExtensions])
       registerShellExtensions' (fm_history fm) (Just oldContextMenu)
 #endif
       return ()
@@ -416,17 +434,26 @@ settingsDialog fm' = do
 changeRegisterShellExtensions action = do
   hf' <- openHistoryFile
   when (action==["--unregister"]) $ do
-    hfReplaceHistoryBool hf' "Settings.Associate"        False
-    hfReplaceHistoryBool hf' "Settings.AssociateNonArc"  False
-    hfReplaceHistoryBool hf' "Settings.ContextMenu"      False
+    hfReplaceHistoryBool hf' "Settings.Associate.FreeArc.Enabled"      False
+    hfReplaceHistoryBool hf' "Settings.Associate.OtherArc.Enabled"     False
+    hfReplaceHistoryBool hf' "Settings.Associate.ContextMenu.Enabled"  False
+    hfReplaceHistoryBool hf' "Settings.Associate.SmartMenu.Enabled"    False
+    hfReplaceHistoryBool hf' "Settings.ContextMenu"                    False
+  --
   registerShellExtensions' hf' Nothing
 
 -- |Изменение настроек интеграции с Explorer
 registerShellExtensions' hf' oldContextMenu = do
   hfCacheConfigFile hf' $ do
-  associateArc <- hfGetHistoryBool hf' "Settings.Associate"            True
-  associateZip <- hfGetHistoryBool hf' "Settings.AssociateNonArc"      True
-  contextMenu  <- hfGetHistoryBool hf' "Settings.ContextMenu"          True
+  associateArc <- hfGetHistoryBool hf' "Settings.Associate.FreeArc.Enabled"   False
+  associateZip <- hfGetHistoryBool hf' "Settings.Associate.OtherArc.Enabled"  False
+  contextMenu  <- hfGetHistoryBool hf' "Settings.ContextMenu"                 False
+
+  freearc_extensions_raw       <- hfGetHistory1 hf' "Settings.Associate.FreeArc"  ""
+  other_archive_extensions_raw <- hfGetHistory1 hf' "Settings.Associate.OtherArc" ""
+  let freearc_extensions       = associateArc &&& words freearc_extensions_raw
+      other_archive_extensions = associateZip &&& words other_archive_extensions_raw
+      new_extensions           = sort$ removeDups$ freearc_extensions++other_archive_extensions
 
   exe <- getExeName                                -- Name of FreeArc.exe file
   let ico   =  exe `replaceExtension` ".ico"       -- Name of FreeArc.ico file
@@ -435,14 +462,13 @@ registerShellExtensions' hf' oldContextMenu = do
       empty =  dir </> "empty.arc"                 -- Name of empty archive file
       version  = aARC_VERSION_WITH_DATE
       reg   = registryGetStr hKEY_CLASSES_ROOT
-  oldAssociateArc <- and `fmap` sequence [(Just exe==)                `fmap` reg (aFreeArc++".arc") "Owner"   -- ассоциация с .arc включена?
-                                         ,(Just (aFreeArc++".arc")==) `fmap` reg (".arc") ""]
-  oldAssociateZip <- and `fmap` sequence [(Just exe==)                `fmap` reg (aFreeArc++".zip") "Owner"   -- ассоциация с .zip включена?
-                                         ,(Just (aFreeArc++".zip")==) `fmap` reg (".zip") ""]
-  old_shext   <- hfGetHistory1 hf' "Settings.ContextMenu.Directory" ""
-  hfReplaceHistory             hf' "Settings.ContextMenu.Directory" shext
-  old_version <- hfGetHistory1 hf' "Settings.ContextMenu.Version"   ""
-  hfReplaceHistory             hf' "Settings.ContextMenu.Version"   version
+  --
+  old_shext      <- hfGetHistory1 hf' "Settings.ContextMenu.Directory" ""
+  hfReplaceHistory                hf' "Settings.ContextMenu.Directory" shext
+  old_version    <- hfGetHistory1 hf' "Settings.ContextMenu.Version"   ""
+  hfReplaceHistory                hf' "Settings.ContextMenu.Version"   version
+  old_extensions <- hfGetHistory1 hf' "Settings.Associate.Extensions"  "" >>== words >>== removeDups >>== sort
+  hfReplaceHistory                hf' "Settings.Associate.Extensions"  (unwords new_extensions)
 
   -- UAC-compatibility: instead of modifying registry directly, we are calling external executables that have admin privileges
   reglist32 <- newList;  reglist64 <- newList
@@ -452,48 +478,87 @@ registerShellExtensions' hf' oldContextMenu = do
       runDll32      dll func        =  mapM_ (reglist32 <<=) ["RunDll", dll, func]
       runDll64      dll func        =  mapM_ (reglist64 <<=) ["RunDll", dll, func]
 
-  -- (Un)registering ArcShellExt dlls - performed only if settings were changed
-  let dll_register mode = when ((oldContextMenu,old_shext,old_version) /= (Just contextMenu,shext,version)) $ do
-                            runDll32 (shext </> "ArcShellExt.dll")    (if mode=="" then "DllRegisterServer" else "DllUnregisterServer")
-                            runDll64 (shext </> "ArcShellExt-64.dll") (if mode=="" then "DllRegisterServer" else "DllUnregisterServer")
+  -- (Un)registering ArcShellExt dlls - performed only if any setting was changed
+  let arcShellExt action = when ((oldContextMenu,old_shext,old_version) /= (Just contextMenu,shext,version)) $ do
+                             runDll32 (shext </> "ArcShellExt.dll")    action
+                             runDll64 (shext </> "ArcShellExt-64.dll") action
 
-  -- First, unregister any old version if required
-  dll_register "/u"
-  when (associateArc/=oldAssociateArc  ||  oldAssociateArc && version/=old_version) $ do
+  -- Unregister DLL
+  arcShellExt "DllUnregisterServer"
+
+  -- Reassociate archives with FreeArc - performed only if any setting was changed
+  when (new_extensions/=old_extensions  ||  version/=old_version) $ do
+    -- Remove any old associations
     regDeleteTree ("*\\shell\\"++aFreeArc)               -- these registry entries were used
     regDeleteTree ("Directory\\shell\\"++aFreeArc)       --   for Explorer integration in FreeArc 0.50
-    for [aFreeArcExt] $ \ext -> do
-      regDeleteTree ("."++ext)
-      regDeleteTree (aFreeArc++"."++ext)
-  when (associateZip/=oldAssociateZip  ||  associateZip && version/=old_version) $ do
-    for (words other_archive_extensions) $ \ext -> do
-      regDeleteTree ("."++ext)
-      regDeleteTree (aFreeArc++"."++ext)
+    add_ext_list <- newList;  delete_ext_list <- newList;  add_type_list <- newList;  delete_type_list <- newList
 
-  -- Second, associate FreeArc with .arc and archives if it was not associated before or program was updated
-  for ((associateArc  &&&  not (oldAssociateArc && version==old_version)  &&&  [aFreeArcExt]) ++
-       (associateZip  &&&  not (oldAssociateZip && version==old_version)  &&&  words other_archive_extensions)) $ \ext -> do
-    register  (aFreeArc++"."++ext)                            ""          ((if ext==aFreeArcExt then aFreeArc else map toUpper ext)++" archive")
-    register  (aFreeArc++"."++ext)                            "Owner"     exe   -- used to check in oldAssociateArc/Zip that exension is already associated with this program installation
-    register  (aFreeArc++"."++ext++"\\DefaultIcon")           ""          (ico++",0")
-    register  (aFreeArc++"."++ext++"\\shell")                 ""          ("open")
-    register  (aFreeArc++"."++ext++"\\shell\\open\\command")  ""          ("\""++exe++"\" \"%1\"")
-    register  ("."++ext)                                      ""          (aFreeArc++"."++ext)
-  --register  (".arc\\ShellNew")                              "FileName"  (empty)   -- disabled because we don't yet support Drag&Drop
+    -- Cycle through all extensions - associated before and associated now, and make decisions about things to delete and things to create
+    for (removeDups$ new_extensions++old_extensions) $ \ext -> do
+      -- Make decisions about the "HKCR\.ext" registry branch
+      eq  <-  (Just (aFreeArc++"."++ext) ==)  `fmap`  reg ("."++ext) ""                          -- Does extension already associated with FreeArc?
+      case () of
+        _ | ext `notElem` new_extensions     -> delete_ext_list <<= ext                          -- remove association
+          | ext `elem` old_extensions && eq  -> doNothing0                                       -- leave as is (because existing association is OK)
+          | otherwise                        -> for [delete_ext_list, add_ext_list] (<<=ext)     -- remove and create again
+      -- Make decisions about the "HKCR\FreeArc.ext" registry branch
+      eq  <-  (Just exe ==)  `fmap`  reg (aFreeArc++"."++ext) "Owner"                            -- Does "FreeArc.ext" filetype already owned by the current FreeArc installation?
+      case () of
+        _ | ext `notElem` new_extensions     -> delete_type_list <<= ext                         -- remove association
+          | ext `elem` old_extensions && eq  -> doNothing0                                       -- leave as is (because existing association is OK)
+          | otherwise                        -> for [delete_type_list, add_type_list] (<<=ext)   -- remove and create again
+    --
+    -- Perform all the arranged deletions and additions
+    forL delete_ext_list  $ \ext -> regDeleteTree ("."++ext)
+    forL delete_type_list $ \ext -> regDeleteTree (aFreeArc++"."++ext)
+    forL add_type_list    $ \ext -> do
+      register  (aFreeArc++"."++ext)                            ""          ((if ext `elem` freearc_extensions then aFreeArc else map toUpper ext)++" archive")
+      register  (aFreeArc++"."++ext)                            "Owner"     exe   -- used to check that exension is already associated with this program installation
+      register  (aFreeArc++"."++ext++"\\DefaultIcon")           ""          (ico++",0")
+      register  (aFreeArc++"."++ext++"\\shell")                 ""          ("open")
+      register  (aFreeArc++"."++ext++"\\shell\\open\\command")  ""          ("\""++exe++"\" \"%1\"")
+    --
+    forL add_ext_list $ \ext -> do
+      register  ("."++ext)                                      ""          (aFreeArc++"."++ext)
+    --register  (".arc\\ShellNew")                              "FileName"  (empty)   -- disabled because we don't yet support Drag&Drop
 
-  -- Third, add items to Explorer's right-click menu and register DLL
+  -- Add items to Explorer's right-click menu and register DLL
   when contextMenu $ do
     writeShellExtScript hf'
-    dll_register ""
+    arcShellExt "DllRegisterServer"
 
   -- Run external executables with admin privileges that make actual changes to the registry
-  list32 <- listVal reglist32;  list64 <- listVal reglist64
-  list32 &&& runCommand (unparseCommand$ (shext</>("Manager of FreeArc integration settings.exe"         )):"0.60":list32) "." True
-  list64 &&& runCommand (unparseCommand$ (shext</>("Manager of FreeArc integration settings (64-bit).exe")):"0.60":list64) "." True
+  onList reglist32 $ \list32 -> list32 &&& runCommand (unparseCommand$ (shext</>("Manager of FreeArc integration settings.exe"         )):"0.60":list32) "." True
+  onList reglist64 $ \list64 -> list64 &&& runCommand (unparseCommand$ (shext</>("Manager of FreeArc integration settings (64-bit).exe")):"0.60":list64) "." True
 
 #else
 changeRegisterShellExtensions = doNothing
 #endif
+
+
+----------------------------------------------------------------------------------------------------
+---- Dialogs for choosing compression and encryption method called from the Add dialog -------------
+----------------------------------------------------------------------------------------------------
+
+compressionMethodDialog fm'  =  methodDialog fm' "0106 Compression" "CompressionMethodDialog" (\fm' _ _ vbox -> compressionPage fm' vbox)
+encryptionMethodDialog  fm'  =  methodDialog fm' "0119 Encryption"  "EncryptionMethodDialog"  encryptionPage
+
+methodDialog fm' title dialogName methodPage getMethod setMethod = do
+  fm <- val fm'
+  fmDialog fm' title [] $ \(dialog,okButton) -> do
+    upbox <- dialogGetUpper dialog
+    vbox  <- vBoxNew False 0
+    boxPackStart upbox vbox PackGrow 0
+
+    (method, saveSomeHistories)  <-  methodPage fm' dialog okButton vbox
+    method =:: getMethod
+
+    widgetShowAll dialog
+    choice <- fmDialogRun fm' dialog dialogName
+    when (choice==ResponseOk) $ do
+      saveSomeHistories
+      val method >>= setMethod
+      return ()
 
 
 ----------------------------------------------------------------------------------------------------
@@ -506,85 +571,160 @@ compressionPage fm' vbox = do
   (hbox, cmethod) <- fmLabeledEntryWithHistory fm' "compression" "0175 Compression profile:";  pack hbox
   ; save <- button "0178 Save";  boxPackStart hbox (widget save) PackNatural 5
 
+  -- Put all subsequent controls into scrolled window
+  vbox <- createScroller vbox
+  let pack x = boxPackStart vbox x PackNatural 1
+
   -- Настройки алгоритма сжатия.
   hbox <- hBoxNew False 0;  pack hbox
   ; method     <- radioFrame "0107 Compression level" levels;    boxPackStart hbox (widget method)  PackNatural 0
   ; methodText <- labelNew Nothing;                              boxPackStart hbox methodText       PackGrow 0
-  xMethod    <- checkBox "0113 Fast, low-memory decompression";  pack (widget xMethod)
-  autodetect <- checkBox "0176 Filetype auto-detection"       ;  pack (widget autodetect)
+
+  table <- tableNew 3 2 False;  pack table;  tableSetColSpacings table 20
+  ; dMethod    <- checkBox "0509 Fast decompression"                                              ;  packTable table (widget dMethod)    0 0
+  ; xMethod    <- checkBox "0510 Low-memory decompression"                                        ;  packTable table (widget xMethod)    0 1
+  ; maxSolid   <- checkBox "0512 Maximize solid blocks"                                           ;  packTable table (widget maxSolid)   1 0
+  ; autodetect <- checkBox "0176 Filetype auto-detection"                                         ;  packTable table (widget autodetect) 1 1
+  ; (hbox, numThreadsOn, numThreads) <- fmCheckedEntryWithHistory fm' "numthreads" "0531 Threads:";  packTable table hbox 0 2;  widgetSetSizeRequest (widget numThreads) 50 (-1)
 
   -- Настройки размера солид-блока
-  vbox1 <- vBoxNew False 0;  let pack1 x = boxPackStart vbox1 x PackNatural 1
-  ; (hbox, solidBytesOn, solidBytes) <- fmCheckedEntryWithHistory fm' "bytes" "0138 Bytes, no more than:";  pack1 hbox
-  ; (hbox, solidFilesOn, solidFiles) <- fmCheckedEntryWithHistory fm' "files" "0139 Files, no more than:";  pack1 hbox
-  ; solidByExtension                 <- checkBox                              "0140 Split by extension" ;  pack1 (widget solidByExtension)
-  solidBlocksFrame <- frameNew;  pack solidBlocksFrame;  s <- i18n"0177 Limit solid blocks"
-  set solidBlocksFrame [containerChild := vbox1, frameLabel := s, containerBorderWidth := 5]
+  table <- createFrame "0177 Limit solid blocks" pack (tableNew 1 3 False);  tableSetColSpacings table 20
+  ; (hbox, solidBytesOn, solidBytes) <- fmCheckedEntryWithHistory fm' "bytes" "0528 Bytes:"       ;  packTable table hbox 0 0;  widgetSetSizeRequest (widget solidBytes) 70 (-1)
+  ; (hbox, solidFilesOn, solidFiles) <- fmCheckedEntryWithHistory fm' "files" "0529 Files:"       ;  packTable table hbox 1 0;  widgetSetSizeRequest (widget solidFiles) 70 (-1)
+  ; solidByExtension                 <- checkBox                              "0530 Extension"    ;  packTable table (widget solidByExtension) 2 0
 
-  -- Инициализация полей
-  let m=4; x=False
-  method  =: (6-m) .$ clipTo 0 5
-  xMethod =: x
+  -- Ограничение используемой памяти
+  table <- createFrame "0513 Limit memory usage, mb" pack (tableNew 1 2 False);  tableSetColSpacings table 30
+  ; (hbox, limitCMemOn, limitCMem) <- fmCheckedEntryWithHistory fm' "cmem" "0514 Compression:"    ;  packTable table hbox 0 0;  widgetSetSizeRequest (widget limitCMem) 60 (-1)
+  ; (hbox, limitDMemOn, limitDMem) <- fmCheckedEntryWithHistory fm' "dmem" "0515 Decompression:"  ;  packTable table hbox 1 0;  widgetSetSizeRequest (widget limitDMem) 60 (-1)
+  ; maxBlock <- getMaxBlockToAlloc;  s <- i18n"0461 Largest address space block:";
+  ; l <- labelNew Nothing; labelSetMarkup l (s++" "++bold(showMem (maxBlock `roundDown` mb)))
+  ; tableAttachDefaults table l 0 2 1 2
+
+  -- Следующие две таблицы надо разместить бок-о-бок
+  hbox <- hBoxNew False 0;  pack hbox;  let pack_horizontally x = boxPackStart hbox x PackGrow 1
+
+  -- Отключение отдельных фильтров/групп файлов
+  table <- createFrame "0516 Disable filter/group" pack_horizontally (tableNew 3 3 False)
+  let algos  =  words "rep exe delta dict lzp $text $wav $bmp $compressed"
+  disabledAlgos <- foreach (zip [0..] algos) $ \(i,algo) -> do
+    disabledAlgo <- checkBox$ (left_fill '0' 4 (show$ i+517))++" "++algo   -- create checkbox with tooltip: "0517 rep"..."0525 $compressed"
+    packTable table (widget disabledAlgo) (i `div` 3) (i `mod` 3)          -- position it inside 3x3 table
+    return disabledAlgo
+
+  -- Продвинутые/экспериментальные методы
+  table <- createFrame "0534 Experimental algorithms" pack_horizontally (tableNew 3 2 False)
+  ; lzma1g  <- checkBox "0535 lzma:1gb";  packTable table (widget lzma1g ) 0 0
+  ; exe2    <- checkBox "0536 exe2"    ;  packTable table (widget exe2   ) 0 1
+  ; srep    <- checkBox "0537 srep"    ;  packTable table (widget srep   ) 0 2
+  ; precomp <- checkBox "0538 precomp" ;  precomp_table <- tableNew 2 1 False
+  ; intense <- checkBox "0539 intense" ;  packTable precomp_table (widget intense) 0 0
+  ; jpeg    <- checkBox "0540 jpeg"    ;  packTable precomp_table (widget jpeg   ) 0 1
+  ; frame <- frameNew;  tableAttachDefaults table frame 1 2 0 3
+  ; set frame [containerChild := precomp_table, frameLabelWidget := widget precomp, containerBorderWidth := 5]
+
+
+  -- Инициализация полей: -m4 -ma+
+  let m=4
+  method     =: (6-m) .$ clipTo 0 5
   autodetect =: True
 
   -- Опубликовать описание первоначально выбранного метода сжатия и обновлять его при изменениях настроек
   let parsePhysMem = parseMemWithPercents (toInteger getPhysicalMemory `roundTo` (4*mb))
-  let getSimpleMethod = do
-        m <- val method
-        x <- val xMethod
-        return$ show(if m==0 then 9 else 6-m)++(x.$bool "" "x")
   let describeMethod = do
+        -- Сначала поменяем видимость контролов
+        widgetSetSensitivity precomp_table =<< val precomp
         m <- val method
+        d <- val dMethod
         x <- val xMethod
-        methodName <- getSimpleMethod
-        let compressor = methodName.$ decode_method 1 []
-                                   .$ limitCompressionMem   (parsePhysMem "75%")
-                                   .$ limitDecompressionMem (1*gb)
-            cmem = compressor.$ compressorGetShrinkedCompressionMem
-            dmem = compressor.$ compressorGetShrinkedDecompressionMem
-        let level  =         "      ccm     uharc     7-zip        rar       bzip2      zip"
-            cspeed = x.$bool "    3mb/s     3mb/s     5mb/s     10mb/s      20mb/s   50mb/s" --m9,m5..m1
-                             "  2.5mb/s   2.5mb/s     5mb/s     10mb/s      20mb/s   50mb/s" --m9x,m5x..m1x
-            dspeed = x.$bool " 3-40mb/s  3-40mb/s  5-60mb/s  10-60mb/s  15-100mb/s  120mb/s" --m9,m5..m1
-                             "   40mb/s    40mb/s    60mb/s     60mb/s     100mb/s  120mb/s" --m9x,m5x..m1x
+        let simpleMethod = show(if m==0 then 9 else 6-m) ++ (x&&&"x" ||| (d&&&"d"))
+        let compressor = simpleMethod.$ decode_method 1 []
+                                     .$ limitCompressionMem   (parsePhysMem "75%")
+                                     .$ limitDecompressionMem (1*gb)
+            cmem = compressor.$ getCompressionMem
+            dmem = compressor.$ getMinDecompressionMem
+        let level  =         "      ccm     uharc      7-zip        rar       bzip2      zip"
+            cspeed =         "    5mb/s  7-20mb/s     30mb/s     50mb/s     100mb/s  400mb/s" --m9,m5..m1
+            dspeed = d.$bool " 7-50mb/s    40mb/s 50-200mb/s 50-200mb/s 100-500mb/s  600mb/s" --m9,m5..m1
+                             "   50mb/s    50mb/s    200mb/s    200mb/s     500mb/s  600mb/s" --m9x,m5x..m1x
         labelSetMarkup methodText . deleteIf (=='_') . unlines =<< mapM i18fmt
             [ ["0114 Compression level: %1",               bold((words level!!m).$replace '_' ' ')]
             , ["0115 Compression speed: %1, memory: %2",   bold(words cspeed!!m), bold(showMem cmem)]
             , ["0116 Decompression speed: %1, memory: %2", bold(words dspeed!!m), bold(showMem dmem)]
             , [""]
-            , ["0390 All speeds were measured on 3GHz Core2 Duo"]]
+            , ["0526 All speeds were measured on i7-2600"]]
         w1 <- i18n (levels!!m)
         w2 <- i18n "0226 (fast, low-memory decompression)"
-        autodetect'   <- val autodetect
-        solidBytesOn' <- val solidBytesOn
-        solidBytes'   <- val solidBytes
-        solidFilesOn' <- val solidFilesOn
-        solidFiles'   <- val solidFiles
+        w3 <- i18n "0511 (fast decompression)"
+        autodetect'       <- val autodetect
+        numThreadsOn'     <- val numThreadsOn
+        numThreads'       <- val numThreads
+        maxSolid'         <- val maxSolid
+        solidBytesOn'     <- val solidBytesOn
+        solidBytes'       <- val solidBytes
+        solidFilesOn'     <- val solidFilesOn
+        solidFiles'       <- val solidFiles
         solidByExtension' <- val solidByExtension
-        let s = (solidBytesOn'     &&&  solidBytes')++
-                (solidFilesOn'     &&& (solidFiles'++"f"))++
+        limitCMemOn'      <- val limitCMemOn
+        limitCMem'        <- val limitCMem
+        limitDMemOn'      <- val limitDMemOn
+        limitDMem'        <- val limitDMem
+        disabledList      <- foreach (zip algos disabledAlgos) $ \(algo,disabledAlgo) -> do
+                               disabled <- val disabledAlgo
+                               return (disabled &&& ("-mc-"++algo))
+        lzma1g'           <- val lzma1g
+        exe2'             <- val exe2
+        srep'             <- val srep
+        precomp'          <- val precomp
+        intense'          <- val intense
+        jpeg'             <- val jpeg
+        let s = (maxSolid'         &&&  ";")++
+                (solidBytesOn'     &&&  clear solidBytes')++
+                (solidFilesOn'     &&& (clear solidFiles'++"f"))++
                 (solidByExtension' &&&  "e")
-        cmethod =: w1++(x&&&" "++w2)++": "++"-m"++(methodName.$changeTo [("9","x")])++(not autodetect' &&& " -ma-")++(s &&& " -s"++s)
+        cmethod =: w1++(x&&&" "++w2 ||| (d&&&" "++w3))++": "++unwords(["-m"++(simpleMethod.$changeTo [("9","x")])]
+                     ++(not autodetect' &&& ["-ma-"])
+                     ++(numThreadsOn'   &&& ["-mt"++clear numThreads'])
+                     ++(s               &&& ["-s" ++s])
+                     ++(limitCMemOn'    &&& ["-lc"++clear limitCMem'])
+                     ++(limitDMemOn'    &&& ["-ld"++clear limitDMem'])
+                     ++(filter (not.null) disabledList)
+                     ++(lzma1g'         &&& ["-mc:lzma/lzma:max:512mb"])
+                     ++(exe2'           &&& ["-mc:exe/exe2"])
+                     ++(srep'           &&& ["-mc:rep/maxsrep"])
+                     ++(precomp'        &&& ["-mc$default,$obj:+"++(intense' &&& "max")++"precomp"++(jpeg' &&& "j")]))
   --
   describeMethod
-  describeMethod .$ setOnUpdate xMethod
   describeMethod .$ setOnUpdate method
+  describeMethod .$ setOnUpdate maxSolid
   describeMethod .$ setOnUpdate autodetect
+  describeMethod .$ setOnUpdate numThreadsOn
+  describeMethod .$ setOnUpdate numThreads
+  describeMethod .$ setOnUpdate limitCMemOn
+  describeMethod .$ setOnUpdate limitCMem
+  describeMethod .$ setOnUpdate limitDMemOn
+  describeMethod .$ setOnUpdate limitDMem
   describeMethod .$ setOnUpdate solidBytesOn
   describeMethod .$ setOnUpdate solidBytes
   describeMethod .$ setOnUpdate solidFilesOn
   describeMethod .$ setOnUpdate solidFiles
   describeMethod .$ setOnUpdate solidByExtension
+  for (lzma1g:exe2:srep:precomp:intense:jpeg:disabledAlgos) (`setOnUpdate` describeMethod)
+  setOnUpdate dMethod $ do unlessM (val dMethod) (xMethod =: False);  describeMethod   -- disable 'x' if 'd' was disabled
+  setOnUpdate xMethod $ do whenM   (val xMethod) (dMethod =: True);   describeMethod   -- enable  'd' if 'x' was enabled
 
   -- Сохранение истории строковых полей и обработка нажатия на Save
-  let saveHistories full = do
+  let saveHistories = do
+        whenM (val numThreadsOn) $ do saveHistory numThreads
+        whenM (val limitCMemOn)  $ do saveHistory limitCMem
+        whenM (val limitDMemOn)  $ do saveHistory limitDMem
         whenM (val solidBytesOn) $ do saveHistory solidBytes
         whenM (val solidFilesOn) $ do saveHistory solidFiles
-        when (full=="full")      $ do saveHistory cmethod
-  save `onClick` saveHistories "full"
+  save `onClick` (saveHistories >> saveHistory cmethod)
 
-  -- Возвратим метод назначения реакции на изменение настройки сжатия и процедуру, выполняемую при нажатии на OK
-  return (\act -> setOnUpdate cmethod (val cmethod >>= act), saveHistories)
+  -- Возвратим виджет строки ввода метода сжатия и процедуру, которую нужно выполнить при нажатии на OK в диалоге
+  return (cmethod, saveHistories)
+
 
 {-
     let simpleMethod = initSetting "simpleMethod" `defaultVal` "4"
@@ -601,8 +741,8 @@ levels = [ "0108 Maximum",
            "0109 High",
            "0110 Normal",
            "0111 Fast",
-           "0112 Very fast",
-           "0127 HDD-speed"]
+           "0127 HDD-speed",
+           "0527 Instant"]
 
 
 ----------------------------------------------------------------------------------------------------
@@ -618,7 +758,7 @@ encryptionPage fm' dialog okButton vbox = do
   frame <- frameNew;  s <- i18n"0119 Encryption"
   set frame [containerChild := vbox1, frameLabel := s, containerBorderWidth := 5]
   let pack1 x = boxPackStart vbox1 x PackNatural 1
-  boxPackStart vbox frame        PackNatural 10
+  boxPackStart vbox frame PackNatural 10
 
   -- Алгоритм шифрования.
   (hbox, method) <- fmLabeledEntryWithHistory fm' "encryption" "0179 Encryption profile:";  pack1 hbox
@@ -640,7 +780,7 @@ encryptionPage fm' dialog okButton vbox = do
 
   -- Настройки расшифровки
   (decryption, decryptionOnOK) <- decryptionBox fm' dialog
-  ; boxPackStart vbox decryption        PackNatural 10
+  ; boxPackStart vbox decryption PackNatural 10
 
   -- Разрешаем нажать OK только если оба введённых пароля одинаковы
   let [pwd1,pwd2] = pwds
@@ -663,18 +803,17 @@ encryptionPage fm' dialog okButton vbox = do
   pwd2 =:: val encryptionPassword
 
   -- Сохранение истории строковых полей и обработка нажатия на Save
-  let saveHistories full = do
+  let saveHistories = do
         whenM (val keyfileOn) $ do saveHistory keyfile
-        when (full=="full")   $ do saveHistory method
         saveHistory encAlg
-  save `onClick` saveHistories "full"
+  --
+  save `onClick` (saveHistories >> saveHistory method)
 
-  -- Действия, выполняемые при нажатии на OK. Возвращает опции, которые нужно добавить в командную строку
-  let onOK full encryption = do
-        saveHistories full
-        pwd' <- val pwd1;  encryptionPassword =: pwd'
-        decryptionOptions <- decryptionOnOK
-        return$ decryptionOptions ++ ((words encryption `contains` "-p?") &&& pwd' &&& ["-p"++pwd'])
+  -- Действия, выполняемые при нажатии кнопки OK
+  let onOK = do
+        saveHistories
+        encryptionPassword =:: val pwd1
+        decryptionOnOK
 
   -- Формирует профиль шифрования и вызывается при изменении любых опций в этом фрейме
   let makeProfile = do
@@ -696,7 +835,7 @@ encryptionPage fm' dialog okButton vbox = do
   makeProfile .$ setOnUpdate encryptHeaders
 
   -- Возвратим метод назначения реакции на изменение настроек шифрования и процедуру, выполняемую при нажатии на OK
-  return (\act -> setOnUpdate method (val method >>= act), onOK)
+  return (method, onOK)
 
 
 ----------------------------------------------------------------------------------------------------
@@ -791,7 +930,7 @@ runEditCommand filename = run (iif isWindows "notepad" "gedit") [filename]
   where run cmd params = forkIO (rawSystem cmd params >> return ()) >> return ()
   -- edit filename | isWindows && takeExtension filename == "txt"  =  todo: direct shell open command
 
--- Поместим все контролы в симпатичный notebook и возвратим процедуру создания новых страниц в нём
+-- |Поместим все контролы в симпатичный notebook и возвратим процедуру создания новых страниц в нём
 startNotebook dialog = do
   upbox <- dialogGetUpper dialog
   nb <- notebookNew;  boxPackStart upbox nb PackGrow 0
@@ -800,11 +939,32 @@ startNotebook dialog = do
                         return vbox
   return (nb,newPage)
 
+-- |Берёт обычный vbox и возвращает vbox внутри скроллера
+createScroller vbox = do
+  scrolledWindow <- scrolledWindowNew Nothing Nothing
+  boxPackStart vbox scrolledWindow PackGrow 1
+  vbox <- vBoxNew False 0
+  scrolledWindowAddWithViewport scrolledWindow vbox
+  scrolledWindowSetPolicy scrolledWindow PolicyAutomatic PolicyAutomatic
+  Just viewport <- binGetChild scrolledWindow
+  viewportSetShadowType (castToViewport viewport) ShadowNone
+  return vbox
+
+-- |Создаёт рамку с заданным контролом внутри
+createFrame label pack makeControl = do
+  frame <- frameNew;  pack frame;  s <- i18n label;  control <- makeControl
+  set frame [containerChild := control, frameLabel := s, containerBorderWidth := 5]
+  return control
+
+-- |Помещает контрол w в таблицу t на клетку x,y
+packTable t w x y  =  tableAttachDefaults t w x (x+1) y (y+1)
+
+
 -- |Выполнить операцию с использованием временного файла, куда записываются данные contents
 withTempFile contents = withTemporary (`filePutBinary` contents) fileRemove
 
 -- |Выполнить операцию с использованием временного каталога
-withTempDir = withTemporary createDirectoryHierarchy dirRemoveRecursive
+withTempDir = withTemporary createDirectoryHierarchy (dirRemoveRecursive forcedFileRemove)
 
 -- |Выполнить операцию с использованием временного файла/каталога
 withTemporary preAction postAction action = do
@@ -818,3 +978,26 @@ withTemporary preAction postAction action = do
                                     ensureCtrlBreak "remove temporary files" (ignoreErrors$ postAction tempname) $ do
                                       action tempname
 
+-- |Найти все временные файлы, созданные FreeArc
+findTempFiles = do
+  tempDir <- getTempDir
+  files <- dir_list tempDir
+  return (files .$filter (isFreeArcTemporary.baseName) .$map diskName)
+
+-- |Check that it's "temporary" FreeArc instance - either current directory or any argument is inside tempdir
+isTemporaryInstance args = do
+  curdir  <- getCurrentDirectory
+  tempDir <- getTempDir
+  return$ any (`isInsideDir` tempDir) (curdir:args)
+
+-- |Check that `filename` is inside temporary directory
+isTempFile filename = do
+  tempDir <- getTempDir
+  return (filename `isInsideDir` tempDir)
+
+-- |Check that 'file' is inside `dir`
+file `isInsideDir` dir =
+  splitDirectories dir  `isPrefixOf`  splitDirectories file
+
+-- |Шаблон имени всех временных файлов, создаваемых FreeArc
+isFreeArcTemporary  =  (~= "freearc*.tmp")

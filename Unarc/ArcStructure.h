@@ -9,7 +9,8 @@
 
 #include "../Environment.h"
 #include "../Compression/Compression.h"
-#include "../Compression/MultiThreading.cpp"    // required for inclusion of multi-threading primitives used in MultiDecompress()
+#include "../Compression/MultiThreading.cpp"    // required for inclusion of multi-threading primitives used by multi-method Decompress() and DecompressMem()
+#include "../Compression/_Encryption/C_Encryption.h"
 
 #define FREEARC_FILE_EXTENSION             "arc"
 #define aSIGNATURE make4byte(65,114,67,1)  /* Сигнатура архивов FreeArc: ArC */
@@ -27,9 +28,9 @@ public:
   bool autodelete;                  // Автоматически удалять data при удалении самого массива
 
   void setsize (int _size)          {size = _size; data = size? new T[size] : NULL; autodelete=TRUE;}
-  void resize (int _size)           {if(autodelete) delete data; setsize(_size);}   // Изменить длину уже существующего массива
-  void set (int _size, void* ptr)   {resize(0); size=_size, data=(T*)ptr, autodelete=FALSE;}  // Использовать в качестве содержимого массива указанный кусок в памяти
-  ARRAY (int _size=0)               {setsize (_size);}       // Создать массив с длиной _size
+  void resize (int _size)           {if(autodelete) delete[] data; setsize(_size);}            // Изменить длину уже существующего массива
+  void set (int _size, void* ptr)   {resize(0); size=_size, data=(T*)ptr, autodelete=FALSE;}   // Использовать в качестве содержимого массива указанный кусок в памяти
+  ARRAY (int _size=0)               {setsize (_size);}                                         // Создать массив с длиной _size
   ~ARRAY()                          {resize(0);}
   T& operator[] (int i)             {return data[i];}
   T& operator() (int i)             {return data[i];}
@@ -60,6 +61,8 @@ struct BLOCK                       // информация о блоке архива
 
 struct BLOCK_DESCRIPTOR : BLOCK {};// дескриптор блока архива
 
+typedef char* GenerateDecryptionCallback (char*, char*, void*);
+
 
 /******************************************************************************
 ** Чтение потока данных *******************************************************
@@ -79,7 +82,7 @@ public:
     {
       free (buf);                      // Освободим предыдущий использованный буфер
       buf = (char*) malloc (size+8);   // Мы выделяем 8 лишних байт, чтобы можно было быстро декодировать целые числа, не опасаясь выйти за границу буфера
-      CHECK (buf, (s,"ERROR: can't alloc %lu memory bytes", (unsigned long)(size+8)));
+      CHECK (FREEARC_ERRCODE_NOT_ENOUGH_MEMORY,  buf,  (s,"ERROR: can't alloc %lu memory bytes", (unsigned long)(size+8)));
       file.seek (pos);
       file.read (buf, size);
       p=buf, bufend=p+size;
@@ -92,11 +95,11 @@ public:
       open (file, pos, compsize);
       char *origbuf = (char*) malloc (origsize+8);  // Лишние 8 байт для запаса при выполнении readInteger
       int result = DecompressMem (compressor, buf, compsize, origbuf, origsize);
-      CHECK (result!=FREEARC_ERRCODE_INVALID_COMPRESSOR, (s,"ERROR: unsupported compression method \"%s\"", compressor));
-      CHECK (result==origsize, (s,"ERROR: archive structure corrupted (decompression of control block failed)"));
+      CHECK (result,  result!=FREEARC_ERRCODE_INVALID_COMPRESSOR,  (s,"ERROR: unsupported compression method \"%s\"", compressor));
+      CHECK (FREEARC_ERRCODE_BAD_HEADERS,  result==origsize,  (s,"ERROR: archive structure corrupted (decompression of control block failed)"));
       free(buf), p=buf=origbuf, bufend=buf+origsize;
       CRC crc = CalcCRC (buf, origsize);
-      CHECK (crc==right_crc, (s,"ERROR: archive structure corrupted (control block failed CRC check)"))
+      CHECK (FREEARC_ERRCODE_BAD_HEADERS,  crc==right_crc,  (s,"ERROR: archive structure corrupted (control block failed CRC check)"))
       return *this;
     }
 
@@ -107,7 +110,7 @@ public:
       bufend -= sizeof(CRC);
       CRC right_crc = *(CRC*)bufend;
       CRC crc = CalcCRC (buf, size-sizeof(CRC));
-      CHECK (crc==right_crc, (s,"ERROR: archive structure corrupted (descriptor failed CRC check)"))
+      CHECK (FREEARC_ERRCODE_BAD_HEADERS,  crc==right_crc,  (s,"ERROR: archive structure corrupted (descriptor failed CRC check)"))
       return *this;
     }
 
@@ -115,7 +118,7 @@ public:
     // Достигнут конец буфера?
     bool eof ()         {return p>=bufend;}
     // Продвинуть указатель чтения на n байтов вперёд и проверить, что мы не вышли за конец буфера :)
-    void skip (int n)   {p+=n; CHECK(p<=bufend, (s,"ERROR: archive structure corrupted (bad data)"));}
+    void skip (int n)   {p+=n; CHECK(FREEARC_ERRCODE_BAD_HEADERS,  p<=bufend,  (s,"ERROR: archive structure corrupted (bad data)"));}
 
     // Прочитать целое число в формате с переменной длиной
     uint64 readInteger()
@@ -177,7 +180,7 @@ public:
     MEMORY_BUFFER &read (char* *x)    // Прочитать строку
     {
       char *end = (char*) memchr( p, '\0', (uint8*)bufend - (uint8*)p);
-      CHECK(end, (s,"ERROR: archive structure corrupted (bad string)"));
+      CHECK(FREEARC_ERRCODE_BAD_HEADERS,  end,  (s,"ERROR: archive structure corrupted (bad string)"));
       *x = (char*)p;         // Прочитанная строка будет указывать непосредственно в буфер
       p = end+1;
       return *this;
@@ -216,7 +219,7 @@ struct LOCAL_BLOCK_DESCRIPTOR : BLOCK
     buffer.read  (&origsize );
     buffer.read  (&compsize );
     buffer.read4 (&crc );
-    CHECK (sign==aSIGNATURE && origsize>0 && compsize>0 && compsize<=descr_pos, (s,"ERROR: archive structure corrupted (strange descriptor)"));
+    CHECK (FREEARC_ERRCODE_BAD_HEADERS,  sign==aSIGNATURE && origsize>0 && compsize>0 && compsize<=descr_pos,  (s,"ERROR: archive structure corrupted (strange descriptor)"));
     pos = descr_pos-compsize;
     //printf("%4.4s %d %s %u %u %08x\n", &sign, type, compressor, origsize, compsize, crc);
   }
@@ -228,7 +231,7 @@ struct FOOTER_BLOCK_LOCAL_DESCRIPTOR : LOCAL_BLOCK_DESCRIPTOR
   // Прочитать локальный дескриптор блока и выполнить дополнительные проверки, имеющие смысл только для FOOTER BLOCK
   FOOTER_BLOCK_LOCAL_DESCRIPTOR (MYFILE &arcfile, FILESIZE descr_pos)  :  LOCAL_BLOCK_DESCRIPTOR (arcfile, descr_pos)
   {
-    CHECK (type==FOOTER_BLOCK, (s,"ERROR: archive structure corrupted (footer block not found)"));
+    CHECK (FREEARC_ERRCODE_BAD_HEADERS,  type==FOOTER_BLOCK,  (s,"ERROR: archive structure corrupted (footer block not found)"));
   }
 };
 
@@ -242,7 +245,7 @@ FILESIZE FindFooterDescriptor (MYFILE &arcfile)
   arcfile.read (buf, size);
   for (char *ptr=buf+size-sizeof(uint32); ; ptr--) {
     if (*(uint32*)ptr == aSIGNATURE)    return (arcsize-size)+(ptr-buf);   // Позиция в файле сигнатуры, с которой начинается дескриптор FOOTER BLOCK
-    CHECK (ptr>buf, (s,"ERROR: this is not FreeArc archive or this archive is corrupt"));   // Сигнатура не найдена в последних MAX_FOOTER_DESCRIPTOR_SIZE байтах архива
+    CHECK (FREEARC_ERRCODE_BAD_HEADERS,  ptr>buf,  (s,"ERROR: this is not FreeArc archive or this archive is corrupt"));   // Сигнатура не найдена в последних MAX_FOOTER_DESCRIPTOR_SIZE байтах архива
   }
 }
 
@@ -262,16 +265,21 @@ public:
   FILESIZE                 SFXSize;    // Размер SFX-модуля перед архивом
 
   ARCHIVE () {}
-  ARCHIVE (FILENAME arcname) : arcfile (arcname, READ_MODE) {}   // Открывает файл архива
-  void read_structure();               // Считывает описания служебных блоков
+  ARCHIVE (FILENAME arcname) : arcfile (arcname, READ_MODE) {}                          // Открывает файл архива
+  void read_structure (GenerateDecryptionCallback* GenerateDecryption, void *auxdata);  // Считывает описания служебных блоков
 };
 
 // Считывает из FOOTER BLOCK описания служебных блоков
-void ARCHIVE::read_structure()
+void ARCHIVE::read_structure (GenerateDecryptionCallback* GenerateDecryption, void *auxdata)
 {
   FILESIZE pos = FindFooterDescriptor (arcfile);            // Найти в архиве дескриптор FOOTER BLOCK
   FOOTER_BLOCK_LOCAL_DESCRIPTOR arcFooter (arcfile, pos);   // Прочитать этот дескриптор и расшифровать его
-  buffer.openCompressedCheckCRC (arcFooter.compressor, arcFooter.origsize, arcfile, arcFooter.pos, arcFooter.compsize, arcFooter.crc); // Прочитать в буфер содержимое FOOTER BLOCK
+
+  // Добавить в алгоритм распаковки ключи для дешифрования
+  char compressor_buf[MAX_COMPRESSOR_STRLEN];
+  char *compressor = GenerateDecryption? GenerateDecryption (arcFooter.compressor, compressor_buf, auxdata) : arcFooter.compressor;
+
+  buffer.openCompressedCheckCRC (compressor, arcFooter.origsize, arcfile, arcFooter.pos, arcFooter.compsize, arcFooter.crc); // Прочитать в буфер содержимое FOOTER BLOCK
   buffer.read (&control_blocks_descriptors);                // Декодировать из буфера дескрипторы служебных блоков архива
   iterate_array (i, control_blocks_descriptors) {
     control_blocks_descriptors[i].pos  =  arcFooter.pos - control_blocks_descriptors[i].pos; // Заменим относительные адреса блоков (хранящиеся как смещение относительно начала ЭТОГО блока) на абсолютные
@@ -322,14 +330,19 @@ public:
   int block_start (int block_num)  {return block_num>0? num_of_files[block_num-1] : 0;}  // Номер первого файла в блоке данных block_num
   int block_end   (int block_num)  {return num_of_files[block_num];}                     // Номер первого файла в следующем блоке данных (т.е. последнего в этом + 1)
 
-  DIRECTORY_BLOCK (ARCHIVE &arc, BLOCK &block_info);   // Читает из архива содержимое блока каталога и декодирует его так, чтобы обеспечить быстрый доступ к описанию любого файла и любого блока данных
+  // Читает из архива содержимое блока каталога и декодирует его так, чтобы обеспечить быстрый доступ к описанию любого файла и любого блока данных
+  DIRECTORY_BLOCK (ARCHIVE &arc, BLOCK &block_info, GenerateDecryptionCallback* GenerateDecryption, void *auxdata);
 };
 
-DIRECTORY_BLOCK::DIRECTORY_BLOCK (ARCHIVE &arc, BLOCK &block_info) : arcfile (arc.arcfile)
+DIRECTORY_BLOCK::DIRECTORY_BLOCK (ARCHIVE &arc, BLOCK &block_info, GenerateDecryptionCallback* GenerateDecryption, void *auxdata) : arcfile (arc.arcfile)
 {
+  // Добавить в алгоритм распаковки ключи для дешифрования
+  char compressor_buf[MAX_COMPRESSOR_STRLEN];
+  char *compressor = GenerateDecryption? GenerateDecryption (block_info.compressor, compressor_buf, auxdata) : block_info.compressor;
+
   // Прочитам в буфер содержимое каталога, распакуем его и проверим CRC
-  CHECK (block_info.type == DIR_BLOCK, (s,"INTERNAL ERROR: must be dir block"));
-  buffer.openCompressedCheckCRC (block_info.compressor, block_info.origsize, arcfile, block_info.pos, block_info.compsize, block_info.crc);
+  CHECK (FREEARC_ERRCODE_BAD_HEADERS,  block_info.type == DIR_BLOCK,  (s,"INTERNAL ERROR: must be dir block"));
+  buffer.openCompressedCheckCRC (compressor, block_info.origsize, arcfile, block_info.pos, block_info.compsize, block_info.crc);
 
   // Прочитать общее кол-во solid-блоков и информацию о каждом из них - кол-во файлов, компрессор,
   // смещение начала solid-блока относительно блока каталога, и упакованный размер
@@ -354,9 +367,8 @@ DIRECTORY_BLOCK::DIRECTORY_BLOCK (ARCHIVE &arc, BLOCK &block_info) : arcfile (ar
   // Посчитаем общее кол-во файлов в этом каталоге и изменим num_of_files[block_num] так, чтобы этот массив можно было использовать для определения файлов, принадлежащих блоку данных block_num
   total_files=0;  iterate (num_of_blocks, (total_files += num_of_files[i], num_of_files[i] = total_files));
 
-  // Прочитаем имена каталогов и приведём символы-разделители каталогов к принятым на данной платформе
-  buffer.read  (&dirs);
-  iterate_array (i, dirs)    replace (dirs[i], UNSUPPORTED_PATH_DELIMITERS, PATH_DELIMITER);
+  // Прочитаем имена каталогов, очистим их от "..", и приведём символы-разделители каталогов к принятым на данной платформе
+  buffer.read  (&dirs);      iterate_array(i,dirs)  sanitize_filename(dirs[i]);
 
   // Прочитаем информацию об отдельных файлах
   buffer.read  (total_files, &name);

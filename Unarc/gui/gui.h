@@ -20,9 +20,12 @@ public:
 	WORD button;
 	TCHAR destinationDirectory[MY_FILENAME_MAX*2];
 	char destinationDirectory_utf8[MY_FILENAME_MAX*4];
+	char *pwd;
+	int pwdSize;
 	HWND hWndProgress;
 	volatile bool progressResult;
 	volatile char replaceDialogResult;
+	volatile char AskPasswordResult;
 	HICON hIcon;
 	HICON hFileIcon;
 	HANDLE thread;
@@ -44,13 +47,14 @@ public:
 	void DisplayHeader(char* header);
 	bool AllowProcessing(char cmd, int silent, TCHAR *arcname, char* utf8comment, int cmtsize, char* utf8outdir);
 	char*GetOutDir();
-	void BeginProgress(uint64 totalBytes);
+	bool BeginProgress(uint64 totalBytes);
 	bool ProgressRead (uint64 readBytes);
 	bool ProgressWrite(uint64 writtenBytes);
 	bool ProgressFile (bool isdir, const char *operation, TCHAR *filename, uint64 filesize);
 	bool ShowProgress();
 	void EndProgress(COMMAND*);
 	char AskOverwrite(TCHAR *filename, uint64 size, time_t modified);
+	char AskPassword(char *pwd, int pwdbuf_size);
 };
 
 #endif

@@ -239,18 +239,21 @@ void stat1 (char *nextmsg, int Size);
 //   1   общая статистика
 //   2   детальная информация о процессе
 static int verbose = 0;
-
 #endif
 
 
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ *********************************************************************
 
 // Возведение в степень
-inline static unsigned power (unsigned base, unsigned n)
+template <class T>
+T power (T base, unsigned n)
 {
-    int result;
-    for (result=1; n != 0; result *= base, n--);
-    return result;
+  T result = 1;
+  while (n) {
+    if (n % 2)  result*=base, n--;
+    n /= 2;  base*=base;
+  }
+  return result;
 }
 
 // Наибольшая степень base, не превосходящая sqrt(n),
@@ -287,45 +290,6 @@ static inline void memcpy_lz_match (byte* p, byte* q, unsigned len)
 }
 
 
-// Буфер, используемый для организации нескольких независимых потоков записи
-// в программе. Буфер умеет записывать в себя 32-разрядные числа. Позднее
-// содержимое буфера сбрасывается в выходной поток.
-// Дополнительно буфер поддерживает чтение ранее записанных в него данных.
-// Конец записанной части буфера - это max(p,end), где p - текущий указатель,
-// а end - максимальная позиция ранее записанных данных.
-// Проверки переполнения не производится, поскольку алгоритм гарантирует,
-// что переполнение не произойдёт.
-struct Buffer
-{
-    byte*  buf;                 // адрес выделенного буфера
-    byte*  p;                   // текущий указатель чтения/записи внутри этого буфера
-    byte*  end;                 // адрес после конца прочитанных/записанных данных
-    byte*  bufend;              // конец выделенного буфера
-    byte   smallbuf[16];        // маленький буфер, используемый для записи отдельных значений
-    int    len()                { return mymax(p,end)-buf; }
-    Buffer (int size)           { buf=p=end= size<sizeof(smallbuf)? smallbuf : (byte*) BigAlloc(size);  bufend=buf+size;}
-    void   free ()              { if (bufend>buf+sizeof(smallbuf))  BigFree(buf);  buf=p=end=NULL; }
-    void   put32(int x)         { *(int32*)p = x; p+= sizeof(int32); }  // only for FREEARC_INTEL_BYTE_ORDER!
-    void   put(void *b, int n)  { memcpy(p,b,n); p+= n; }
-// Для чтения данных
-    void   rewind()             { end=mymax(p,end); p=buf; }
-    int    get32()              { int x = *(int32*)p; p+= sizeof(int32); return x; }
-    bool   eof()                { return p>=end; }
-// Для FWRITE
-    int    remainingSpace()     { return bufend-p; }
-    void   empty()              { p=end=buf; }
-};
-
-// Записать 32-битное число в выходной поток
-#define Put32(x)                                           \
-{                                                          \
-    Buffer header(sizeof(int32));                          \
-    header.put32 (x);                                      \
-    FWRITE (header.buf, header.len());                     \
-    header.free();                                         \
-}
-
-
 // ОСНОВНОЙ АЛГОРИТМ *********************************************************************
 
 /*
@@ -337,86 +301,165 @@ struct Buffer
 
 #define update_hash(sub,add)                        \
 {                                                   \
-    hash = hash*PRIME + add - sub*cPOWER_PRIME_L;   \
+    hash = hash*PRIME + add - sub*PRIME_power_L;    \
 }
 
-#define chksum         ((hash>>28)&k1)
-#define PRIME          153191           /* or any other prime number */
-#define POWER_PRIME_L  power(PRIME,L)
-
-const int MAX_READ = 8*mb;  // Макс. объём входных данных, читаемых за раз
+const int PRIME = 153191;    // or any other large prime number
+const int MAX_BLOCK = 8*mb;  // Макс. объём входных данных, читаемых за раз
 
 
 // Вычислить количество элементов хеша
-MemSize CalcHashSize (MemSize HashBits, MemSize BlockSize, MemSize k)
+MemSize CalcHashSize (MemSize HashBits, MemSize BlockSize, int SmallestLen, int MinMatchLen, int ChunkSize, int Amplifier, int *L)
 {
-    // Размер хеша должен соответствовать количеству значений. которые мы хотим в него занести, но не превышать четверти от размера буфера / объёма входных данных (Size/16*sizeof(int)==Size/4)
-    return HashBits>0? (1<<HashBits) : roundup_to_power_of(BlockSize/3*2,2) / mymax(k,16);
+    // Мин. длина строк, совпадения в которых нужно находить
+    int Len = mymin(SmallestLen,MinMatchLen);
+    // Размер блоков, КС которых заносится в хеш
+    *L = ChunkSize? ChunkSize : rounddown_to_power_of(Len-1,2)/2;
+    // Размер хеша должен соответствовать 4*количество значений. которые мы хотим в него занести, но не превышать четверти от размера буфера / объёма входных данных (Size/16*sizeof(int)==Size/4)
+    return HashBits>0? (1<<HashBits) : roundup_to_power_of(BlockSize/3*2,2) / mymax(*L/4,16);
 }
 
+
 #ifndef FREEARC_DECOMPRESS_ONLY
-int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata)
+
+#define MULTI_THREADING_BASICS
+#include "../MultiThreading.h"
+
+struct Job
 {
-    // НАСТРОЙКА ПАРАМЕТРОВ АЛГОРИТМА  (копия в REP_METHOD::GetCompressionMem!)
+    int*   hashtable;         // Place for saving info about maximum hashes and their indeces
+    byte*  buf;               // Buffer being hashed
+    int    bytes;             // How much bytes to hash in buf[] (plus it needs a L-byte lookahead bytes after that)
+    int    L;                 // Size of rolling hash AND number of positions among those we are looking for "local maxima"
+                              //   (these may be different numbers in other implementations)
+
+    // Index L-byte blocks starting at buf[0]..buf[bytes-1]
+    void process()
+    {
+        int   PRIME_power_L = power(PRIME,L);
+        int  *hashptr       = hashtable;
+        byte *ptr           = buf;
+        int   num_blocks    = bytes/L;
+        if (num_blocks > 0)
+        {
+            int hash=0;  for (int i=0; i < L; i++)  update_hash (0, buf[i]);    // Initial hash value == hash of first L bytes of the buffer
+
+            // Split buffer into L-byte blocks and store maximal hash for each block and its position to hashptr[]
+            for (int block=0; block<num_blocks; block++) {
+                int maxhash = hash, maxi = 0;
+                for (int i=0; i<L; i++, ptr++) {
+                    if unlikely(hash > maxhash)
+                        maxhash = hash, maxi = i;
+                    update_hash (ptr[0], ptr[L]);
+                }
+                *hashptr++ = maxhash;
+                *hashptr++ = maxi;
+            }
+        }
+    }
+};
+
+
+int rep_compress (unsigned BlockSize, int MinCompression, int ChunkSize, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata)
+{
+    // НАСТРОЙКА ПАРАМЕТРОВ АЛГОРИТМА
     if (SmallestLen>MinMatchLen)  SmallestLen=MinMatchLen;
-    int L = roundup_to_power_of (SmallestLen/2, 2);  // Размер блоков, КС которых заносится в хеш
-    int k = sqrtb(L*2), k1=k-1, test=mymin(k*Amplifier,L), cPOWER_PRIME_L = POWER_PRIME_L;
-    int HashSize, HashMask=0, *hasharr=NULL, hash=0;  int errcode=FREEARC_OK;
-    int Base=0, last_i=0, last_match=0;    // last_match points to the end of last match written, we shouldn't start new match before it
-#ifdef DEBUG
-    int matches=0, total=0, lit=0;
-#endif
+    int L;   // Размер блоков, КС которых заносится в хеш
+    int HashSize = CalcHashSize (HashBits, BlockSize, SmallestLen, MinMatchLen, ChunkSize, Amplifier, &L);
+    int HashMask = HashSize-1;
+    int *hasharr=NULL;  int errcode=FREEARC_OK;
+    int DataEnd=0, last_i=0, last_match=0;    // last_match points to the end of last match written, we shouldn't start new match before it
+
     byte *buf = (byte*) BigAlloc(BlockSize);   // Буфер, куда будут помещаться входные данные
     if (buf==NULL)  return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;    // Error: not enough memory
+
+    // Alloc hash array
+    hasharr  = (int *) BigAlloc (HashSize * sizeof(int));
+    if (HashSize && hasharr==NULL)  {BigFree(buf); return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;}   // Error: not enough memory
+    memset (hasharr, 0, HashSize * sizeof(int));
+    debug (verbose>0 && MinMatchLen==SmallestLen && printf(" Buf %d mb, MinLen %d, Hash %d mb, Amplifier %d\n", ((BlockSize-1)/mb)+1, MinMatchLen, (HashSize*sizeof(int))>>20, Amplifier));
+    debug (verbose>0 && MinMatchLen!=SmallestLen && printf(" Buf %d mb, MinLen %d, Barrier %d, Smallest Len %d, Hash %d mb, Amplifier %d\n", ((BlockSize-1)/mb)+1, MinMatchLen, Barrier, SmallestLen, (HashSize*sizeof(int))>>20, Amplifier));
+
     FOPEN();
 
-    int bsize = (mymin(BlockSize,MAX_READ)/SmallestLen+1) * sizeof(int32);    // Макс. объём данных, который может быть записан в буфер длин или смещений
-    Buffer lens(bsize), offsets(bsize), datalens(bsize), dataOffsets(bsize);  // Буфера для отдельного хранения длин, смещений совпадений, длин несжатых блоков и самих этих блоков. Эта группировка позволяет увеличить конечную степень сжатия
+    // Буфера для отдельного хранения длин, смещений совпадений, длин несжатых блоков и самих этих блоков. Такое группирование позволяет увеличить конечную степень сжатия
+    int bsize = (mymin(BlockSize,MAX_BLOCK)/SmallestLen+1) * sizeof(int32);    // Макс. объём данных, который может быть записан в любой из этих буферов
+    Buffer lens(bsize), offsets(bsize), datalens(bsize), dataOffsets(bsize);
 
-    // Каждая итерация этого цикла читает, обрабатывает и записывает один блок данных
-    // размером в min(1/8 буфера,8мб). Это обеспечивает поведение типа sliding window,
-    // то есть возможность поиска совпадений с предыдущими данными почти во всю длину буфера
-    for (int FirstTime=1; ; FirstTime=0) {
+    // Приготовления к хешированию в фоновых потоках
+    const int HTJOBS  = GetCompressionThreads(),     // количество одновременно выполняемых заданий по хешированию
+              HTBUFS  = mymax(16,HTJOBS*2),          // количество буферов для сохранения результатов хеширования (минимум 16 для более равномерного распределения нагрузки)
+              HTBLOCK = mymax(256*kb,L*4)/L*L,       // объём данных, обрабатываемых одним заданием хеширования
+              HTCOUNT = HTBLOCK/L*2;                 // кол-во чисел, запоминаемых одним заданием хеширования (на каждые L байт запоминается наибольшее значение хеша и его индекс)
+    int free_jobs     = HTBUFS;                      // количество свободных буферов для результатов хеширования
+    int ht_index      = 0;                           // индекс очередного свободного буфера для результатов хеширования
+    int next_job_i    = 0;
+    int next_flush    = 0;
+    int *ht = (int*) BigAlloc(HTBUFS*HTCOUNT*sizeof(*ht));
+    MultipleProcessingThreads<Job> HashingThreads;  HashingThreads.MaxJobs = HTBUFS;  HashingThreads.NumThreads = HTJOBS;
+    if (ht==NULL || HashingThreads.start()!=0)  {errcode=FREEARC_ERRCODE_NOT_ENOUGH_MEMORY; goto finished;}   // Error: not enough memory
 
-        // ЧТЕНИЕ ВХОДНЫХ ДАННЫХ
-        int Size;  READ_LEN(Size, buf+Base, mymin (BlockSize-Base, FirstTime? MAX_READ : mymin (BlockSize/8, MAX_READ)));
-        if (Size < 0)  {errcode=Size; goto finished;}   // Error: can't read input data
-        if (FirstTime) {
-            HashSize = CalcHashSize (HashBits, BlockSize, k);
-            HashMask = HashSize-1;
-            hasharr  = (int *) BigAlloc (HashSize * sizeof(int));
-            if (HashSize && hasharr==NULL)  {errcode=FREEARC_ERRCODE_NOT_ENOUGH_MEMORY; goto finished;}   // Error: not enough memory
-            memset (hasharr, 0, HashSize * sizeof(int));
-            debug (verbose>0 && MinMatchLen==SmallestLen && printf(" Buf %d mb, MinLen %d, Hash %d mb, Amplifier %d\n", ((Size-1)>>20)+1, MinMatchLen, (HashSize*sizeof(int))>>20, test/k));
-            debug (verbose>0 && MinMatchLen!=SmallestLen && printf(" Buf %d mb, MinLen %d, Barrier %d, Smallest Len %d, Hash %d mb, Amplifier %d\n", ((Size-1)>>20)+1, MinMatchLen, Barrier, SmallestLen, (HashSize*sizeof(int))>>20, test/k));
-            Put32 (BlockSize);   // Запишем размер словаря в выходной поток
-        }
-        if (Size == 0) break;  // No more input data
-        debug (verbose>0 && printf(" Bytes read: %u\n", Size));
-        if (Base==0)  {   // В первый раз или после перехода через границу буфера
-            hash=0;  for (int i=0; i < mymin(L,Size); i++)  update_hash (0, buf[i]);  // Начальное значение hash - КС от первых L байт буфера
-        }
-        int literals=0; lens.empty(), offsets.empty(), datalens.empty(), dataOffsets.empty();  // Очистить буфера
 
-        // ОСНОВНОЙ ЦИКЛ, НАХОДЯЩИЙ ПОВТОРЯЮЩИЕСЯ СТРОКИ ВО ВХОДНЫХ ДАННЫХ
-        for (int i=last_i; i+L*2 < Base+Size; last_i=i) {   // Обрабатываем по L байт за одну итерацию цикла + надо иметь L байт lookahead
+    // ГЛАВНЫЙ ЦИКЛ. КАЖДАЯ ИТЕРАЦИЯ КОДИРУЕТ ~8МБ ВХОДНЫХ ДАННЫХ.
+   {bool DoItOnce       = true;   // Для однократной записи BlockSize в выходной буфер ПОСЛЕ чтения первых входных данных
+    bool MoreInputData  = true;   // Продолжать чтение входных данных
+    bool MoreHashedData = true;   // Продолжать получение хешированных блоков и их сжатие
 
-            // ИЩЕМ СОВПАДЕНИЕ В ПЕРВЫХ test БАЙТАХ БЛОКА ДЛИНЫ L
-            for (int j=0; j<test; j++, i++) {
-                if (i>=last_match) {   // Проверяем совпадение только если предыдущее найденное совпадение уже кончилось
+    while (MoreHashedData) {
+        int literals=0; lens.empty(), offsets.empty(), datalens.empty(), dataOffsets.empty();  // Очистим буфера
+#ifdef DEBUG
+        int match_cnt=0, matches=0;
+#endif
+
+        // Накапливаем сжатые данные, пока не обработаем очередные 8 мб входных данных
+        next_flush += mymin (BlockSize-next_flush, MAX_BLOCK);
+        while (last_i+L < next_flush) {   // Добавляем L байт потому, что первый хешируемый блок на L байт меньше
+
+            // ЧТЕНИЕ ВХОДНЫХ ДАННЫХ И ХЕШИРОВАНИЕ ИХ В ФОНОВЫХ ПОТОКАХ
+            while (free_jobs>0 && DataEnd<BlockSize && MoreInputData)
+            {
+                // Читаем очередные 256кб
+                int Size;  READ_LEN(Size, buf+DataEnd, mymin (BlockSize-DataEnd, HTBLOCK));
+                if (Size < 0)  {errcode=Size; goto finished;}         // Error: can't read input data
+                if (DoItOnce)  {FWRITE4 (BlockSize); DoItOnce=false;} // Запишем размер словаря в выходной поток
+                if (Size == 0)  MoreInputData = false;
+                DataEnd += Size;                                      // Граница прочитанных данных
+
+                // Отправляем прочитанные данные на хеширование (первый хешируемый блок на L байт меньше)
+                int bytes =  DataEnd-(next_job_i+L);    if (bytes<=0)  {if (Size>0)  continue;  else bytes=0 /* no MoreHashedData signal */;}
+                Job job   =  {ht+ht_index*HTCOUNT, buf+next_job_i, bytes, L};       // last byte accessed: buf[i+bytes+L-1] == buf[i+ DataEnd-(i+L) +L-1] == buf[DataEnd-1]
+                HashingThreads.Put(job);
+                debug (verbose>0 && printf(" Read (%x,%x),  Job[%d] (%x,%x),  free_jobs %d\n", DataEnd-Size, Size, ht_index, next_job_i, bytes, free_jobs));
+                next_job_i += bytes;
+                ht_index = (ht_index+1)%HTBUFS;
+                free_jobs--;
+            }
+            // Получаем результаты хеширования для очередных 256 кб
+            Job job = HashingThreads.Get();
+            int *hashptr  = job.hashtable;
+            int next_fill = job.buf+job.bytes-buf;
+            free_jobs++;
+            debug (verbose>0 && printf(" Hashed (%x,%x),  free_jobs %d\n", job.buf-buf, job.bytes, free_jobs));
+            if (job.bytes==0)  {MoreHashedData=false; goto encode_data;}
+
+            // ОСНОВНОЙ ЦИКЛ, НАХОДЯЩИЙ ПОВТОРЯЮЩИЕСЯ СТРОКИ ВО ВХОДНЫХ ДАННЫХ
+            for ( ; last_i<next_fill; last_i+=L) {
+                // Проверяем совпадение в лучшем на следующие L байт блоке тоже длины L
+                int hash = *hashptr++;            // Считываем хеш и индекс этого блока, уже найденные одним из наших фоновых потоков
+                int i    = *hashptr++ + last_i;
+                if (i >= last_match) {            // Проверяем совпадение только если предыдущее найденное совпадение уже кончилось
                     int match = hasharr[hash&HashMask];
-                    if (match && chksum==(match&k1)) {  // Младшие биты значения match хранят контрольную сумму chksum. Её сличение позволяет пропустить бесполезное сравнение блоков в случае хеш-коллизии (использования одного элемента hasharray при разных значениях hash)
-                        match &= ~k1;   // Уберём КС из match. Теперь i и match - адреса предположительно совпадаюших блоков длины L
-                        if (match>=i && match<Base+Size)  goto no_match;  // match попадает на ещё не обработанные данные, то есть он заведомо устарел
+                    if (match) {
+                        if (match>=i && match<DataEnd)  goto no_match;  // match попадает на ещё не обработанные данные, то есть он заведомо устарел
                         // Наименьшее/наибольшее значение, которое может принимать при поиске
                         // индекс базирующийся на i, чтобы индекс базирующийся на match,
                         // не вышел за пределы буфера и не заглянул в будущие данные
-                        int LowBound  = match<i? i-match : match-(Base+Size)>i? 0 : i - (match-(Base+Size));
+                        int LowBound  = match<i? i-match : match-DataEnd>i? 0 : i - (match-DataEnd);
                         int HighBound = BlockSize - match + i;
                         // Найдём реальные начало и конец совпадения, сравнивая вперёд и назад от buf[i] <=> buf[match]
-                        // i ограничено снизу и сверху значениями last_match и Base+Size, соответственно
+                        // i ограничено снизу и сверху значениями last_match и DataEnd, соответственно
                         int start = find_match_start (buf+match, buf+i, buf+mymax(last_match,LowBound)) - buf;
-                        int end   = find_match_end   (buf+match, buf+i, buf+mymin(Base+Size,HighBound)) - buf;
+                        int end   = find_match_end   (buf+match, buf+i, buf+mymin(DataEnd,HighBound)) - buf;
                         // start и end - границы совпадения вокруг i. Проверим, что найденное совпадение имеет длину >=MinMatchLen (или SmallestLen, если дистанция >Barrier)
                         if (end-start >= (i-match<Barrier? MinMatchLen : SmallestLen) ) {
                             int offset = i-match;  if (offset<0)  offset+=BlockSize;
@@ -426,45 +469,37 @@ int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int B
                                 offsets.put32 (offset);             // Смещение match'а
                                    lens.put32 (end-start);          // Длина match'а
                             // Запомнить позицию конца найденного совпадения и вывести отладочную статистику
-                            debug ((matches++, total += end-start, lit += start-last_match));
+                            debug ((match_cnt++, matches+=end-start));
                             debug (verbose>1 && printf ("Match %d %d %d  (lit %d)\n", -offset, start, end-start, start-last_match));
                             literals += start-last_match;  last_match=end;
                         }
                     }
                 }
-      no_match: // Заносим в таблицу новые блоки через каждые k байт. Если Amplifier=1, то эта строчка срабатывает только при j=0, а остальные блоки индексируются в следующем цикле
-                if ((i&k1) == 0)  hasharr[hash&HashMask] = i + chksum;
-                update_hash (buf[i], buf[i+L]);  // Обновим sliding hash, внеся в него buf[i+L] и вынеся buf[i]
-            }
-            // NB! Выровняться до кратной k позиции!
-
-            // ЗАНОСИМ В ТАБЛИЦУ НОВЫЕ БЛОКИ ЧЕРЕЗ КАЖДЫЕ k БАЙТ ДО КОНЦА ТЕКУЩЕГО БЛОКА ДЛИНЫ L
-            while ((i&(L-1)) != 0) {
-                hasharr[hash&HashMask] = i + chksum;
-                for (int j=0; j<k; j++, i++)   update_hash (buf[i], buf[i+L]);
+    no_match:   // Заносим в хеш-таблицу этот L-байтный блок
+                hasharr[hash&HashMask] = i;
             }
         }
 
-        // ВЫВОД СЖАТЫХ ДАННЫХ В ВЫХОДНОЙ ПОТОК И ПОДГОТОВКА К ОБРАБОТКЕ СЛЕДУЮЩЕЙ ПОРЦИИ ДАННЫХ
-        Base += Size;
-        if (Base==BlockSize)  last_i=Base;       // Закодировать все данные до конца буфера
-        if (last_match > last_i) {               // Если последний матч кончается в ещё не проиндексированной области
-          datalens.put32 (0);                    //   Ничего кодировать не надо, но datalens должен всё равно быть ровно на одну запись длиннее lens/offsets
+    encode_data:
+        // ВЫВОД СЖАТЫХ ДАННЫХ В ВЫХОДНОЙ ПОТОК
+        if (next_flush==BlockSize || !MoreHashedData)  last_i=DataEnd;   // Закодировать все оставшиеся / до конца буфера данные
+        if (last_match > last_i) {                                       // Если последний матч кончается в ещё не проиндексированной области
+          datalens.put32 (0);                                            //   Ничего кодировать не надо, но datalens должен всё равно быть ровно на одну запись длиннее lens/offsets
         } else {
-          // Записать в выходные буфера остаток данных от последнего найденного совпадения до последней проиндексированной поиции
-          dataOffsets.put32 (last_match);          // Адрес остатка данных
-             datalens.put32 (last_i-last_match);   // Длина остатка данных
+          // Записать в выходные буфера остаток данных от последнего найденного совпадения до последней проиндексированной позиции
+          dataOffsets.put32 (last_match);                                // Адрес остатка данных
+             datalens.put32 (last_i-last_match);                         // Длина остатка данных
           literals  += last_i-last_match;
           last_match = last_i;
         }
-        if (Base==BlockSize) {       // Если происходит переход через границу буфера
-          Base=last_match=last_i=0;  //   Да! Начать заполнять буфер с начала!
+        if (next_flush==BlockSize) {                                     // Если происходит переход через границу буфера
+          DataEnd=last_match=last_i=next_job_i=next_flush=0;             //   Да! Начать заполнять буфер с начала!
         }
         // Записать размер сжатых данных и количество найденных совпадений в буфер
         int outsize = sizeof(int32)*2+lens.len()+offsets.len()+datalens.len()+literals;
         QUASIWRITE (outsize);
-        Put32 (outsize-sizeof(int32));
-        Put32 (lens.len()/sizeof(int32));
+        FWRITE4 (outsize-sizeof(int32));
+        FWRITE4 (lens.len()/sizeof(int32));
         // Вывести содержимое буферов и несжатые данные в выходной поток
         FWRITE (    lens.buf,     lens.len());
         FWRITE ( offsets.buf,  offsets.len());
@@ -475,28 +510,34 @@ int rep_compress (unsigned BlockSize, int MinCompression, int MinMatchLen, int B
         }
         FFLUSH();
         // Отладочная статистика
-        debug (verbose>0 && printf(" Total %d bytes in %d matches (%d + %d = %d)\n", total, matches, sizeof(int32)*2+lens.len()+offsets.len()+datalens.len(), lit, sizeof(int32)*2+lens.len()+offsets.len()+datalens.len()+lit));
-    }
+        debug (verbose>0 && printf(" Compressed %d -> %d (%d + %d), %d bytes in %d matches, free_jobs %d\n", literals+matches, outsize, outsize-literals, literals, matches, match_cnt, free_jobs));
+    }}
+
 
     // Записать финальный блок, содержащий несжавшийся остаток данных, и 0 - признак конца данных
-   {int datalen = Base-last_match;
-    Put32 (sizeof(int32)*2 + datalen);  // Длина сжатого блока
-    Put32 (0);                          //   0 matches in this block
-    Put32 (datalen);                    //   Длина остатка данных
-    FWRITE (buf+last_match, datalen);   //   Сами эти данные
-    Put32 (0);}                         //   EOF flag (see below)
+   {int datalen = DataEnd-last_match;
+    if (datalen) {
+        FWRITE4 (sizeof(int32)*2 + datalen);  // Длина сжатого блока
+        FWRITE4 (0);                          //   0 matches in this block
+        FWRITE4 (datalen);                    //   Длина остатка данных
+        FWRITE  (buf+last_match, datalen);    //   Сами эти данные
+    }}
+    FWRITE4 (0);                              //   EOF flag (see below)
 finished:
     FCLOSE();
     BigFree(hasharr);
+    if (errcode>=0) {                         // Only if we are sure that b/g threads are finished all their jobs
+        HashingThreads.finish();
+        BigFree(ht);
+    }
     BigFree(buf);
-    lens.free(); offsets.free(); datalens.free(); dataOffsets.free();
     return errcode>=0? 0 : errcode;
 }
 #endif // FREEARC_DECOMPRESS_ONLY
 
 
 // Classical LZ77 decoder with sliding window
-int rep_decompress (unsigned BlockSize, int MinCompression, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata)
+int rep_decompress (unsigned BlockSize, int MinCompression, int ChunkSize, int MinMatchLen, int Barrier, int SmallestLen, int HashBits, int Amplifier, CALLBACK_FUNC *callback, void *auxdata)
 {
     int errcode;
     byte *buf0 = NULL;
@@ -531,7 +572,7 @@ int rep_decompress (unsigned BlockSize, int MinCompression, int MinMatchLen, int
     }
 
     // Буфер, куда будут помещаться входные данные
-    bufsize = mymin(BlockSize,MAX_READ)+1024;
+    bufsize = mymin(BlockSize,MAX_BLOCK)+1024;
     buf0 = (byte*) BigAlloc (bufsize);
     if (buf0==NULL)  ReturnErrorCode (FREEARC_ERRCODE_NOT_ENOUGH_MEMORY);
 
@@ -590,7 +631,7 @@ int rep_decompress (unsigned BlockSize, int MinCompression, int MinMatchLen, int
             int offset = offsets[i];  len = lens[i];
             debug (verbose>1 && printf ("Match %d %d %d\n", -offset, data-start+cumulative_size[current_block], len));
             // Пока одна из копируемых строк пересекает границу буфера
-            while (offset > data-start && len  ||  end-data < len)
+            while ((offset > data-start && len)  ||  end-data < len)
             {
                 MemSize dataPos = data-start+cumulative_size[current_block];   // Absolute position of LZ dest
                 MemSize fromPos = dataPos-offset;  int k;                      // Absolute position of LZ src
@@ -652,7 +693,31 @@ finished:
 6. -l8192 -s512
 7. buffer data for Out() in 256k blocks
 
+http://forum.ru-board.com/topic.cgi?forum=5&topic=35164&start=1120#13
+-хеш: обновлять на 4-16 байт за раз
++хеш: считать предварительно в заднем потоке
+a99: уменьшать HTBUFS до 1-2, иначе мы выбиваемся из кеша!
+производить все обращения к памяти заранее в заднем потоке
+производить все чтения/записи данных в задних потоках
+просчитывать chksum/i+chksum и hasharr+hash&HashMask в заднем потоке
+  использовать все свободные биты для chksum (например, rep:1g:32:c16 - два бита в начале и два в конце)
+  делать префетч по этим просчитанным адресам на 1-4 L-байтных блока вперёд: __builtin_prefetch (hashptr[K], 0/1, 0-3);
+  упростить и развернуть эти циклы, сделать для них template по <test,k,L>
+при поиске границ матча сравнивать по 4+ байта
+помечать хеши 256-байтных строк в последних 512 мб в однобитной таблице, сегментируя её на 8-32 бита
+в идеале - найти способ реализовать rep:32 таким же быстрым, как rep:512
+опционально - интегрировать его в tor:3 (в основном это имеет смысл, если удастся сделать быстрый rep:32)
+? if (i>=last_match) -> if (i+L>=last_match)  -- поскольку в следующие L байт шанса проверить матч у нас не будет...
+
+  anchored hashing:
+хешировать/проверять блоки длины меньше L, чтобы увеличить вероятность попадания на матч
+запоминать N наибольших значений хеша внутри блока
+хранить M значений в каждой строке хеш-таблицы, сдвигая их при обновлении строки (а-ля HT4)
+  оптимизация:
+? I/O в основном треде, сжатие в b/g треде (два набора выходных буферов lens/offsets/...)
+__builtin_prefetch для адресов в hasharr[] - вычислять, делать prefetch и ненадолго сохранять их в 8-элементном массиве
+
 Fixed bugs:
 1. Проверка выхода за границу буфера: offset<data-data0 вместо <=
-2. last_match не обнулялся при выходе из цикла при Base=0 и Size=0
+2. last_match не обнулялся при выходе из цикла при DataEnd=0 и Size=0
 */

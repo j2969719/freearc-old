@@ -14,31 +14,34 @@ public:
 
   // Конструктор, присваивающий параметрам метода сжатия значения по умолчанию
   TORNADO_METHOD();
-  // Универсальный метод: даём положительный ответ на запросы "VeryFast?" для режимов сжатия 1-4
+  // Универсальный метод: даём положительный ответ на запросы "VeryFast?" для режимов сжатия 1-4, а ткже на запрос "has_progress?"
   virtual int doit (char *what, int param, void *data, CALLBACK_FUNC *callback)
   {
-      if (strequ (what,"VeryFast?"))  return m.hash_row_width<=2;
-      else return COMPRESSION_METHOD::doit (what, param, data, callback);
+         if (strequ (what, "VeryFast?"))          return m.hash_row_width<=2;
+    else if (strequ (what, "has_progress?"))      return 1;                        // Да, этот алгоритм поддерживает отчёт о прогрессе упаковки
+    else                                          return COMPRESSION_METHOD::doit (what, param, data, callback);  // Передать остальные вызовы родительской процедуре
   }
+
+  // Упаковка/распаковка в памяти
+  virtual int DeCompressMem (COMPRESSION direction, void *input, int inputSize, void *output, int *outputSize, CALLBACK_FUNC *callback=0, void *auxdata=0, void **CodecState=0);
 
   // Функции распаковки и упаковки
   virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
 #ifndef FREEARC_DECOMPRESS_ONLY
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void);
+  virtual void    SetCompressionMem        (MemSize mem);
+  virtual void    SetMinDecompressionMem   (MemSize mem)        {SetDictionary (mem);}
+  virtual void    SetDictionary            (MemSize dict);
+#endif
+  virtual MemSize GetDictionary            (void)               {return m.buffer;}
+  virtual MemSize GetDecompressionMem      (void);
+  virtual LongMemSize GetMaxCompressedSize (LongMemSize insize);
+
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_TORNADO)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return m.hashsize + m.buffer + tornado_compressor_outbuf_size(m.buffer);}
-  virtual MemSize GetDictionary         (void)         {return m.buffer;}
-  virtual MemSize GetBlockSize          (void)         {return 0;}
-  virtual void    SetCompressionMem     (MemSize mem)  {if (mem>0)   m.hashsize = 1<<lb(mem/3), m.buffer=mem-m.hashsize;}
-  virtual void    SetDecompressionMem   (MemSize mem)  {SetDictionary (mem);}
-  virtual void    SetDictionary         (MemSize dict);
-  virtual void    SetBlockSize          (MemSize bs)   {}
-#endif
-  virtual MemSize GetDecompressionMem   (void)         {return m.buffer + tornado_decompressor_outbuf_size(m.buffer);}
 };
 
 // Разборщик строки метода сжатия TORNADO

@@ -147,7 +147,7 @@ int lzp_compress (MemSize BlockSize, int MinCompression, int MinMatchLen, int Ha
         BIGALLOC (BYTE, Out, InSize+2);
         OutSize = LZPEncode (In, InSize, Out, MinMatchLen, 1<<HashSizeLog, Barrier, SmallestLen);
         if (OutSize<0)  {errcode=OutSize; goto finished;}
-        if (OutSize==0 || MinCompression>0 && OutSize/MinCompression>=InSize/100) {
+        if (OutSize==0  ||  MinCompression>0 && OutSize>=(double(InSize)*MinCompression)/100) {
             // Упаковать данные [достаточно хорошо] не удалось, запишем вместо них исходные данные
             BigFreeAndNil(Out);
             WRITE4 (-InSize);      // Отрицательное число в качестве длины блока - признак Stored блока
@@ -250,18 +250,6 @@ void LZP_METHOD::SetBlockSize (MemSize bs)
   }
 }
 
-// Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_LZP)
-void LZP_METHOD::ShowCompressionMethod (char *buf, bool purify)
-{
-    LZP_METHOD defaults; char BlockSizeStr[100], MinCompressionStr[100], BarrierTempStr[100], BarrierStr[100], SmallestLenStr[100];
-    showMem (BlockSize, BlockSizeStr);
-    showMem (Barrier,   BarrierTempStr);
-    sprintf (MinCompressionStr, MinCompression!=defaults.MinCompression? ":%d%%" : "", MinCompression);
-    sprintf (BarrierStr, Barrier!=defaults.Barrier? ":d%s" : "", BarrierTempStr);
-    sprintf (SmallestLenStr, SmallestLen!=defaults.SmallestLen? ":s%d" : "", SmallestLen);
-    sprintf (buf, "lzp:%s%s:%d:h%d%s%s", BlockSizeStr, MinCompressionStr, MinMatchLen, HashSizeLog, BarrierStr, SmallestLenStr);
-}
-
 // Устанавливает количество памяти, которое должно использоваться при упаковке и распаковке
 void LZP_METHOD::SetCompressionMem (MemSize mem)
 {
@@ -277,6 +265,19 @@ void LZP_METHOD::SetCompressionMem (MemSize mem)
 
 
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
+
+// Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_LZP)
+void LZP_METHOD::ShowCompressionMethod (char *buf, bool purify)
+{
+    LZP_METHOD defaults; char BlockSizeStr[100], MinCompressionStr[100], BarrierTempStr[100], BarrierStr[100], SmallestLenStr[100];
+    showMem (BlockSize, BlockSizeStr);
+    showMem (Barrier,   BarrierTempStr);
+    sprintf (MinCompressionStr, MinCompression!=defaults.MinCompression? ":%d%%" : "", MinCompression);
+    sprintf (BarrierStr, Barrier!=defaults.Barrier? ":d%s" : "", BarrierTempStr);
+    sprintf (SmallestLenStr, SmallestLen!=defaults.SmallestLen? ":s%d" : "", SmallestLen);
+    sprintf (buf, "lzp:%s%s:%d:h%d%s%s", BlockSizeStr, MinCompressionStr, MinMatchLen, HashSizeLog, BarrierStr, SmallestLenStr);
+}
 
 // Конструирует объект типа LZP_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах

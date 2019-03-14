@@ -357,69 +357,270 @@ linux: open .tar.gz in single click
 http://www.donationcoder.com/Reviews/Archive/ArchiveTools/index.html
 izarc, alzip, tugzip
 http://www.pkgid.ru/index.php?name=Html_Content&op=page&folder=Freearc&contentsite=chapter_freearc.html
+http://www.saanvi.ru/fac.php?filename=txt/soft/freearc.txt
+http://zenway.ru/page/freearc
 файл linux-problems
 тестирование x.cmd - файл остаётся открытым (уже исправлено). затем arcinfo, exit - freearc зависает в памяти
 shutdown: продумать работу в режиме файл-менеджера и чекбокс в progress window
 bookmarking, search, archive conversion, secure deletion
 -lc: убрать +5% (вместо этого -lc=80%*RAM если необходимо), вычитать память кеша из [cd]limit
 DoubleClick->Run inside archive (включая обновление архива если файл был изменён)
-ctrl-f4 - сортировка по расширению
-multiple arc*.ini files
-option 'Do not show hidden files and folders' (like in Explorer)
-настройки "доп. расширения архивов FreeArc" и "доп. расширения прочих архивов"
-архивные команды в Explorer меню для неархивов, just for case
-bug: не удаляем tempfiles при cancel/^break
+bug: не удаляем tempfiles при cancel/^break. workaround: Спрашивать при старте GUI "найдены временные файлы..."
 unix: makefile: добавлять UsePersonalSettings=1 в freearc.ini
 unix: -mrep+tempfile+lzma не может прочесть созданный tempfile
-unix: BeginCompressionThreadPriority
+Не удаётся воспроизвести: a a -mdict:p+rzm затем a a -mdict:100m+lzma:128m:max - ошибка при -t, то же при "arc create a -m7t -t linux"
+LZMA2
+Codecs\FreeUnarc.dll (внешняя dll для 7z.dll - see Unarc\7z-unarc)
+arc.ini: проверять синтаксис (чтобы ловить ошибки типа " [External compressor:srep")
+SetProcessDPIAware()
+инкрементальная архивация - в новый архив пишутся файлы, которых нет/изменились по сравнению с существующими архивами
+bug: kpidOffset возращает 0 для cab и многих других архивных форматов, поэтому невозможно определить "cab inside arc" или "arc inside cab" (см. fix01)
+sending mail: MAPISendMail & CPP\7zip\UI\Common\Update.cpp:864
+0.70
+  если в установщике не установлена галка "ассоциировать с другими архивами", он все равно ассоциирует (при установке с нуля отключены оба ассоциирования!)
+    разобраться с ассоциированием в инсталяторе, portable версии и т.д.
+  falsely claims it has decompressed a file from zip archive when it has not - http://encode.ru/threads/43-FreeArc?p=28958&viewfull=1#post28958
+    -ap в 7z.dll! возможно, пора сделать -ap совместимым с rar?
+  при прерывании сжатия в zip остаётся временный архив
+  не дописывает конец распакованного файла при ERROR: CRC failed in "enwik9". File is broken.
+  aes:r100; remove "0731 Fast" encryption mode from freearc.inis in the hfUpdateConfigFile procedure (since aes will become as fast as blowfish)
+  arc a a.log new.arc  --  объявляется "WARNING: No files to archive" и стирается a.log!!
+  arc a dir/ - создаёт архив dir/.arc; нужно отсекать имена архивов кончающиеся на :/\ или содержащие :
+  обновление архива, содержащего xxx: если не удалось открыть xxx с диска, то файл из архива исчезнет вообще
+  инсталятор: Uninstall.aspx
+  unarc/sfx: поддерживать синтаксисы rar и 7-zip, унифицировать unarc и sfx (проверять на архив в конце argv[0]), поддерживать вызов "sfx.exe another-archive.arc"
+
+  по окончании операции в заголовке и поле Message "SUCESSFULLY TESTED a.arc", "%1 WARNINGS IN TESTING a.arc", "ERROR IN ..."
+    При тестировании из Explorer не очень ясно что оно завершилось успешно
+    новый индикатор прогресса - сделать его более изящным при показе после завершения операции (когда часть полей очищена)
+    "Paused ..." в заголовке окна во время паузы
+    "a -t" по умолчанию не должен делать паузу после операции?
+  Считать отдельно usertime/kerneltime, включая в них время подпроцессов (внешних упаковщиков в freearc)  (Linux: getrusage/times)
+  import LargePages support from SREP
+  compression+rr: default button==cancel, не делается clearStats перед началом след. операции
+    очищать GUI индикатор прогресса сразу после операции, выводить в него заголовок окна и текст "Ожидание..." при uiStartArchive
+  Compress shared files (-ssw) для zip/7z - взять перевод из 7zip-lang
+    передавать опцию -ssw в 7-zip (а также поддерживать её самому и по умолчанию не архивировать открытые файлы)
+  GUI: выбирать тип архива автоматически по выбранному из истории файлу
+  Галочка "Make EXE": менять расширение в GUI (включая особенности linux и -sfx-) и добавлять --noarcext
+  7z.шифрование: своя история профилей, добавить станд. профили в freearc.ini (данные+заголовок, только данные), файл-ключ в base64 и добавлять к паролю (как в peazip?)
+    zip.шифрование: аналогично, только два метода/начальных профайла шифрования (aes-256/ZipCrypto) и нет шифрования заголовка архива
+  \\?\C:\TEMP\Long_Directory\Long_Filename.txt: 7-zip sources, http://msdn.microsoft.com/en-us/library/aa365247%28v=VS.85%29.aspx#maxpath
+    предупреждение о слишком длинном имени файла (>256 символов)
+  экспорт настроек операции в .bat/.cmd
+  ошибка "Arc.Extract.hs:154:56:-126:Non-exhautsive patterns in lambda" при невозможности распаковки (например не хватило памяти)
+  *Last в истории - локализуется после первого же использования; archive.arc::dir_inside_arc вместо arc/dir; --pause=... в GUI
+
+  DeCompressMem tor (in order to decrease memory usage)
+  SetDictionary(calcDictSize(this,mem)) / tornado_compressor_calc_dict: если новый словарь оказался больше старого, то сохранить словарь и отдать остаток под хеш
+  -m1x!=-m1, limitDictionary -> limitInputSize, убрать eat_data и пр.; compressionLimitDictionary !tempfile, +1%+512..;  Compression page: 1700mb+tempfile
+  lt/ArcInfo: выводить размер SFX для .7z
+  DeCompressMem - при распаковке OutputSize это размер буфера, т.е. распакованный размер может быть и меньше (?)
+  tor:3 - ограничить дистанцию 256kb (?)
+  Использовать 4x4:storing в качестве кеша при сжатии, и соответственно читать данные напрямую во входной буфер первого процесса в цепочке сжатия
+  -m3: -mrep:96m:128:c128+exe+delta+xtor:6:t0:16m:u2 ? plus extended hash2/3 ? 10-20% faster compression, 1.5-2x faster decompression but needs m/t delta
+    контрпример: errorprt.iso: 720/695mb for tor:6/lzma (!). Alternatively, add caching matchfinder to LZMA and :u2 option (2.5-5% faster with a bit better compression than :u1)
+    -m=rep:96mb:32:c32+exe+delta+4x4:lzma:8mb:h1mb:fast:16:mc4 (fb16 vs fb8: size-=0.6%, time+=1.2%)
+  arc-m1 1460m 8.6/6.4, nz-cf 1738m 7/5, zhuff 1899m 6.6/2.5
+  GUI: Compression page - посчитать s/t и m/t скорости с priority=high и записать их в ini, далее по ним просчитывать скорости здесь
+
+  "Up" button in filelist could have some icon (something like: )
+  В последней альфе при листинге после 'Archive integrity OK' нет символа перевода строки
+  externals: виснет при распаковке ppmonstr
+    Bug in "External" method: "a a -m=pmm enwik7" - fails on testing
+  4x4:lzma-x64: может, проблема в compress_all_at_once?
+  external compressor problems: http://encode.ru/threads/43-FreeArc?p=28309&viewfull=1#post28309
+  improved tooltips 1125, 1227, 1176; labels 0018, 0086, 0433, 0435, 0300, 0437, 0438, 0439, 0440, 0441, 0382, 0383, 0384, 0301, 0302
+0.75
+  insertTempfile/InsertTempfile: добавлять tempfile в начало метода сжатия если не хватает памяти (ppmd:2gb перепаковка)
+  хранить время в .arc в UTCTime вместо local time (from unzip 6.0: NO_W32TIMES_IZFIX);  SystemTimeToTzSpecificLocalTime?
+  при открытии zip с 250 тысячами файлов тормозит 10 минут
+  выбираем несколько архивов - Extract Here - Overwrite? - Yes to All
+  tta multithreading
+  Custom right-click menu entries proposal: Open, edit, compress, decompress, rename, copy, move, delete, join, split, properties
+  zipx/rar compression
+  insertTempfile/InsertTempfile: take into account 8mb of memory used by "tempfile" algo
+  ключик на запуск в свёрнутом (background) режиме: http://forum.ru-board.com/topic.cgi?forum=5&topic=35164&start=1900#21
+  прерывание операции - сделать аккуратно
+    crc error при прерывании тестирования/распаковки (и обновления?)
+    распаковка с кешированием
+    прерывание обновления архива - создаётся 220мб недоделанный архив вместо исходного 210мб-ного
+    прятать диалог прогресса побыстрее (при закрытии FM закрывать всё)
+
+  tornado: избавиться от lb в check_table, скопировав код из delta 1.5
+  xor/aes - делать xor по 4 байта, избавиться от set_ui32 поскольку он просто копирует данные
+  scrypt pbkdf (stronger?)
+  MAC data and headers. aes-gcm (SSE4 accelerated)?
+  botan: optimized Serpent code (50->100 mb/s)
+  AES: import fast Gladman code (12 cpb, see Intel_AESNI_Sample_Library_v1.2\modetest86.exe)
+  AES: add AES/OCB (AND GCM/EAX?) AEAD mode plus CBC/OFB/RC6/SHA2 from LibTomCrypt
+  Linux: mallinfo(?) to check amount of free memory/largest contiguous block
+  MinHash and Handprinting to Find Similar Files (Chapter 4 in nsdi2007-set.pdf)
+  Unarc: учитывать files/bytes в GUI::ShowProgress (PROCESS::PROCESS() - хотя бы при одном блоке каталога и полной распаковке) - см. http://forum.ru-board.com/topic.cgi?forum=5&topic=35164&start=2220#1
+  GUI: при входе в архив, созданный с -ep3, фактически попадаем на диск ("C:"...)
+  Шаблоны для описания столбцов в GUI: [Template2] %file% (%size% bytes; md5: %MD5%)
+  ReadFile on a pipe might return 0 bytes read successfully if the other side of the pipe called WriteFile with 0 bytes.
+  ExitWindowsEx
+  Transactional NTFS http://msdn.microsoft.com/en-us/library/aa365738(v=vs.85).aspx
+  lzma:h6g (size_t HashSize), prefetch in matchfinders, ht7c
+  guiSFX: update progress indicator once per 0.5 seconds
+
+ошибки:
+  "rep:734mb+4x4:lzma:128mb:h128mb:normal:bt4:128" из-за нехватки памяти автообрезался до "rep:734mb+4x4:b350mb:lzma:69mb:normal:bt4:128"
+0.80
+  D&D to my app: http://msdn.microsoft.com/en-us/library/ms679679(v=VS.85).aspx
+  SHOpenFolderAndSelectItems
+  DragAcceptFiles/SHDoDragDrop
+  SHFileOperation for deleting to Recycle Bin
+  AddMRUStringW - add opened archive to the MRU list
+
+  lzma: распаковка с выделением под словарь нескольких буферов (как в rep)
+  insertTempfile: при вставке tempfile учитывать что rep/lzma может использовать маленькие блоки памяти (как это уже сделано в unarc)
+  при выборе метода сжатия сразу писать прогнозируемое время
+  update GUI docs
+  накапливаемая статистика с отсылкой отовсюду
+  saving paths inside archives as "a.arc:" or so
+    .tar.gz handling (open/extract in one step w/o running freearc.exe again)
+  делать разбиение на блоки каталога (100к файлов по умолчанию) ПОСЛЕ разбиения по типам файлов - это увеличит их реальный размер
+  srep
+  "arc m a.7z" support (-d/-ac)
+  "modify", renaming files in archive
+  lzma, tor... - keep allocated memory between calls to MemDeCompress (Start4x4/Finish4x4 calls to enable this mode/release the memory)
+  4x4 (de)compression - on the memory shortage write output data directly to outfile, reducing memory usage! Or switch to 4x4-stripped method
+    Make appropriate changes in their GetSetDeCompressionMem
+  tor, rep, ppmd, xlzma decompression... - perform "progress" callback like lzma already does
+  BSC070
+  -ep1: rar/arc a archive dir -ep1: добавляют файлы с разными именами, в отличие от dir/*
+  7z.dll extraction: -ap/-ep (безуспешная попытка реализации в марте)
+  deleting tempfiles only when no other fa.exe is running (each fa.exe creates its own directory that may be deleted only if "dir\alive" can be deleted)
+  compressor.exe: 64-bit version, signature at head, crc32+signature at the end, each method should report supported params
+  TABI: сообщения об ошибках должны не печататься, а возвращаться вызывающей процедуре (или колбеком "error")
+  lb: без -i0 показывает проценты
+  wavpack+WinZip JPEG: http://code.google.com/p/theunarchiver/source/browse/#hg%2FXADMaster%2FWinZipJPEG
+  оптимизации -m0/crc:
+    -m0 - убрать лишнее копирование данных (запускать только storing process при упаковке, ??? при распаковке)
+    -mcrc - не давать читать данные процедуре compress для экономии времени
+    CRC: при кешируемой распаковке на диск считается дважды (искать BAD_CRC); и может стоит использовать 64 кб буфера на запись?
+    crc считать в отдельном треде: update_crc (FileStart) = do send FileCRC; crc := INIT_CRC
+    избавиться от storing_PROCESS, переместив "перекладывание" в процедуру чтения в runFuncP
+  lzma.exe - проверить что решены проблемы с неполным чтением/записью буфера
+    external compressors stdin+stdout: http://forum.ru-board.com/topic.cgi?forum=5&topic=35164&start=500#7
+    fread/fwrite => FullRead/Write (в lzma и Example-C)
+    CreateProcess with STARTUPINFO with hStdInput, hStdOutput and hStdError handles set to file handles you opened (either real files or memory mapped files should work).
+    stdinout.cpp
+    http://msdn.microsoft.com/en-us/library/windows/desktop/ms682499(v=VS.85).aspx
+  ecm: перекомпилировать и включить в freearc; arc.ini - сгруппировать определения precomp/srep и #p в начале и убрать их из Compression.hs (или наоборот - перенести определения external compressors в Compression.hs?)
+  разбивать временный файл на меньше 4ГБ для FAT
+  "-n: extract only new or changed files (skip old files)"
+  -rr: хранить информацию на hdd, если наибольший непрерывный блок памяти её не вмещает, проверить writeRecoveryBlocks на работу с RR>4гб
+  GUI: возможность поменять на ходу метод сжатия (и другие параметры) и перезапустить команду заново
+  улучшение GUI: http://forum.ru-board.com/topic.cgi?forum=5&topic=35164&start=300#14
+     было бы хорошо видеть запакованный размер файла, атрибуты, скрытый, системный и т.д.
+     выделение файлов мышью в файл менеджере архиватора
+     мега фича WinRar - просмотрщик файлов.
+     в адресной строке видеть размер - правда незнаю лучше чего, архива или размер распакованного.
+     может иконку кнопки Add заменить на основную FA ? по аналогии с WinRar.
+  associate with .[0-9][0-9][0-9] (for multivolume 7z archives)
+  "Wait for other copies": выполнение операций строго в порядке их запуска, кнопка Continue запускает без ожидания (и перехватывает глоб. лок?), взять тексты из winrar (?)
+GRZip: если использовать только fast bwt, то требуется 8x памяти вместо 11x (при LZP-препроцессинге strong bwt вряд ли когда-либо нужен, а в крайнем случае можно разбивать блок пополам)
+Faster BWT decompression?: http://encode.ru/threads/1751-Faster-permutation-inverse-algorithm?highlight=read+speed
+http://encode.ru/threads/379-BWT-with-compressed-input-data
+REP
+  EREP: выполнять E8(+E9) translation on literal REP output using REAL offsets (см. add-REP-E8 trunk)
+  Future-LZ - два потока с сортировкой матчей во втором
+  10гб словарь: запоминаем в хеш-таблице hash+sha1 для блоков в 256 байт выбранным по maxhash среди 256 последовательных + для блоков в 512 байт, 1024 байта и т.д.
+    храним в памяти столько данных, сколько возможно, для точных матчей на близких расстояниях. хешируем по 512+ байт прежде чем вынести устаревшие данные из буфера
+SREP_SORTER: найти кол-во общих 512-байтных блоков у каждой пары файлов и объединить файлы в цепочки, основываясь на проценте совпадения между ними
+Tornado
+  добавить в tor:3 (и другие) пропуск несжимаемых данных
+  использовать gcc builtins (Common.h) также в icl
+  if (diff & -diff > diff_best)     // It utilizes that x & -x returns a word where only the lowest set bit in x is set: http://encode.ru/threads/848-LZ77-speed-optimization-2-mem-accesses-per-quot-round-quot
+BSC: try xml-wrt and dict:t (использование для первого/второго/третьего байтов кода слова непересекающихся диапазонов байт)
+MSE
+  +присвоение номеров выходным потокам в порядке обхода дерева методов
+  +ожидание появления данных на 0-м входе прежде чем запустить сам (де)компрессор
+  +ошибка -9 должна игнорироваться после успешного завершения последнего треда (проработать при множестве тредов!)
+  +cpu_time - получать через GetCPUTime()
+  подсчёт progress indicator (translate callback "read" in the 10-th thread into "10-read" in order to inform host program)
+  NoMoreReads/NoMoreWrites - can be a problem if performed simultaneously with Write/Read, соответственно
+  9-байтное кодирование (и способность раскодировать любое число байт от 1 до 9)
+  "seek*" - 8-байтное смещение
+Decompression of multi-part archive doesn't change archive numbers to current in window title, keeps first the whole time
+  (part numbers either could be changed during the operation or not shown at all)
+There is no error when all parts of multi-part RAR archive are missing from some point. E.g. total is 50 parts, I have first 40 parts, it decompresses quietly
+  and just ends there (could be made a setting whether to want remaining parts or not)
+dispack:
+  определять границы обрабатываемых блоков с точностью до байта
+  определять obj-код и обрабатывать его без конвертации смещений
+  использовать множество выходных потоков
+  добавить фичи из bcj2
+  убрать malloc/free в DisFilter
+4x4: забирать из подметода опции i/t/b?; раскрывать подстановки в имени подметода (например lz4=lz4a)
+[WinRAR5] location bar doesn't resolve environment variable anymore
+Перевод: Email: archetext@gmail.com, Skype: canis.minor, ICQ: 389570160, Jabber: Lazytech@jabber.ru
+
+
+unarc.dll работает. Но было бы не лишним реализовать поиск консольных декомпрессоров рядом с самой дллкой или arc.ini, а не в WINDOWS\System32, как сейчас происходит.
 
 installer: overwrite arc.ini/groups
-7z.dll
+  MUI_WELCOMEPAGE_TEXT
+  MUI_FINISHPAGE_SHOWREADME
+  Backup config files
+  DeletePersonalFiles
+7z.dll extraction:
+  tabi: возвращать реальное сообщение об ошибке (disk overflow...)
   encrypted archives: password_size = 1000
     t encrypted.7z - запрос пароль - Escape => зависание
-  архив 7z внутри arc без сжатия: показывается как архив 7z :D
   The "open dialog" in FA shows no rar/zip/7z (must use "All files" instead)
   открывать .arc/.tar/.zip/... внутри архива в самом FreeArc
   opening tar.gz archive from Window's Explorer does only open the outer .gz layer
   открывать .tar.gz в один клик - вместо runme запускать freearc !.! (linux: getProgName returns "./freearc")
   Right-click context menu only offers to decompress the gz, but not the inner tar, too
   tabi: поддержка генерации исключений, преобразование utf8<->utf16 и кодирование строк в utf8 by default
-  extraction: -ap
-  в конце операции индикатор прогресса должен точно показывать объём исходных/сжатых данных
   utf8: global_use_utf16_conversion=1, исправить getEnv/mySetEnv
   multivolume archives: запрос след. тома, ругаться при частичной распаковке последнего файла когда нет больше томов (SubItem error в 7zip)
-  ArcInfo
-  хранить время в .arc в UTCTime вместо local time
+  ArcInfo (убрать Pos в списке солид-блоков, выводить инфу о том что архив зашифрован, zip/cab/? не отдают список солид-блоков)
   поддержка bz2 (время извлечённого файла)
+7z.dll compression:
+  --sync: неправильно работает p (File exists in archive, but is not matched with wildcard): "ai.Censored = true" заменить на проверку по filter_f or so
+  метод сжатия: расширенные настройки
+  вычислять настройки, зависящие от типа архива archive_type (парсинг опции -m, -sfx) в ArcCreate, когда реальный тип создаваемого архива уже определён (а также известен объём сжимаемых данных и т.д.)
 сайт
   svn -> tracker
   fa_history
+  Header set Expires "Wed, 26 Feb 1999 08:21:57 GMT"
+  joomla, IPB, smf - forumer
 unarc[.dll]
-  -cfg=, default from unarc.dll directory
+  -cfg=, default from unarc.dll directory. реализация: http://forum.ru-board.com/topic.cgi?forum=5&topic=32025&start=260#4
   -w=-dp by default
   если файлы заняты другим процессом, нужно, чтобы появилось сообщение об ошибке (ну или типа такого: "cannot update files" - или "file coudn't be extracted").
-  tta/mm: BigAlloc
+  mm/?external: BigAlloc
   создавать каталоги в конце распаковки
+  freearc-extractor.exe: ask archive at start
 unix
   http://library.gnome.org/devel/integration-guide/stable/desktop-files.html.en
   http://standards.freedesktop.org/desktop-entry-spec/latest/index.html
+  EndCompressionThreadPriority
+lzma-x64
+  Кстати, а почему бы так же не отрубать stdout+stderr у внешних компрессоров,
+    у которых задан stdin, ведь его прогресс будет известен, и выводить в
+    консоль его надписи не обязательно. И отключать это опцией типа --debug
+  Внешний lzma должен воспринимать все те же параметры, что и внутренний,
+    подчиняться всей той же механике ограничения памяти/словаря и вызываться
+    автоматом для солид-блоков размером, скажем, от 50 мб. тогда пользователь
+    сможет вообще не замечать - внутренний там алгоритм или внешний
+  -slp (large pages) support
+  dictonary >1gb!
+lzma:959m - довести до честных 1024mb
+При вызове external compressors с файловым I/O отключать свой индикатор процентов до окончания выполнения компрессора
 
-
-freearc-extractor.exe: ask archive at start
-расширения arc и non-arc архивов в Settings?
-
-4x4:b7m:ppmd:c7m
-lzma:959m
-from unzip 6.0: NO_W32TIMES_IZFIX
-кеширование записи при сжатии, чтения при распаковке, между агоритмами, перед/после external compressors
+кеширование записи при сжатии, чтения при распаковке, между алгоритмами, перед/после external compressors
   +RTS -N2 + 64kb chunks вместо отдельного треда
 решить наконец проблему с Cancel путём использования отдельного потока для ожидания завершения операции
 rep:a8 - 8-слотовая хеш-таблица для увеличения сжатия
   индексировать 256-байтные блоки; использовать масссив 1-байтных ключей для быстрой первичной проверки хеша
     (96mb/256*2.5 = 1mb для массива первичной проверки)
-lzma: распаковка с выделением под словарь нескольких буферов (как в rep)
-arc: при вставке tempfile учитывать что rep может использовать маленькие блоки памяти (как это уже сделано в unarc)
-попробовать для исправления arcshellext 32-bit: убрать -DUNICODE, добавить CoInitializeEx
+попробовать для исправления arcshellext в mingw 32-bit: убрать -DUNICODE, добавить CoInitializeEx
 
 инсталятор
   sfx linux/nodelete
@@ -447,25 +648,16 @@ gui-версия не обрабатывает правильно ошибки:
   a x:\a
   -mqq
 внешний вид
-  по окончании операции в заголовке и поле Message "SUCESSFULLY TESTED a.arc", "% WARNINGS IN TESTING a.arc", "ERROR IN ..."
-    и заменять Отмена на ОК
   в GTK нет возможности сделать, чтобы в этом поле текст, который не поместился в поле с логом (внизу FM) по ширине, переносился на новую строчку?
 other
   Включение/выключение ассоциаций после переноса FreeArc на другую машину: http://forum.ru-board.com/topic.cgi?forum=5&topic=29437&start=1780#4
   installer.exe -p"/q" will then launch setup.exe /q
   иконки - хотя бы dir/arc/archives/rest
-  icons
-    SHFILEINFO shFileInfo;
-    SHGetFileInfo(filename, 0, &shFileInfo, sizeof(shFileInfo), SHGFI_ICON);
-    ExtractIcon - file's individual icon
-    http://msdn.microsoft.com/en-us/library/dd183402(VS.85).aspx
+  icons: "file icon.txt"
   загружать иконки для всех команд из png/ico файлов
   unix - run-by-extension - /etc/mailcap and xdg-mime
   сайт - ссылки на http://win-rar.ru/study/ , софтпедию и другие ресурсы упоминающие freearc
-  lzma: разрешить словарь в 1гб
 
-
-ДОБАВИТЬ В 7z.dll ПОДДЕРЖКУ .arc ИЛИ СДЕЛАТЬ unarc.dll С АНАЛОГИЧНЫМ ИНТЕРФЕЙСОМ (и chaining к 7z.dll)!!!!!!!!!!!!!!!!!!!
 
   -ap
     FAR: -apdir1 + dir1/dir2/file in filelist (rar-style?)
@@ -501,20 +693,13 @@ other
         arc l a dirname dirname/*  =>  не выводит каталог dirname
       исключение из архивации целого каталога работает только в виде "-xhelp/*"
     -xКАТАЛОГ ?
-    filetype detection: check for MM on large files
+    filetype detection: check large files for MM
     Priorityio.doc
   bugs
-    *Last в истории - локализуется после первого же использования
-    update GUI docs
-    dict bug: arc a aa cls.zip -mprecomp+6pt -t
-      bcj+dict creates corrupted archives
     что будет, если упаковать на CD, т.е. файл лежит на диске на которой нельзя писать, или в папке, где запрешена запись
     separate & no files selected
-    "arc a a ../file" - не удаляется ".." из имени; аналогично при распаковке
-    arc a dir/ - создаёт архив dir/.arc; нужно отсекать имена архивов кончающиеся на :/\ или содержащие :
     *.* и makefile.* должны включать makefile
       gui: так он должен папки выделять по *.* или нет?
-    обновление архива, содержащего xxx: если не удалось открыть xxx с диска, то файл из архива исчезнет вообще
     tta: float32 badly compressed (vs wavpack), int32 isn't compressed at all
     +RTS -S - processed by arc.exe itself too :)
     запрещать все операции, приводящие к созданию невалидного sfx
@@ -531,10 +716,6 @@ other
       (пустая строка в конце)
     перевод сообщений об ошибках (errormsg) и интернализация cmdline версии
   -ilog a-la RAR (выключить поддержку Lua)
-  mm/tta/?external: BigAlloc
-  избавиться от storing_PROCESS, переместив "перекладывание" в процедуру чтения в runFuncP
-  descript.ion for all files in package would be nice to see
-
 
 
   GUI: центрировать индикатор прогресса относительно окна программы, а не всего экрана
@@ -593,7 +774,6 @@ other
       при распаковке/тестировании архива без паролей они всё равно запрашиваются в диалоге
       команда "ch" должна применять переупаковку/перешифровку только к файлам, указанным в cmdline
       tatarcha: заголовок Add 1 file, Extract 1 archive..
-      добавлять tempfile в начало метода сжатия если не хватает памяти (ppmd:2gb перепаковка)
       Настройки: Профиль упаковки: можно сохранить, а удалить нельзя
       FreeArc не реагирует на закрыть из панели задач, когда открыто какое-нибудь окно, например настройки.
       Если открыто окно в FreeArc (например настройки), то при клике в панеле задач на FreeArc, основное окно FreeArc сворачивается, окно же настройки остаётся, при повторном клике, основное окно не разворачивается.
@@ -623,7 +803,6 @@ other
     выделять или insert'ом, или пробелом (winrar сбрасывает выделение только тех файлов, которые были отмечены мышью)
     tooltips: выводить tooltip не только на метке, но и на относящемуся к ней контролу: combobox, label...
     tooltips в диалоге прогресса с объяснением смысла каждого числа
-    сливать arc.english.txt and locale для того, чтобы выводились английские tooltips при отсутствии наших
     диалог Settings
       "Restore standard profiles" button
       Date format selection
@@ -682,7 +861,7 @@ other
     -p=... - "=" может быть частью пароля.
     уточнить rep:SetCompressionMem; при ограничении lzma/rep можно использовать более точные
       значения словря (и уменьшать все порчие буфера, одновременно увеличивая глубину поиска)
-    lzp:2200m - запретить словари >=2gb; ppmd:2560 - сравнивать с MAX_ORDER
+    lzp:2200m - запретить словари >=2gb
     -ds:r - подтаскивать ближе файлы с различающимися расширениями тоже
     translate error messages for errors in arc.ini/cmdline
     в логфайл писать истинное имя arc/freearc.exe и заключать параметры с пробелом в кавычки
@@ -704,10 +883,8 @@ other
     use fiGroup for sort
     -idp (+i2 - вывести имена всех сжимаемых файлов)
     разрешить external compressor создать целый каталог файлов и сжать их как обычные файлы
-    // - комментарии в листфайлах
     "..." в листфайлах - так обычно записывают имена с пробелами
-    availPhys - использовать для подбора размера read-ahead buffer в быстрых режимах; количества одновременно
-      упаковываемых солид-блоков
+    availPhys - использовать для подбора размера read-ahead buffer в быстрых режимах; количества одновременно упаковываемых солид-блоков
     768mb RAM -> rep:384mb:h128mb
     arc j 1 2 -apdir; j -d; j -ac
     arc x -tk1/2 (set to archive time/current time)
@@ -753,6 +930,7 @@ other
     "arc a a c:* -ep3"; "arc a a -m1 \* -ep3"
   unixify long option names (keep old names for compatibility?)
   dict: уменьшить время init (1/15 sec) для небольших файлов?
+  CryptProtectMemory ?
 
 
 0.41a:
@@ -960,14 +1138,12 @@ compression
   размер солид-блока должен соответствовать первому алгоритму в цепочке, если это dict или lzp с большим размером блока
     при этом объём требуемой для упаковки/распаковки памяти нужно считать как max, а не sum?
   размер солид-блока должен быть ограничением сверху (<=64mb), а не снизу, как сейчас
-joomla, IPB, smf - forumer
-для блочных алгоритмов (включая lzp-препроцессинг) полезно выбирать первый блок таким, чтобы он содержал как можно меньше файлов (для ускорения его чтения с диска)
+для блочных алгоритмов (включая lzp-препроцессинг) полезно выбирать первый блок таким, чтобы он содержал как можно меньше файлов (для ускорения чтения данных с диска)
 разбиение по подтипам файлов в splitBy (все примеры для солид-блока в 8 мб)
   1. группа действительно должна обозначать номер группы (например, *hs - все в одной группе $$haskell)
   2. если группа имеет как минимум 2 мб - пустить её отдельным солид-блоком
   3. если группа больше - разбить её на солид-блоки ~6 mb, сгруппировав каталоги как можно более высокого уровня.
   4. при чтении архива сортировать солид-группы по имени первого файла в каждой из них
-read_file: "чтение" файла, упакованного фейковым методом - нужно для обновления таких архивов
 вместо распаковки файла читать его с диска если файлы считаются одинаковыми (при -u, например), тем самым сэкономив время на распаковке
 tor: 101..104  EOB/ari  huf/3 таблицы чтобы не терять скорости при +=10
 
@@ -999,7 +1175,7 @@ to do:
   lzp: разбивать блок на маленькие блоки по 64к и решать, упаковывать или нет, для каждого из них в отдельности
   perl - похоже на неоптимальный порядок сортировки
   импортировать новый ppmd ?
-  lzma: _flushPos - скидывать данные и обновлять статистику каждые 256к, а не 8 мб :)
+  lzma: _flushPos - скидывать данные и обновлять статистику каждые 256к, а не 8 мб?
   dict: ускорить сжатие, улучшить работу с bwt/ppmd (использовать только ориг. символы или модифицированный 16-битный bwt/ppmd) и использовать в -m3
         оптимизирующий проход может решить проблему сжатия бинарных файлов
   tta: signature, non-diff modes
@@ -1055,4 +1231,3 @@ to do:
     поддержка String в дичайшем виде; нужно использовать UTF8Z.hs
     отделить типы данных, используемые в программе, от кодирования, используемого в Directory
     pos::Addr#, CPS style for readUnchecked (10.43->8.98 (String w/o reverse))
-

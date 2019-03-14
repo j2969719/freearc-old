@@ -6,10 +6,6 @@
 
 #include "Types.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 WRes HandlePtr_Close(HANDLE *h);
 WRes Handle_WaitObject(HANDLE h);
 
@@ -51,9 +47,5 @@ WRes CriticalSection_Init(CCriticalSection *p);
 #define CriticalSection_Delete(p) DeleteCriticalSection(p)
 #define CriticalSection_Enter(p) EnterCriticalSection(p)
 #define CriticalSection_Leave(p) LeaveCriticalSection(p)
-
-#ifdef __cplusplus
-}
-#endif
 
 #endif

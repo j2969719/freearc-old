@@ -20,7 +20,7 @@ import System.CPUTime    (getCPUTime)
 import System.IO
 import System.Time
 
-import Graphics.UI.Gtk
+import Graphics.UI.Gtk   -- for gtk2hs 0.11: hiding (eventKeyName, eventModifier, eventWindowState, eventButton, eventClick)
 import Graphics.UI.Gtk.Gdk.Events
 import Graphics.UI.Gtk.ModelView as New
 
@@ -29,6 +29,7 @@ import Errors
 import Files
 import Charsets
 import FileInfo
+import Encryption (generateRandomBytes)
 import Options
 import UIBase
 
@@ -41,27 +42,30 @@ aINITAG_LANGUAGE = "language"
 -- |Каталог локализаций
 aLANG_DIR = "arc.languages"
 
--- |Имя файла с иконкой программы
-aICON_FILE = aFreeArc++".ico"
-
 -- |Фильтры для выбора архива
 aARCFILE_FILTER = ["0307 "++aFreeArc++" archives (*.arc)", "0308 Archives and SFXes (*.arc;*.exe)"]
 
-shutdown_msg = "0479 Shutdown computer when operation completed"
+-- Интерфейсные тексты
+shutdown_msg         = "0479 Shutdown computer when operation completed"
+global_queueing_msg  = "0508 Queue operations across multiple FreeArc copies"
 
 -- |Фильтр для выбора любого файла
 aANYFILE_FILTER = []
 
--- |Локализация
+-- |Локализация (установить файл локализации, выбраныый в диалоге конфигурирования, плюс arc.english.txt для непереведённых tooltips)
 loadTranslation = do
   langDir  <- findDir libraryFilePlaces aLANG_DIR
   settings <- readIniFile
-  setLocale$ langDir </> (settings.$lookup aINITAG_LANGUAGE `defaultVal` aLANG_FILE)
+  setLocale [langDir </> aENGLISH_LANG_FILE
+            ,langDir </> (settings.$lookup aINITAG_LANGUAGE `defaultVal` aLANG_FILE)]
 
 -- |Прочитать настройки программы из ini-файла
 readIniFile = do
   inifile  <- findFile configFilePlaces aINI_FILE
   inifile  &&&  readConfigFile inifile >>== map (split2 '=')
+
+-- |Left/right alignment
+data Alignment = Align___ | I___Align deriving Eq
 
 
 ----------------------------------------------------------------------------------------------------
@@ -121,7 +125,7 @@ runIndicators = do
   (statsBox, updateStats, clearStats) <- createStats
   curFileLabel <- labelNew Nothing
   curFileBox   <- hBoxNew True 0
-  boxPackStart curFileBox curFileLabel PackGrow 2
+  boxPackStart curFileBox curFileLabel PackGrow 0
   widgetSetSizeRequest curFileLabel 30 (-1)
   progressBar  <- progressBarNew
   buttonBox    <- hBoxNew True 10
@@ -185,21 +189,34 @@ runIndicators = do
     active <- val pauseButton
     if active then do takeMVar mvarSyncUI
                       pause_real_secs
-                      buttonSetLabel pauseButton =<< i18n"0054   _Continue  "
+                      taskbar_Pause
+                      buttonSetLabel pauseButton =<< i18n"0054   _Resume  "
               else do putMVar mvarSyncUI "mvarSyncUI"
                       resume_real_secs
+                      taskbar_Resume
                       buttonSetLabel pauseButton =<< i18n"0053   _Pause  "
 
   backgroundButton `onClicked` do
     windowIconify window
 
   finishUpdating <- ref False    -- устанавливается в True в конце работы когда надо перестать обновлять индикатор прогресса
+  hwnd <- ref Nothing            -- место для сохранения виндового HWND окна window
 
   -- Обновляем заголовок окна, статистику и надпись индикатора прогресса раз в 0.5 секунды
-  i' <- ref 0   -- а сам индикатор прогресса раз в 0.1 секунды
+  n' <- ref 0   -- а сам индикатор прогресса раз в 0.1 секунды
   indicatorThread 0.1 $ \updateMode indicator indType title b bytes total processed p -> postGUIAsync$ do
     unlessM (val finishUpdating) $ do
-    i <- val i'; i' += 1; let once_a_halfsecond  =  (updateMode==ForceUpdate)  ||  (i `mod` 5 == 0)
+    n <- val n'; n' += 1; let once_a_halfsecond  =  (updateMode==ForceUpdate)  ||  (n `mod` 5 == 0)
+    -- Win7+ taskbar progress indicator
+#ifdef FREEARC_WIN
+    whenM (isNothing ==<< val hwnd) $ do
+      rnd <- encode16 ==<< generateRandomBytes 16
+      set window [windowTitle := rnd]
+      withCString rnd $ \c_rnd -> do
+      hwnd =:: Just ==<< findWindowHandleByTitle c_rnd
+    hwnd' <- val hwnd
+    taskbar_SetWindowProgressValue (fromJust hwnd') (i bytes) (i total)   `on_` True
+#endif
     -- Заголовок окна
     set window [windowTitle := title]                              `on_` once_a_halfsecond
     -- Статистика
@@ -212,7 +229,7 @@ runIndicators = do
   backgroundThread 0.5 $ \updateMode -> postGUIAsync$ do
     unlessM (val finishUpdating) $ do
     -- Имя текущего файла или стадия выполнения команды (вывод пустой строки недопустим, поскольку это меняет высоту виджета)
-    (msg,filename)  <- val uiMessage;   imsg <- i18n msg
+    (msg,filename) <- val uiMessage;   imsg <- i18n msg
     labelSetText curFileLabel (if imsg>""   then format imsg filename   else (filename|||" "))
 
   -- Операция, очищающая все поля с информацией о текущем архиве
@@ -240,36 +257,70 @@ runIndicators = do
 
 -- |Создание полей для вывода статистики
 createStats = do
-  textBox <- tableNew 4 6 False
-  labels' <- ref []
+  upperTable <- tableNew 1 1 False                -- upper table for stats
+  hsep       <- hSeparatorNew                     -- horizontal separator between the tables
+  lowerTable <- tableNew 1 1 False                -- lower table for stats
 
-  -- Создадим поля для вывода текущей статистики и нарисуем метки к ним
-  let newLabel2 x y s = do label1 <- labelNewWithMnemonic =<< i18n s
-                           tableAttach textBox label1 (x+0) (x+1) y (y+1) [Expand, Fill] [Expand, Fill] 0 0
-                           --set label1 [labelWidthChars := 25]
-                           miscSetAlignment label1 0 0
+  hbox <- hBoxNew False 0                         -- pack upper table into hbox in order to center table horizontally
+  boxPackStart hbox upperTable   PackRepel   0
+  vbox <- vBoxNew False 0                         -- then put both tables with separator into vertical box ...
+  boxPackStart vbox hbox         PackNatural 0
+  boxPackStart vbox hsep         PackNatural 4    -- add some space around the hor. line
+  boxPackStart vbox lowerTable   PackNatural 0
+  hbox <- hBoxNew False 0                         -- ... packed into hbox in order to center whole vbox horizontally
+  boxPackStart hbox vbox         PackRepel   0
 
-                           label2 <- labelNew Nothing
-                           tableAttach textBox label2 (x+1) (x+2) y (y+1) [Expand, Fill] [Expand, Fill] 10 0
-                           set label2 [labelSelectable := True]
-                           miscSetAlignment label2 1 0
-                           labels' ++= [label2]
-                           return [label1,label2]
-      -- Возвращает только поле значения
-      newLabel x y s  =    newLabel2 x y s >>== (!!1)
+  tableSetRowSpacings upperTable 2                -- spacing for the upper table
+  tableSetColSpacings upperTable 20
+  tableSetColSpacings lowerTable 10               -- spacing for the lower table
+  for [0,3,7] $ \x -> do                          -- insert empty fields in the lower table that fill up all unused space and provide centering of cells containing information
+    l <- labelNew Nothing
+    tableAttachDefaults lowerTable l x (x+1) 0 1
 
-  newLabel 2 0 "     "        -- make space between left and right columns
-  filesLabel      <- newLabel 0 0 "0056 Files"
-  totalFilesLabel <- newLabel 3 0 "0057 Total files"
-  bytesLabel      <- newLabel 0 1 "0058 Bytes"
-  totalBytesLabel <- newLabel 3 1 "0059 Total bytes"
-  ratioLabel      <- newLabel 0 3 "0060 Ratio"
-  speedLabel      <- newLabel 3 3 "0061 Speed"
-  timesLabel      <- newLabel 0 4 "0062 Time"
-  totalTimesLabel <- newLabel 3 4 "0063 Total time"
+  displays' <- ref []                             -- list of all displayed number fields
 
-  compressed      @ [_,      compressedLabel] <- newLabel2 0 2 "0252 Compressed"
-  totalCompressed @ [_, totalCompressedLabel] <- newLabel2 3 2 "0253 Total compressed"
+  -- Создаёт неизменную метку в таблице
+  let newLabel table y x width s alignment = do
+                          label <- labelNewWithMnemonic =<< i18n s
+                          tableAttach table label (x+1-width) (x+1) y (y+1) [Fill] [] 0 0
+                          miscSetAlignment label (if alignment==Align___ then 0 else 1) 0
+
+  -- Создаёт в таблице поле для отображения информации, добавляет его в список displays и возвращает операцию вывода значения в этом поле
+  let newDisplay table y x = do
+                          display <- labelNew Nothing
+                          tableAttach table display x (x+1) y (y+1) [Fill] [] 0 0
+                          set display [labelSelectable := True]
+                          miscSetAlignment display 1 0
+                          displays' ++= [display]
+                          return (labelSetMarkup display . bold)
+
+
+--               Files         Bytes     Compressed        Time
+-- Processed         8    16,188,368      6,229,876     0:00:02
+-- Total            35   134,844,601   ~ 51,893,133   ~ 0:00:17
+-- ------------------------------------------------------------
+--             Ratio 86%         Speed 16,624 kB/s
+
+  newLabel upperTable 1 0 1 "0541 Processed"     Align___
+  newLabel upperTable 2 0 1 "0542 Total"         Align___
+  newLabel upperTable 0 1 2 "0056 Files"         I___Align
+  newLabel upperTable 0 2 1 "0058 Bytes"         I___Align
+  newLabel upperTable 0 3 1 "0252 Compressed"    I___Align
+  newLabel upperTable 0 4 1 "0062 Time"          I___Align
+  newLabel lowerTable 0 1 1 "0060 Ratio"         I___Align
+  newLabel lowerTable 0 5 1 "0061 Speed"         I___Align
+
+  filesDisplay           <- newDisplay upperTable 1 1
+  totalFilesDisplay      <- newDisplay upperTable 2 1
+  bytesDisplay           <- newDisplay upperTable 1 2
+  totalBytesDisplay      <- newDisplay upperTable 2 2
+  compressedDisplay      <- newDisplay upperTable 1 3
+  totalCompressedDisplay <- newDisplay upperTable 2 3
+  timesDisplay           <- newDisplay upperTable 1 4
+  totalTimesDisplay      <- newDisplay upperTable 2 4
+  ratioDisplay           <- newDisplay lowerTable 0 2
+  speedDisplay           <- newDisplay lowerTable 0 6
+
   last_cmd' <- ref ""
 
   -- Процедура, выводящая текущую статистику (indType==INDICATOR_FULL - полноценный индикатор, иначе - только проценты, например операции с RR)
@@ -288,18 +339,18 @@ createStats = do
 
         -- Если операция завершена - показываем точные результаты
         if b==total_bytes
-          then do (labelSetMarkup filesLabel$           ""                           )
-                  (labelSetMarkup bytesLabel$           ""                           )
-                  (labelSetMarkup compressedLabel$      ""                           )
-                  (labelSetMarkup timesLabel$           ""                           )
-                  (labelSetMarkup totalFilesLabel$      bold$ show3 total_files      )                      `on_` indType==INDICATOR_FULL
-                  (labelSetMarkup totalBytesLabel$      bold$ show3 total_bytes      )
-                  (labelSetMarkup totalCompressedLabel$ bold$ show3 (cbytes)         )                      `on_` indType==INDICATOR_FULL
-                  (labelSetMarkup totalTimesLabel$      bold$ showHMS (secs)         )
+          then do (filesDisplay$           "")
+                  (bytesDisplay$           "")
+                  (compressedDisplay$      "")
+                  (timesDisplay$           "")
+                  (totalFilesDisplay$      show3 total_files)                      `on_` indType==INDICATOR_FULL
+                  (totalBytesDisplay$      show3 total_bytes)
+                  (totalCompressedDisplay$ show3 (cbytes))                         `on_` indType==INDICATOR_FULL
+                  (totalTimesDisplay$      showHMS (secs))
                   when (b>0) $ do                      -- Поля скорости/коэф. сжатия бессмысленно показывать пока не накоплена хоть какая-то статистика
-                    (labelSetMarkup ratioLabel$         bold$ ratio2 cbytes b++"%"   )                      `on_` indType==INDICATOR_FULL
+                    (ratioDisplay$         compression_ratio cbytes b)             `on_` indType==INDICATOR_FULL
                   when (secs-sec0>0.001) $ do
-                    (labelSetMarkup speedLabel$         bold$ showSpeed b (secs-sec0))
+                    (speedDisplay$         bold$ showSpeed b (secs-sec0))
 
           else do
 
@@ -312,47 +363,49 @@ createStats = do
               | archive_total_bytes == 0            =       show3 (0)
               | otherwise                           =  "~"++show3 (toInteger archive_total_compressed*total_bytes `div` archive_total_bytes)
 
-        (labelSetMarkup filesLabel$           bold$ show3 files                                )  `on_` indType==INDICATOR_FULL
-        (labelSetMarkup bytesLabel$           bold$ show3 b                                    )
-        (labelSetMarkup compressedLabel$      bold$ show3 cbytes                               )  `on_` indType==INDICATOR_FULL
-        (labelSetMarkup timesLabel$           bold$ showHMS secs                               )
-        (labelSetMarkup totalFilesLabel$      bold$ show3 total_files                          )  `on_` indType==INDICATOR_FULL
-        (labelSetMarkup totalBytesLabel$      bold$ show3 total_bytes                          )
+        (filesDisplay$           show3 files                                )  `on_` indType==INDICATOR_FULL
+        (bytesDisplay$           show3 b                                    )
+        (compressedDisplay$      show3 cbytes                               )  `on_` indType==INDICATOR_FULL
+        (timesDisplay$           showHMS secs                               )
+        (totalFilesDisplay$      show3 total_files                          )  `on_` indType==INDICATOR_FULL
+        (totalBytesDisplay$      show3 total_bytes                          )
         when (b>0 && secs-sec0>0.001) $ do   -- Поля скорости/коэф. сжатия бессмысленно показывать пока не накоплена хоть какая-то статистика
-        (labelSetMarkup ratioLabel$           bold$ ratio2 cbytes b++"%"                       )  `on_` indType==INDICATOR_FULL
-        (labelSetMarkup speedLabel$           bold$ showSpeed b (secs-sec0)                    )
+        (ratioDisplay$           compression_ratio cbytes b                 )  `on_` indType==INDICATOR_FULL
+        (speedDisplay$           showSpeed b (secs-sec0)                    )
         when (processed>0.001) $ do          -- Поля оценки времени/результата сжатия показываются только после сжатия 0.1% всей информации
-        (labelSetMarkup totalCompressedLabel$ bold$ total_compressed                           )  `on_` indType==INDICATOR_FULL
-        (labelSetMarkup totalTimesLabel$      bold$ "~"++showHMS (sec0 + (secs-sec0)/processed))
+        (totalCompressedDisplay$ total_compressed                           )  `on_` indType==INDICATOR_FULL
+        (totalTimesDisplay$      "~"++showHMS (sec0 + (secs-sec0)/processed))
 
   -- Процедура, очищающая текущую статистику
-  let clearStats  =  val labels' >>= mapM_ (`labelSetMarkup` "     ")
+  let clearStats  =  val displays' >>= mapM_ (`labelSetMarkup` "     ")
   --
-  return (textBox, updateStats, clearStats)
+  return (hbox, updateStats, clearStats)
 
 
 -- |Создадим подокно для сообщений об ошибках
 makeBoxForMessages = do
-  comment <- scrollableTextView "" []
-  widgetSetSizeRequest (widget comment) 0 0
+  msgbox <- scrollableTextView "" []
+  widgetSetNoShowAll (widget msgbox) True
   saved <- ref ""
+  -- Добавить сообщение msg в msgbox (и вывести msgbox на экран)
+  let add msg = do widgetSetNoShowAll (widget msgbox) False
+                   widgetShowAll      (widget msgbox)
+                   msgbox ++= (msg++"\n")
   -- Выводить errors/warnings в этот TextView
   let log msg = postGUIAsync$ do
                   fm <- val fileManagerMode
                   if fm
-                    then do saved ++= (msg++"\n")
-                    else do widgetSetSizeRequest (widget comment) (-1) (-1)
-                            comment ++= (msg++"\n")
+                    then saved ++= (msg++"\n")
+                    else add msg
   -- После закрытия FM перенести все сообщения в этот widget
   let afterFMClose = postGUIAsync$ do
                        msg <- val saved
                        saved =: ""
                        when (msg>"") $ do
-                         widgetSetSizeRequest (widget comment) (-1) (-1)
-                         comment ++= (msg++"\n")
+                         add msg
   errorHandlers   ++= [log]
   warningHandlers ++= [log]
-  return (widget comment, (saved =: "", afterFMClose))
+  return (widget msgbox, (saved =: "", afterFMClose))
 
 
 {-# NOINLINE progressWindow #-}
@@ -373,8 +426,17 @@ progressFinished = unsafePerformIO$ newIORef doNothing0 :: IORef (IO ())
 -- |Вызывается в начале обработки архива
 guiStartArchive = gui$ val clearProgressWindow >>= id
 
+-- |Отметить начало упаковки или распаковки данных
+guiStartProcessing = doNothing0
+
+-- |Начало следующего тома архива
+guiStartVolume filename = doNothing0
+
 -- |Вызывается в начале обработки файла
 guiStartFile = doNothing0
+
+-- |Текущий объём исходных/сжатых данных
+guiUpdateProgressIndicator = doNothing0
 
 -- |Приостановить вывод индикатора прогресса и стереть его следы
 uiSuspendProgressIndicator = do
@@ -402,7 +464,7 @@ pauseOnTop action = do
          action
 
 -- |Pause progress indicator & timing while dialog runs
-pauseEverything  =  uiPauseProgressIndicator . pauseTiming . pauseOnTop
+pauseEverything  =  uiPauseProgressIndicator . pauseTiming . pauseTaskbar . pauseOnTop
 
 
 ----------------------------------------------------------------------------------------------------
@@ -424,8 +486,16 @@ hfRestoreSizePos hf' window name deflt = do
     let a  = coord.$split ' '
     when (length(a)==4  &&  all isSignedInt a) $ do  -- проверим что a состоит ровно из 4 чисел
       let [x,y,w,h] = map readSignedInt a
-      windowMove   window x y  `on_` x/= -10000
-      windowResize window w h  `on_` w/= -10000
+      screen <- screenGetDefault
+      scrw <- case screen of
+                Nothing -> return 999999
+                Just screen -> screenGetWidth screen
+      scrh <- case screen of
+                Nothing -> return 999999
+                Just screen -> screenGetHeight screen
+      when (x<scrw*9`div`10 && y<scrh*9`div`10 && w<scrw && h<scrh) $ do
+        windowMove   window x y  `on_` x/= -10000
+        windowResize window w h  `on_` w/= -10000
     whenM (hfGetHistoryBool hf' (name++"Maximized") False) $ do
       windowMaximize window
 
@@ -751,7 +821,7 @@ gtkWidget = GtkWidget { gwWidget        = undefined
                       , gwGetTitle      = undefined
                       , gwSetTitle      = undefined
                       , gwGetValue      = undefined
-                      , gwSetValue      = undefined
+                      , gwSetValue      = \_ -> return ()
                       , gwSetOnUpdate   = undefined
                       , gwOnClick       = undefined
                       , gwSaveHistory   = undefined
@@ -864,8 +934,10 @@ boxed makeControl title = do
 
 {-# NOINLINE label #-}
 -- |Метка
-label title   =  do (hbox, _) <- boxed labelNewWithMnemonic title
-                    return gtkWidget {gwWidget = hbox}
+label title = do
+  (hbox, _) <- boxed labelNewWithMnemonic title
+  return gtkWidget { gwWidget      = hbox
+                   }
 
 
 {-# NOINLINE button #-}
@@ -917,6 +989,7 @@ comboBox title labels = do
   return gtkWidget { gwWidget      = hbox
                    , gwGetValue    = New.comboBoxGetActive combo
                    , gwSetValue    = New.comboBoxSetActive combo
+                   , gwSetOnUpdate = \action -> on combo changed action  >> return ()
                    }
 
 
@@ -1102,4 +1175,3 @@ prepareFilters filters = do
     text <- i18n element
     let patterns = text .$words .$last .$drop 1 .$dropEnd 1
     return (text, patterns)
-

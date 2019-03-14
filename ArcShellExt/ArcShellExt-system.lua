@@ -112,11 +112,22 @@ end
 
 -- FreeArc-specific functions -----------------------------------------
 
--- Check for SFX
-function check_for_sfx(filename)
+-- Detect archive type by its contents
+function detect_archive_type(filename)
   -- Check that last 256 bytes of file contains sign of FreeArc footer block
   local data = read_from_file (filename, 2, -256, 256)
-  return (string.find (data, "ArC\1\8", 1, true))
+  if string.find (data, "ArC\1\8", 1, true) then
+    return "FreeArc"
+  elseif string.find (data, "PK\5\6", 1, true) then   -- or ZIP's end of central directory record
+    return "zip"
+  else
+    return false
+  end
+end
+
+-- Check for FreeArc SFX (legacy function)
+function check_for_sfx(filename)
+  return (detect_archive_type(filename)=="FreeArc")
 end
 
 -- Build multi-action FreeArc command

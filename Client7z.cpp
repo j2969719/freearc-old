@@ -3,11 +3,12 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <tchar.h>
 #include "tabi.h"
 
 // Required for SetProperties in p7zip code
 #define COMPRESS_MT
-// For correct filename translationin Unix
+// For correct filename translation in Unix
 #define LOCALE_IS_UTF8
 
 
@@ -90,6 +91,15 @@ HINSTANCE g_hInstance;
 int g_CodePage = -1;
 
 
+// Флаг, устанавливаемый в 1 когда нужно экстренно прервать вполняемую операцию
+int BreakFlag = 0;
+extern "C" void c_szSetBreakFlag (int flag)
+{
+  BreakFlag = flag;
+}
+
+
+
 //////////////////////////////////////////////////////////////
 // Archive Open callback class
 
@@ -111,7 +121,7 @@ public:
 
 HRESULT COpenCallbackConsoleZ::Open_CheckBreak()
 {
-  if (NConsoleClose::TestBreakSignal())
+  if (BreakFlag)
     return E_ABORT;
   return S_OK;
 }
@@ -135,7 +145,7 @@ HRESULT COpenCallbackConsoleZ::Open_CryptoGetTextPassword(BSTR *password)
   {
     int password_size = 1000;
     wchar_t password_buf[password_size];
-    cb(TABI_DYNAMAP ("request","ask_password") ("password_buf", password_buf) ("password_size", password_size));
+    cb(TABI_DYNAMAP ("request","ask_password") ("password_buf", (void*)password_buf) ("password_size", password_size));
     Password = password_buf;
     PasswordIsDefined = true;
   }
@@ -195,8 +205,8 @@ extern "C" int c_szOpenArchive (TABI_ELEMENT* params)
 {
   try {
     TABI_MAP p(params);
-    wchar_t *archiveName = (wchar_t *)(p._ptr("arcname"));
-    CArc* &arc           =   *(CArc**)(p._ptr("archive"));
+    wchar_t       *archiveName  =        (wchar_t *)(p._ptr("arcname"));
+    CArchiveLink* &arc          =  *(CArchiveLink**)(p._ptr("archive"));
 
     szInitLibrary();
     CArchiveLink *archiveLink = new CArchiveLink;
@@ -211,49 +221,57 @@ extern "C" int c_szOpenArchive (TABI_ELEMENT* params)
         throw "can't open file as archive";
     }
 
-    arc = &(archiveLink->Arcs.Back());
+    arc = archiveLink;
 
     return 0;
   } catch (const char *msg) {
 //    sprintf(errmsg, "c_szOpenArchive: %s", msg);
+    return 1;
+  } catch (int code) {
+//    sprintf(errmsg, "c_szOpenArchive: error %d", code);
     return 1;
   }
 }
 
 
 // Close archive
-extern "C" UInt32  c_szArcClose (CArc &arc, char *errmsg)
+extern "C" UInt32  c_szArcClose (CArchiveLink &arc, char *errmsg)
 {
   try {
-    CMyComPtr<IInArchive> archive = arc.Archive;
-    archive->Close();
+    arc.Close();
     return 0;
   } catch (const char *msg) {
     sprintf(errmsg, "c_szArcClose: %s", msg);
+    return 1;
+  } catch (int code) {
+    sprintf(errmsg, "c_szArcClose: error %d", code);
     return 1;
   }
 }
 
 
 // Number of files in archive
-extern "C" UInt32  c_szArcItems (CArc &arc, UInt32 *value, char *errmsg)
+extern "C" UInt32  c_szArcItems (CArchiveLink &arc, UInt32 *value, char *errmsg)
 {
   try {
-    CMyComPtr<IInArchive> archive = arc.Archive;
+    CMyComPtr<IInArchive> archive = arc.GetArchive();
     archive->GetNumberOfItems(value);
     return 0;
   } catch (const char *msg) {
     sprintf(errmsg, "c_szArcItems: %s", msg);
+    return 1;
+  } catch (int code) {
+    sprintf(errmsg, "c_szArcItems: error %d", code);
     return 1;
   }
 }
 
 
 // Get numeric property of file in archive
-extern "C" UInt32  c_szArcGetInt64Property (CArc &arc, Int32 index, PROPID propID, UInt64 *value, char *errmsg)
+extern "C" UInt32  c_szArcGetInt64Property (CArchiveLink &arc, Int32 index, PROPID propID, UInt64 *value, char *errmsg)
 {
   try {
-    CMyComPtr<IInArchive> archive = arc.Archive;
+    CMyComPtr<IInArchive> archive = arc.GetArchive();
     NCOM::CPropVariant prop;
     if ((index==-1?  archive->GetArchiveProperty(propID, &prop) : archive->GetProperty(index, propID, &prop)) != S_OK)
       throw "GetProperty failed";
@@ -264,15 +282,18 @@ extern "C" UInt32  c_szArcGetInt64Property (CArc &arc, Int32 index, PROPID propI
   } catch (const char *msg) {
     sprintf(errmsg, "c_szArcGetInt64Property: %s", msg);
     return 1;
+  } catch (int code) {
+    sprintf(errmsg, "c_szArcGetInt64Property: error %d", code);
+    return 1;
   }
 }
 
 
 // Get boolean property of file in archive
-extern "C" UInt32  c_szArcGetBoolProperty (CArc &arc, Int32 index, PROPID propID, UInt32 *value, char *errmsg)
+extern "C" UInt32  c_szArcGetBoolProperty (CArchiveLink &arc, Int32 index, PROPID propID, UInt32 *value, char *errmsg)
 {
   try {
-    CMyComPtr<IInArchive> archive = arc.Archive;
+    CMyComPtr<IInArchive> archive = arc.GetArchive();
     NCOM::CPropVariant prop;
     if ((index==-1?  archive->GetArchiveProperty(propID, &prop) : archive->GetProperty(index, propID, &prop)) != S_OK)
       throw "GetProperty failed";
@@ -286,18 +307,21 @@ extern "C" UInt32  c_szArcGetBoolProperty (CArc &arc, Int32 index, PROPID propID
   } catch (const char *msg) {
     sprintf(errmsg, "c_szArcGetBoolProperty: %s", msg);
     return 1;
+  } catch (int code) {
+    sprintf(errmsg, "c_szArcGetBoolProperty: error %d", code);
+    return 1;
   }
 }
 
 
 // Get string property of file in archive
-extern "C" UInt32  c_szArcGetStrProperty (CArc &arc, Int32 index, PROPID propID, wchar_t *value, UInt32 valueSize, char *errmsg)
+extern "C" UInt32  c_szArcGetStrProperty (CArchiveLink &arc, Int32 index, PROPID propID, wchar_t *value, UInt32 valueSize, char *errmsg)
 {
   try {
-    CMyComPtr<IInArchive> archive = arc.Archive;
+    CMyComPtr<IInArchive> archive = arc.GetArchive();
     NCOM::CPropVariant prop;
     if (index==-1  &&  propID==kpidType)
-        prop = codecs->Formats[arc.FormatIndex].Name;
+        prop = codecs->Formats[arc.Arcs.Back().FormatIndex].Name;
     else if ((index==-1?  archive->GetArchiveProperty(propID, &prop) : archive->GetProperty(index, propID, &prop)) != S_OK)
       throw "GetProperty failed";
     switch (prop.vt)
@@ -317,6 +341,9 @@ extern "C" UInt32  c_szArcGetStrProperty (CArc &arc, Int32 index, PROPID propID,
   } catch (const char *msg) {
     sprintf(errmsg, "c_szArcGetStrProperty: %s", msg);
     return 1;
+  } catch (int code) {
+    sprintf(errmsg, "c_szArcGetStrProperty: error %d", code);
+    return 1;
   }
 }
 
@@ -326,11 +353,11 @@ static BOOL IsFileTimeZero(CONST FILETIME *lpFileTime)
   return (lpFileTime->dwLowDateTime == 0) && (lpFileTime->dwHighDateTime == 0);
 }
 
-// Get numeric property of file in archive
-extern "C" UInt32  c_szArcGetTimeProperty (CArc &arc, Int32 index, PROPID propID, UInt32 *value, char *errmsg)
+// Get datetime property of file in archive
+extern "C" UInt32  c_szArcGetTimeProperty (CArchiveLink &arc, Int32 index, PROPID propID, UInt32 *value, char *errmsg)
 {
   try {
-    CMyComPtr<IInArchive> archive = arc.Archive;
+    CMyComPtr<IInArchive> archive = arc.GetArchive();
     NCOM::CPropVariant prop;
     if ((index==-1?  archive->GetArchiveProperty(propID, &prop) : archive->GetProperty(index, propID, &prop)) != S_OK)
       throw "GetProperty failed";
@@ -349,6 +376,9 @@ extern "C" UInt32  c_szArcGetTimeProperty (CArc &arc, Int32 index, PROPID propID
     return 0;
   } catch (const char *msg) {
     sprintf(errmsg, "c_szArcGetTimeProperty: %s", msg);
+    return 1;
+  } catch (int code) {
+    sprintf(errmsg, "c_szArcGetTimeProperty: error %d", code);
     return 1;
   }
 }
@@ -463,13 +493,11 @@ static const char *kUnknownError = "Unknown Error";
 
 STDMETHODIMP CExtractCallbackConsole::SetTotal(UInt64 x)
 {
-//wprintf(L"\nSetTotal %d", int(x));
   return S_OK;
 }
 
 STDMETHODIMP CExtractCallbackConsole::SetCompleted(const UInt64 *x)
 {
-//wprintf(L"\nSetCompleted %d", int(*x));
   return S_OK;
 }
 
@@ -478,20 +506,24 @@ STDMETHODIMP CExtractCallbackConsole::AskOverwrite(
     const wchar_t *, const FILETIME *, const UInt64 *,
     Int32 *answer)
 {
-  *answer = cb(TABI_DYNAMAP ("request","can_be_extracted?") ("outname", (void*)existName) ("index", *index));
+  if (BreakFlag)
+    return E_ABORT;
+  *answer = cb(TABI_DYNAMAP ("request","can_be_extracted?") ("outname", existName) ("index", *index));
   return S_OK;
 }
 
 STDMETHODIMP CExtractCallbackConsole::PrepareOperation(const wchar_t *name, bool isFolder, Int32 askExtractMode, const UInt64 *position)
 {
-//wprintf(L"\nPrepareOperation %s %d %d %d", name, int(isFolder), int(askExtractMode), position? int(*position) : -1);
-  cb(TABI_DYNAMAP ("request","filename") ("filename", (void*)name) ("is_folder?", isFolder) ("mode", askExtractMode));
+  if (BreakFlag)
+    return E_ABORT;
+  cb(TABI_DYNAMAP ("request","filename") ("filename", name) ("is_folder?", isFolder) ("mode", askExtractMode));
   return S_OK;
 }
 
 STDMETHODIMP CExtractCallbackConsole::SetRatioInfo(const UInt64 *inSize, const UInt64 *outSize)
 {
-//wprintf(L"\nSetRatioInfo %d %d", int(*inSize), int(*outSize));
+  if (BreakFlag)
+    return E_ABORT;
   cb(TABI_DYNAMAP ("request","progress") ("compressed", *inSize - old_inSize) ("original", *outSize - old_outSize));
   old_inSize  = *inSize;
   old_outSize = *outSize;
@@ -505,6 +537,8 @@ STDMETHODIMP CExtractCallbackConsole::MessageError(const wchar_t *message)
 
 STDMETHODIMP CExtractCallbackConsole::SetOperationResult(Int32 operationResult, bool encrypted)
 {
+  if (BreakFlag)
+    return E_ABORT;
   cb(TABI_DYNAMAP ("request","filedone") ("operationResult", operationResult) ("encrypted?", encrypted));
   return S_OK;
 }
@@ -524,7 +558,7 @@ STDMETHODIMP CExtractCallbackConsole::CryptoGetTextPassword(BSTR *password)
   {
     int password_size = 1000;
     wchar_t password_buf[password_size];
-    cb(TABI_DYNAMAP ("request","ask_password") ("password_buf", password_buf) ("password_size", password_size));
+    cb(TABI_DYNAMAP ("request","ask_password") ("password_buf", (void*)password_buf) ("password_size", password_size));
     Password = password_buf;
     PasswordIsDefined = true;
   }
@@ -1137,12 +1171,12 @@ extern "C" int c_szExtract (TABI_ELEMENT* params)
 {
   try {
     TABI_MAP p(params);
-    char     *command   =             p._str("cmd");
-    CArc&         arc   = *(CArc*)   (p._ptr("archive"));
-    wchar_t *OutputDir  = (wchar_t *)(p._ptr("OutputDir"));
-    UInt32  *filelist   = (UInt32  *)(p._ptr("filelist"));
-    int      files      =             p._int("files");
-    bool     keepBroken =             p._bool("keepBroken?");
+    char         *command   =                  p._str("cmd");
+    CArchiveLink &arc       = *(CArchiveLink*)(p._ptr("archive"));
+    wchar_t     *OutputDir  =      (wchar_t *)(p._ptr("OutputDir"));
+    UInt32      *filelist   =      (UInt32  *)(p._ptr("filelist"));
+    int          files      =                  p._int("files");
+    bool         keepBroken =                  p._bool("keepBroken?");
 
     CArchiveExtractCallback *extractCallbackSpec = new CArchiveExtractCallback;
     CMyComPtr<IArchiveExtractCallback> ecs(extractCallbackSpec);
@@ -1168,7 +1202,7 @@ extern "C" int c_szExtract (TABI_ELEMENT* params)
     UInt64 packProcessed;
     UInt64 packSize = 0;
 
-    HRESULT result = DecompressArchiveZ(arc, filelist, files, packSize, options,
+    HRESULT result = DecompressArchiveZ(arc.Arcs.Back(), filelist, files, packSize, options,
                                         extractCallback, extractCallbackSpec, errorMessage, packProcessed);
 
     if (result != S_OK)
@@ -1176,9 +1210,365 @@ extern "C" int c_szExtract (TABI_ELEMENT* params)
 
     return 0;
   } catch (const char *msg) {
+    printf("\nc_szExtract: %s\n", msg);
 //    sprintf(errmsg, "c_szExtract: %s", msg);
     return 1;
   }
 }
 
 
+
+
+
+
+
+
+
+//////////////////////////////////////////////////////////////
+// Archive creation
+#include "7zip/Compress/CopyCoder.cpp"
+#include "7zip/UI/Common/TempFiles.cpp"
+#include "7zip/UI/Common/UpdateAction.cpp"
+#include "7zip/UI/Common/UpdatePair.cpp"
+#include "7zip/UI/Common/SortUtils.cpp"
+
+static TABI_FUNCTION *cb;
+static int            arc_files;            // Количество файлов из оригинального архива,
+static UInt32*        arc_filelist;         //   их номера,
+static wchar_t**      new_names    = NULL;  //   и новые имена
+static wchar_t**      disk_names   = NULL;  // Файлы для упаковки с диска
+static wchar_t**      stored_names = NULL;  //   и имена, которые им дать в архиве
+static int            last_index = -1;
+#include "Client7zUpdate.cpp"
+
+static UInt64 old_inSize, old_outSize;
+
+#include "7zip/UI/Console/UpdateCallbackConsole.h"
+HRESULT CUpdateCallbackConsole::OpenResult(const wchar_t *name, HRESULT result)
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::StartScanning()
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::ScanProgress(UInt64 /* numFolders */, UInt64 /* numFiles */, const wchar_t * /* path */)
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::CanNotFindError(const wchar_t *name, DWORD systemError)
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::FinishScanning()
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::StartArchive(const wchar_t *name, bool updating)
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::FinishArchive()
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::CheckBreak()
+{
+  if (BreakFlag)
+    return E_ABORT;
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::Finilize()
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::SetNumFiles(UInt64 numFiles)
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::SetTotal(UInt64 size)   // This "total" is "capacity" actual, it's larger than sum of files' origsize
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::SetCompleted(const UInt64 *completeValue)
+{
+  RINOK(CheckBreak());
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::SetRatioInfo(const UInt64 *inSize, const UInt64 *outSize)
+{
+  RINOK(CheckBreak());
+  cb(TABI_DYNAMAP ("request","progress") ("original", *inSize - old_inSize) ("compressed", *outSize - old_outSize));
+  old_inSize  = *inSize;
+  old_outSize = *outSize;
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::GetStream(const wchar_t *name, bool isAnti)
+{
+  RINOK(CheckBreak());
+  cb(TABI_DYNAMAP ("request","filename") ("filename", name) ("is_folder?", false) ("mode", NArchive::NExtract::NAskMode::kExtract));
+  //cb(TABI_DYNAMAP ("request","filename") ("filename", last_index>=0? disk_names[last_index] : name) ("is_folder?", false) ("mode", NArchive::NExtract::NAskMode::kExtract));
+  last_index = -1;
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::OpenFileError(const wchar_t *name, DWORD systemError)
+{
+  return S_FALSE;
+}
+
+HRESULT CUpdateCallbackConsole::SetOperationResult(Int32 )
+{
+  return S_OK;
+}
+
+HRESULT CUpdateCallbackConsole::CryptoGetTextPassword2(Int32 *passwordIsDefined, BSTR *password)
+{
+  RINOK(CheckBreak());
+  *passwordIsDefined = PasswordIsDefined;
+  return StringToBstr(Password, password);
+}
+
+HRESULT CUpdateCallbackConsole::CryptoGetTextPassword(BSTR *password)
+{
+  RINOK(CheckBreak());
+  return StringToBstr(Password, password);
+}
+
+
+//////////////////////////////////////////////////////////////
+// EnumDirItems.cpp
+
+using namespace NWindows;
+using namespace NFile;
+using namespace NName;
+
+void AddDirFileInfo(int phyParent, int logParent,
+    const NFind::CFileInfoW &fi, CObjectVector<CDirItem> &dirItems)
+{
+  CDirItem di;
+  di.Size = fi.Size;
+  di.CTime = fi.CTime;
+  di.ATime = fi.ATime;
+  di.MTime = fi.MTime;
+  di.Attrib = fi.Attrib;
+  di.PhyParent = phyParent;
+  di.LogParent = logParent;
+  di.Name = fi.Name;
+  dirItems.Add(di);
+}
+
+UString CDirItems::GetPrefixesPath(const CIntVector &parents, int index, const UString &name) const
+{
+  return UString();
+}
+
+UString CDirItems::GetPhyPath(int index) const
+{
+  return disk_names[index];
+}
+
+UString CDirItems::GetLogPath(int index) const
+{
+  last_index = index;
+  return stored_names[index];
+}
+
+void CDirItems::ReserveDown()
+{
+  Items.ReserveDown();
+}
+
+int CDirItems::AddPrefix(int phyParent, int logParent, const UString &prefix)
+{
+  return 0;
+}
+
+void CDirItems::DeleteLastPrefix()
+{
+}
+
+void CDirItems::EnumerateDirectory(int phyParent, int logParent, const UString &phyPrefix,
+    UStringVector &errorPaths, CRecordVector<DWORD> &errorCodes)
+{
+}
+
+HRESULT EnumerateItems(
+    const NWildcard::CCensor &censor,
+    CDirItems &dirItems,
+    IEnumDirItemCallback *callback,
+    UStringVector &errorPaths,
+    CRecordVector<DWORD> &errorCodes)
+{
+  for (wchar_t **filename = disk_names; *filename; filename++)
+  {
+    NFind::CFileInfoW fi;
+    if (!fi.Find(*filename))  throw "file to compress not found";
+    AddDirFileInfo(-1,-1,fi,dirItems.Items);
+  }
+  dirItems.ReserveDown();
+  return S_OK;
+}
+
+
+
+
+
+//////////////////////////////////////////////////////////////
+// Create archive
+extern "C" int c_szCompress (TABI_ELEMENT* params)
+{
+  try {
+    szInitLibrary();
+
+    TABI_MAP p(params);
+    char     *update_type         =             (p._str ("update_type"));   // Archive updating operation (a, u, f, s)
+    wchar_t **compression_options = (wchar_t **)(p._ptr ("options"));       // Compression options
+    wchar_t  *arcType             =             (p._wstr("arctype"));       // Archive type (7z, zip...)
+    wchar_t  *in_arcname          =             (p._wstr("in_arcname"));
+    wchar_t  *out_arcname         =             (p._wstr("out_arcname"));
+              arc_files           =             (p._int ("files"));          // Количество файлов из оригинального архива,
+              arc_filelist        = (UInt32 *)  (p._ptr ("filelist"));       //   их номера,
+              new_names           = (wchar_t **)(p._ptr ("new_names"));      //   и новые имена
+              disk_names          = (wchar_t **)(p._ptr ("disk_names"));     // Файлы для упаковки с диска
+              stored_names        = (wchar_t **)(p._ptr ("stored_names"));   //   и имена, которые им дать в архиве
+    wchar_t  *password            =             (p._wstr("password"));       // Пароль шифрования
+    int       volumes             =             (p._int ("volumes"));        // Размер массива volume_sizes
+    UInt64   *volume_sizes        = (UInt64 *)  (p._ptr ("volume_sizes"));;  // Размер томов архива
+    wchar_t  *sfxModule           =             (p._wstr("sfx"));            // Файл sfx-модуля, "-" для удаления существующего модуля, или "--" чтобы ничего не менять
+
+    last_index = -1;
+
+    CUpdateOptions options;
+    options.UpdateArchiveItself = false;
+
+    options.Commands.Clear();
+    CUpdateArchiveCommand uc;
+    uc.UserArchivePath = out_arcname;
+    uc.ActionSet = 0==strcmp(update_type,"a")? NUpdateArchive::kAddActionSet
+                 : 0==strcmp(update_type,"u")? NUpdateArchive::kUpdateActionSet
+                 : 0==strcmp(update_type,"f")? NUpdateArchive::kFreshActionSet
+                 : 0==strcmp(update_type,"s")? NUpdateArchive::kSynchronizeActionSet
+                 : throw "bad update_type";
+    options.Commands.Add(uc);
+
+    for (wchar_t **option = compression_options; *option; option++)
+    {
+      //wprintf(L"\n 7z option = %s \n", *option);
+      wchar_t *value = wcschr (*option, L'=');
+      if (value)  *value++ = L'\0';  else value = L"";
+      CProperty property = {*option, value};
+      options.MethodMode.Properties.Add(property);
+    }
+    for (int i=0; i<volumes; i++)
+      options.VolumesSizes.Add(volume_sizes[i]);
+
+    if (wcscmp(sfxModule, L"-")==0)                   // remove SFX module from the archive
+    {
+      CProperty property = {L"rsfx", L"on"};
+      options.MethodMode.Properties.Add(property);
+    }
+    else if (wcscmp(sfxModule, L"--"))                // add SFX module to the archive
+    {
+      options.SfxMode = true;
+      options.SfxModule = sfxModule;
+    }
+
+
+    cb = p._callback("callback"); old_inSize = old_outSize = 0;
+
+    COpenCallbackConsoleZ openCallback(p._callback("callback"));
+
+    CUpdateCallbackConsole callback;
+    callback.PasswordIsDefined = (*password != 0);
+    callback.AskPassword = false;
+    callback.Password = password;
+
+    CUpdateErrorInfo errorInfo;
+
+    NWildcard::CCensor censor;  // fake censor
+
+    // Подобрать формат архива по опции -t и имени создаваемого архива
+    CIntVector formatIndices;
+    if (!codecs->FindFormatForArchiveType(arcType, formatIndices))
+      throw "unsupported archive type";
+    if (!options.Init(codecs, formatIndices, in_arcname))
+      throw kUpdateIsNotSupoorted;
+
+    HRESULT result = UpdateArchive(codecs,
+        censor, options,
+        errorInfo, &openCallback, &callback);
+
+    if (result != S_OK)
+      throw "compression error";
+
+    return 0;
+  } catch (const char *msg) {
+    printf("\nc_szCompress: %s\n", msg);
+//    sprintf(errmsg, "c_szCompress: %s", msg);
+    return 1;
+  }
+}
+
+
+
+//////////////////////////////////////////////////////////////
+// Check that given archive type (7z, zip...) supported by 7z.dll
+extern "C" int c_szCheckType (wchar_t *arcType)
+{
+  szInitLibrary();
+  CIntVector formatIndices;
+  return (codecs->FindFormatForArchiveType(arcType, formatIndices)? 1 : 0);
+}
+
+// Return default extension for given arcType
+extern "C" int c_szDefaultExtension (wchar_t *arcType, wchar_t *extension, UInt32 extensionSize, char *errmsg)
+{
+  szInitLibrary();
+  CIntVector formatIndices;
+  wcscpy(extension, L"");
+  if (codecs->FindFormatForArchiveType(arcType, formatIndices))
+  {
+    for (int i=0; i<formatIndices.Size(); i++)
+    {
+      int arcTypeIndex = formatIndices[0];
+      if (arcTypeIndex >= 0)
+      {
+        UString typeExt = codecs->Formats[arcTypeIndex].GetMainExt();
+        if (typeExt > L"")
+        {
+          wcscat(extension, L".");
+          wcscat(extension, typeExt);
+        }
+      }
+    }
+    return 0;
+  }
+  else
+  {
+    sprintf(errmsg, "c_szDefaultExtension: unsupported archive type");
+    return 1;
+  }
+}
+
+// Return possible arcType what 7z.dll is able to CREATE for given arcname w/o path, or ""
+extern "C" int c_szFindFormatForArchiveName (wchar_t *arcname, wchar_t *arcType, UInt32 arcTypeSize, char *errmsg)
+{
+  szInitLibrary();
+  int i = codecs->FindFormatForArchiveName(arcname);
+  wcscpy (arcType, i>=0? codecs->Formats[i].Name : L"");   // i<0 == archive type wasn't recognized
+  return 0;
+}

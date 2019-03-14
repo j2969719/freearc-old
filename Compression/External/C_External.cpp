@@ -3,90 +3,17 @@
 extern "C" {
 #include "C_External.h"
 }
+#include "../LZMA2/MultiThreading/Thread.h"
+#include "../LZMA2/MultiThreading/Synchronization.h"
 
-int external_program (bool IsCompressing, CALLBACK_FUNC *callback, void *auxdata, char *infile_basename, char *outfile_basename, char *cmd, char *method, int MinCompression, double *addtime)
+// Is this command waits for preceding compression methods to be finsihed before starting succeeding ones
+bool IsMemoryBarrier (char *cmd)
 {
-    MYDIR t;  if (!t.create_tempdir())  return FREEARC_ERRCODE_WRITE;
-    MYFILE infile (t, infile_basename);   infile.mark_as_temporary();
-    MYFILE outfile(t, outfile_basename);  outfile.mark_as_temporary();
-
-    BYTE* Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);    // буфер, используемый для чтения/записи данных
-    int x;                                                // код, возвращённый последней операцией чтения/записи
-    int ExitCode = 0;                                     // код возврата внешней программы
-    bool useHeader = !strequ(method,"tempfile");          // TRUE, если в начало сжатого потока записывается 0/1 - данные несжаты/сжаты
-
-    // Перепишем входные данные во временный файл
-    infile.remove();
-    uint64 bytes = 0;
-    BYTE runCmd = 1;
-    if (!IsCompressing && useHeader)  checked_read (&runCmd, 1);
-    while ( (x = callback ("read", Buf, LARGE_BUFFER_SIZE, auxdata)) > 0 )
-    {
-        if (!infile.isopen())  {// Не открываем файл пока не прочтём хоть сколько-нибудь данных (для решения проблем с перепаковкой солид-блоков)
-            if (!infile.tryOpen(WRITE_MODE))  {x=FREEARC_ERRCODE_WRITE; break;}
-        }
-        if (runCmd!=0 && runCmd!=1) {            // Для совместимости со старыми версиями FreeArc, которые не добавляли 1 перед сжатыми данными (убрать из FreeArc 1.0!)
-            outfile = "data7777";
-            bytes += 1;
-            if (write(infile.handle,&runCmd,1) != 1)   {x=FREEARC_ERRCODE_WRITE; break;}
-            runCmd = 1;
-        }
-        bytes += x;
-        if (write(infile.handle,Buf,x) != x)           {x=FREEARC_ERRCODE_WRITE; break;}
-    }
-    FreeAndNil(Buf);
-    infile.close();
-    if (x)  return x;   // Если при чтении/записи произошла ошибка - выходим
-
-    // Если cmd пусто - диск используется просто для буферизации данных перед дальнейшим сжатием.
-    // Если runCmd==0 - данные были скопированы без сжатия
-    outfile.remove();
-    if (*cmd && runCmd) {
-    	char temp[30];
-        printf ("\n%s %s bytes with %s\n", IsCompressing? "Compressing":"Unpacking", show3(bytes,temp), cmd);
-        MYFILE _tcmd(cmd); // utf8->utf16 conversion
-        double time0 = GetGlobalTime();
-        ExitCode = RunCommand (_tcmd.filename, t.filename, TRUE);
-        printf ("\nErrorlevel=%d\n", ExitCode);
-        if (addtime)  *addtime += GetGlobalTime() - time0;
-    } else {
-        infile.rename (outfile);
-    }
-
-    // Откроем выходной файл, если команда завершилась успешно и его можно открыть
-    if(ExitCode==0)    outfile.tryOpen (READ_MODE);
-    if (outfile.isopen()) {
-        infile.remove();
-        BYTE compressed[1] = {1};
-        if (IsCompressing && useHeader)     checked_write(compressed,1);
-    } else {
-        if (IsCompressing && !useHeader)    return FREEARC_ERRCODE_GENERAL;
-        outfile.remove();
-        if (!IsCompressing)                 return FREEARC_ERRCODE_INVALID_COMPRESSOR;
-        infile.rename (outfile);
-        if (!outfile.tryOpen (READ_MODE))   return FREEARC_ERRCODE_READ;
-        BYTE uncompressed[1] = {0};
-        if (IsCompressing)                  checked_write(uncompressed,1);
-    }
-
-    // Прочитаем выходные данные из файла
-    QUASIWRITE (outfile.size());
-    Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);
-    while ((x = read (outfile.handle, Buf, LARGE_BUFFER_SIZE)) > 0)
-    {
-        checked_write (Buf, x);
-    }
-finished:
-    FreeAndNil(Buf);
-    return x;         // 0, если всё в порядке, и код ошибки иначе
+  return (strstr(cmd, " <stdin>") == NULL)
+      || (strstr(cmd, " <stdout>")== NULL);
 }
 
-
-/*-------------------------------------------------*/
-/* Реализация класса EXTERNAL_METHOD               */
-/*-------------------------------------------------*/
-
-char *prepare_cmd (EXTERNAL_METHOD *p, char *cmd)
+char *prepare_cmd (EXTERNAL_METHOD *p, char *cmd, bool *write_stdin, bool *read_stdout)
 {
     // Replace "{options}" or "{-option }" in packcmd with string like "-m48 -r1 " (for "pmm:m48:r1" method string)
     char *OPTIONS_STR = "{options}",  *OPTION_STR = "option";
@@ -127,7 +54,7 @@ char *prepare_cmd (EXTERNAL_METHOD *p, char *cmd)
         }
     }
 
-    // If we found any option template in cmd
+    // If we've found any option template in cmd
     if (replaced)
     {
         // Collect in param_str options in cmd format
@@ -140,31 +67,288 @@ char *prepare_cmd (EXTERNAL_METHOD *p, char *cmd)
         }
         // Finally replace template with collected or default options
         cmd = str_replace_n (cmd, replaced, how_many, *p->options? param_str : p->defaultopt);
+    } else {
+        cmd = strdup_msg (cmd);
     }
 
-    return cmd;
+    // Теперь уберём из команд ссылки на stdin/stdout и взведём соответствующие флаги
+    char *cmd1 = str_replace (cmd,  " <stdin>", "");   *write_stdin = strstr(cmd, " <stdin>") != NULL;
+    char *cmd2 = str_replace (cmd1, " <stdout>", "");  *read_stdout = strstr(cmd, " <stdout>")!= NULL;
+    delete cmd;
+    delete cmd1;
+    return cmd2;
 }
 
 
-// Функция распаковки
-int EXTERNAL_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
+enum {READ=0, WRITE=1};
+
+struct MYPIPE
 {
-    char *cmd = prepare_cmd (this, unpackcmd);
-    int result = external_program (FALSE, callback, auxdata, packedfile, datafile, cmd, name, 0, &addtime);
-    if (cmd != unpackcmd)  delete cmd;
-    return result;
+    int mode;    // READ or WRITE
+    int fdStd;   // stdin/stdout
+    int fdDup;   // temporary saved copy of fdStd
+    int fd;      // file descriptor for data exchange with child process
+
+    MYPIPE (int _fdStd, int _mode)  {mode = _mode;  fdStd = _fdStd;  fd = -1;}
+
+    int GetFd()
+    {
+        int fdPipe[2];
+#ifdef FREEARC_WIN
+        if (_pipe(fdPipe, LARGE_BUFFER_SIZE, O_BINARY | O_NOINHERIT) == -1)
+#else
+        if (pipe(fdPipe) != 0)
+#endif
+                                                    return 1;  // Create the pipe
+        fdDup = dup(fdStd);                                    // Duplicate stdXXX file descriptor (next line will close original)
+        if (dup2 (fdPipe[mode], fdStd) != 0)        return 2;  // Duplicate MODE end of pipe to stdXXX file descriptor
+        close (fdPipe[mode]);                                  // Close original MODE end of pipe
+        fd = fdPipe[READ+WRITE-mode];               return 0;  // Save file descriptor for data exchange with child process
+    }
+
+    void Cleanup()
+    {
+        if (fd >= 0) {                                          // If GetFd() was executed
+            dup2(fdDup, fdStd);                                 //     Duplicate copy of original stdXXX back into stdXXX
+            close(fdDup);                                       //     Close duplicate copy of original stdXXX
+        }
+    }
+
+    void Close()
+    {
+        if (fd >= 0) {                                          // If GetFd() was executed
+            close (fd);                                         //     Close file descriptor used for data exchange with child process
+        }
+    }
+};
+
+struct CLOSE_FD
+{
+    int fdStd;   // stdin/stdout
+    int fdDup;   // temporary saved copy of fdStd
+
+    CLOSE_FD (int _fdStd)  {fdStd = _fdStd;  fdDup = -1;}
+
+    void Close()
+    {
+        fdDup = dup(fdStd);                                     // Duplicate stdXXX file descriptor (next line will close original)
+        close (fdStd);                                          // Close original MODE end of pipe
+    }
+
+    void Restore()
+    {
+        if (fdDup >= 0) {                                       // If Close() was executed
+            dup2(fdDup, fdStd);                                 //     Duplicate copy of original stdXXX back into stdXXX
+            close(fdDup);                                       //     Close duplicate copy of original stdXXX
+        }
+    }
+};
+
+
+struct Waiter
+{
+    MYPIPE WriterPipe, ReaderPipe;  CLOSE_FD CloseStdErr;
+    Thread WriterThread, ReaderThread;
+    COMPRESSION direction; int useHeader; CALLBACK_FUNC *callback; void *auxdata;
+    bool write_stdin, read_stdout;             // Записывать в stdin/читать stdout запущенной команды вместо передачи данных в файлах
+    volatile int errcode;
+
+    bool be_quiet()  {return !debug_mode && write_stdin && read_stdout;}
+
+    Waiter (COMPRESSION _direction, int _useHeader, CALLBACK_FUNC *_callback, void *_auxdata)
+        : WriterPipe(0/*stdin*/, READ)
+        , ReaderPipe(1/*stdout*/, WRITE)
+        , CloseStdErr(2/*stderr*/)
+        { direction=_direction; useHeader=_useHeader; callback=_callback; auxdata=_auxdata; errcode=0; }
+};
+
+// Thread writing to external program's stdin
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE WriteToExternalProgram (void *param)
+{
+    Waiter *w = (Waiter*) param;  CALLBACK_FUNC *callback = w->callback;  void *auxdata = w->auxdata;
+    int x;                                                // код, возвращённый последней операцией чтения/записи
+    BYTE* Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);
+    while ( (x = callback ("read", Buf, LARGE_BUFFER_SIZE, auxdata)) > 0 )
+    {
+        if (write(w->WriterPipe.fd,Buf,x) != x)           {x=FREEARC_ERRCODE_WRITE; goto finished;}
+    }
+finished:
+    FreeAndNil(Buf);
+    if (x<0 && w->errcode==0)    // x>=0, если всё в порядке, и код ошибки иначе
+      w->errcode = x;
+    return 0;
+}
+
+// Thread reading from external program's stdout
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE ReadFromExternalProgram (void *param)
+{
+    Waiter *w = (Waiter*) param;  CALLBACK_FUNC *callback = w->callback;  void *auxdata = w->auxdata;
+    int x;                                                // код, возвращённый последней операцией чтения/записи
+    BYTE* Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);
+    BYTE compressed[1] = {1};
+    if (w->direction==COMPRESS && w->useHeader)   checked_write(compressed,1);
+    while ((x = read (w->ReaderPipe.fd, Buf, LARGE_BUFFER_SIZE)) > 0)
+    {
+        checked_write (Buf, x);
+    }
+finished:
+    FreeAndNil(Buf);
+    if (x<0 && w->errcode==0)    // x>=0, если всё в порядке, и код ошибки иначе
+      w->errcode = x;
+    return 0;
+}
+
+// Пока идёт процесс манипуляции с stdin/stdout, другим сюда лучше не соваться (включая индикатор прогресса в хаскельной части)
+Mutex SynchronizeConio;
+void SynchronizeConio_Enter(void) {SynchronizeConio.Enter();}
+void SynchronizeConio_Leave(void) {SynchronizeConio.Leave();}
+
+// Подготавливает stdin/stdout/stderr потоки к запуску внешней программы
+int StartThreads (void *param)
+{
+    Waiter *w = (Waiter*) param;
+    SynchronizeConio_Enter();
+    if (w->write_stdin)  w->WriterPipe.GetFd();
+    if (w->read_stdout)  w->ReaderPipe.GetFd();
+    if (w->be_quiet())   w->CloseStdErr.Close();
+    return 0;
+}
+
+// Восстанавливает stdin/stdout/stderr и выполняет треды, производящие обмен с запущенной программой
+int WaitThreads (void *param)
+{
+    Waiter *w = (Waiter*) param;
+    if (w->write_stdin)  w->WriterPipe.Cleanup();
+    if (w->read_stdout)  w->ReaderPipe.Cleanup();
+    if (w->be_quiet())   w->CloseStdErr.Restore();
+    SynchronizeConio_Leave();
+    if (w->write_stdin)  w->WriterThread.Create (WriteToExternalProgram,  w);
+    if (w->read_stdout)  w->ReaderThread.Create (ReadFromExternalProgram, w);
+    if (w->write_stdin)  w->WriterThread.Wait(),  w->WriterPipe.Close();     // Сначала закрываем поток данных из нашей программы во внешнюю
+    if (w->read_stdout)  w->ReaderThread.Wait(),  w->ReaderPipe.Close();     // И только затем ждём завершения потока данных из внешней программы в нашу
+    return 0;
+}
+
+
+/*-------------------------------------------------*/
+/* Реализация класса EXTERNAL_METHOD               */
+/*-------------------------------------------------*/
+
+// Упаковка/распаковка
+int EXTERNAL_METHOD::DeCompress (COMPRESSION direction, CALLBACK_FUNC *callback, void *auxdata)
+{
+    MYDIR t;  if (!t.create_tempdir())  return FREEARC_ERRCODE_WRITE;
+    MYFILE infile (t, direction==COMPRESS? datafile : packedfile);   infile.mark_as_temporary();
+    MYFILE outfile(t, direction==COMPRESS? packedfile : datafile);  outfile.mark_as_temporary();
+
+    Waiter w(direction, useHeader, callback, auxdata);
+    char *cmd = prepare_cmd (this, direction==COMPRESS? packcmd : unpackcmd, &w.write_stdin, &w.read_stdout);
+
+    BYTE* Buf = NULL;                                     // буфер, используемый для чтения/записи данных
+    int x;                                                // код, возвращённый последней операцией чтения/записи
+    int ExitCode = 0;                                     // код возврата внешней программы
+
+    // Перепишем входные данные во временный файл
+    infile.remove();
+    uint64 bytes = 0;
+    BYTE runCmd = 1;
+    if (direction==DECOMPRESS && useHeader)  checked_read (&runCmd, 1);
+    if (!w.write_stdin)
+    {
+      Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);
+      while ( (x = callback ("read", Buf, LARGE_BUFFER_SIZE, auxdata)) > 0 )
+      {
+          if (!infile.isopen()) {// Не открываем файл пока не прочтём хоть сколько-нибудь данных (для решения проблем с перепаковкой солид-блоков)
+              if (!infile.tryOpen(WRITE_MODE))           {x=FREEARC_ERRCODE_WRITE; goto finished;}
+          }
+          if (runCmd!=0 && runCmd!=1) {// Для совместимости со старыми версиями FreeArc, которые не добавляли 1 перед сжатыми данными (убрать из FreeArc 1.0!)
+              outfile = "data7777";
+              bytes += 1;
+              if (write(infile.handle,&runCmd,1) != 1)   {x=FREEARC_ERRCODE_WRITE; goto finished;}
+              runCmd = 1;
+          }
+          bytes += x;
+          if (write(infile.handle,Buf,x) != x)           {x=FREEARC_ERRCODE_WRITE; goto finished;}
+      }
+      FreeAndNil(Buf);
+      infile.close();
+      if (x)  goto finished;   // Если при чтении/записи произошла ошибка - выходим
+    }
+
+    // Если cmd пусто - диск используется просто для буферизации данных перед дальнейшим сжатием.
+    // Если runCmd==0 - данные были скопированы без сжатия
+    outfile.remove();
+    if (*cmd && runCmd) {
+        MYFILE _tcmd(cmd); // utf8->utf16 conversion
+        char temp[100];
+        if (!w.be_quiet())   printf ("\n%s %s bytes with %s\n", direction==COMPRESS? "Compressing":"Unpacking", show3(bytes,temp), cmd);
+
+        StartThreads(&w);  double time0 = GetGlobalTime();
+        ExitCode = RunCommand (_tcmd.filename, t.filename, TRUE, WaitThreads, &w);
+        addtime += GetGlobalTime() - time0;
+
+        if (!w.be_quiet())                  printf ("\nErrorlevel=%d\n", ExitCode);
+        if (w.errcode < 0)                  {x=w.errcode; goto finished;}
+        if (w.read_stdout)                  {x=ExitCode?FREEARC_ERRCODE_GENERAL:0; goto finished;}
+    } else {
+        infile.rename (outfile);
+    }
+
+    // Откроем выходной файл, если команда завершилась успешно и его можно открыть
+    if(ExitCode==0)    outfile.tryOpen (READ_MODE);
+    if (outfile.isopen()) {
+        infile.remove();
+        BYTE compressed[1] = {1};
+        if (direction==COMPRESS && useHeader)            checked_write(compressed,1);
+    } else {
+        if (direction==COMPRESS && !useHeader)           {x=FREEARC_ERRCODE_GENERAL; goto finished;}
+        outfile.remove();
+        if (direction==DECOMPRESS)                       {x=FREEARC_ERRCODE_INVALID_COMPRESSOR; goto finished;}
+        infile.rename (outfile);
+        if (!outfile.tryOpen (READ_MODE))                {x=FREEARC_ERRCODE_READ; goto finished;}
+        BYTE uncompressed[1] = {0};
+        if (direction==COMPRESS)                         checked_write(uncompressed,1);
+    }
+
+    // Прочитаем выходные данные из файла
+    QUASIWRITE (outfile.size());
+    Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);
+    while ((x = read (outfile.handle, Buf, LARGE_BUFFER_SIZE)) > 0)
+    {
+        checked_write (Buf, x);
+    }
+finished:
+    FreeAndNil(Buf);
+    delete cmd;
+    return x;         // 0, если всё в порядке, и код ошибки иначе
+}
+
+
+// Универсальный метод: возвращаем различные простые характеристики метода сжатия
+int EXTERNAL_METHOD::doit (char *what, int param, void *data, CALLBACK_FUNC *callback)
+{
+    if      (strequ (what,"external?"))                     return 1;
+    else if (strequ (what,"nosolid?"))                      return !solid;
+    else if (strequ (what,"MemoryBarrierCompression?"))     return IsMemoryBarrier(packcmd);
+    else if (strequ (what,"MemoryBarrierDecompression?"))   return IsMemoryBarrier(unpackcmd);
+    else return COMPRESSION_METHOD::doit (what, param, data, callback);
 }
 
 #ifndef FREEARC_DECOMPRESS_ONLY
 
-// Функция упаковки
-int EXTERNAL_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
+double myround (double x)  {return floor(x+0.5);}
+
+// Изменить потребность в памяти, заодно оттюнинговав order
+void EXTERNAL_METHOD::SetCompressionMem (MemSize _mem)
 {
-    char *cmd = prepare_cmd (this, packcmd);
-    int result = external_program (TRUE, callback, auxdata, datafile, packedfile, cmd, name, 0, &addtime);
-    if (cmd != packcmd)  delete cmd;
-    return result;
+    if (can_set_mem && _mem>0) {
+        order  +=  int (myround (log(double(_mem)/cmem) / log(2.0) * 4));
+        cmem=dmem=_mem;
+    }
 }
+
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_EXTERNAL)
 void EXTERNAL_METHOD::ShowCompressionMethod (char *buf, bool purify)
@@ -183,18 +367,6 @@ void EXTERNAL_METHOD::ShowCompressionMethod (char *buf, bool purify)
     }
 }
 
-// Изменить потребность в памяти, заодно оттюнинговав order
-void EXTERNAL_METHOD::SetCompressionMem (MemSize _mem)
-{
-    if (can_set_mem && _mem>0) {
-        order  +=  int (trunc (log(double(_mem)/cmem) / log(2) * 4));
-        cmem=dmem=_mem;
-    }
-}
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
-
-
 // Конструирует объект типа EXTERNAL_METHOD/PPMonstr с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах
 COMPRESSION_METHOD* parse_PPMONSTR (char** parameters)
@@ -205,7 +377,7 @@ COMPRESSION_METHOD* parse_PPMONSTR (char** parameters)
     EXTERNAL_METHOD *p = new EXTERNAL_METHOD;
     p->name           = "pmm";
     p->MinCompression = 100;
-    p->can_set_mem    = TRUE;
+    p->can_set_mem    = true;
     p->order          = 16;
     p->cmem           = 192*mb;
     p->dmem           = 192*mb;
@@ -320,7 +492,7 @@ int AddExternalCompressor (char *params)
         // Инициализируем шаблон EXTERNAL_METHOD именем очередной версии и параметрами по умолчанию
         version[i].name           = trim_spaces(version_name[i]);
         version[i].MinCompression = 100;
-        version[i].can_set_mem    = FALSE;
+        version[i].can_set_mem    = false;
         version[i].cmem           = 0;
         version[i].dmem           = 0;
         version[i].datafile       = "$$arcdatafile$$.tmp";
@@ -329,6 +501,7 @@ int AddExternalCompressor (char *params)
         version[i].unpackcmd      = "";
         version[i].defaultopt     = "";
         version[i].solid          = 1;
+        version[i].useHeader      = 1;
     }
 
 
@@ -368,6 +541,7 @@ int AddExternalCompressor (char *params)
             else if (strequ (left, "packedfile"))  version[i].packedfile  = subst (strdup_msg(right), "{compressor}", version[i].name);
             else if (strequ (left, "default"))     version[i].defaultopt  = subst (strdup_msg(right), "{compressor}", version[i].name);
             else if (strequ (left, "solid"))       version[i].solid       = parseInt (right, &error);
+            else if (strequ (left, "header"))      version[i].useHeader   = parseInt (right, &error);
             else                                   error=1;
 
             if (error)  return 0;
@@ -387,5 +561,4 @@ int AddExternalCompressor (char *params)
 
 // Псевдо-метод сжатия, записывающий все получаемые им данные в файл, и затем считывающий его.
 // Автоматически вставляется между жрущими много памяти алгоритмами, например REP и LZMA
-static int TEMPFILE_x = AddExternalCompressor ("[External compressor:tempfile]");   // Зарегистрируем парсер метода TEMPFILE
-
+static int TEMPFILE_x = AddExternalCompressor ("[External compressor:tempfile]\n header=0");   // Зарегистрируем парсер метода TEMPFILE

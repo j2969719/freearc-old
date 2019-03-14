@@ -63,6 +63,9 @@ isVeryFastMethod         =  CompressionLib.compressionIs "VeryFast?"
 isFastDecMethod          =  not . any_function [(=="ppmd"), (=="ppmm"), (=="pmm"), isEXTERNAL_Method] . method_name
 -- |Метод сжатия, выполняемый внешней программой
 isEXTERNAL_Method        =  CompressionLib.compressionIs "external?"
+-- |Метод сжатия, сохраняющий (при упаковке/распаковке, соответственно) все промежуточные данные на диске, что повзоляет освободить память перед началом работы следующих методов в цепочке
+isMemoryBarrier_Compression    =  CompressionLib.compressionIs "MemoryBarrierCompression?"
+isMemoryBarrier_Decompression  =  CompressionLib.compressionIs "MemoryBarrierDecompression?"
 -- |Метод шифрования.
 isEncryption             =  CompressionLib.compressionIs "encryption?"
 
@@ -74,7 +77,7 @@ type Compressor = [CompressionMethod]
 aNO_COMPRESSION = [aSTORING] :: Compressor
 
 -- |Очень быстрое сжатие для уже сжатых файлов
-aCOMPRESSED_METHOD = split_compressor "tor:8m:c3"
+aCOMPRESSED_METHOD = split_compressor "4$compressed"
 
 -- |Это - фейковый компрессор, если в нём ровно один метод сжатия и он - фейковый
 isFakeCompressor (method:xs)  =  isFakeMethod method  &&  null xs
@@ -136,70 +139,60 @@ instance ByteStream.BufferData Compressor where
 class Compression a where
   getCompressionMem              :: a -> Integer
   getDecompressionMem            :: a -> Integer
+  getMinCompressionMem           :: a -> Integer
+  getMinDecompressionMem         :: a -> Integer
   getBlockSize                   :: a -> MemSize
   getDictionary                  :: a -> MemSize
   setDictionary                  :: MemSize -> a -> a
   limitCompressionMem            :: MemSize -> a -> a
   limitDecompressionMem          :: MemSize -> a -> a
+  limitMinDecompressionMem       :: MemSize -> a -> a
   limitDictionary                :: MemSize -> a -> a
-  limitCompressionMemoryUsage    :: MemSize -> a -> a
-  limitDecompressionMemoryUsage  :: MemSize -> a -> a
-
--- |Превратить функцию из CompressionLib, изменяющую Method, в функцию, изменяющую CompressionMethod
-liftSetter action  method | aSTORING ==  method   =  method
-liftSetter action  method | isFakeMethod method   =  method
-liftSetter action  method                         =  action method
-
--- |Превратить функцию из CompressionLib, опрашивающую Method, в функцию, опрашивающую CompressionMethod
-liftGetter action  method | aSTORING ==  method   =  0
-liftGetter action  method | isFakeMethod method   =  0
-liftGetter action  method                         =  action method
 
 instance Compression CompressionMethod where
-  getCompressionMem              =i.liftGetter   CompressionLib.getCompressionMem
-  getDecompressionMem            =i.liftGetter   CompressionLib.getDecompressionMem
-  getBlockSize                   =  liftGetter   CompressionLib.getBlockSize
-  getDictionary                  =  liftGetter   CompressionLib.getDictionary
-  setDictionary                  =  liftSetter . CompressionLib.setDictionary
-  limitCompressionMem            =  liftSetter . CompressionLib.limitCompressionMem
-  limitDecompressionMem          =  liftSetter . CompressionLib.limitDecompressionMem
-  limitDictionary                =  liftSetter . CompressionLib.limitDictionary
-  limitCompressionMemoryUsage    =  limitCompressionMem
-  limitDecompressionMemoryUsage  =  const id
+  getCompressionMem              =i.CompressionLib.getCompressionMem
+  getDecompressionMem            =i.CompressionLib.getDecompressionMem
+  getMinCompressionMem           =i.CompressionLib.getMinCompressionMem
+  getMinDecompressionMem         =i.CompressionLib.getMinDecompressionMem
+  getBlockSize                   =  CompressionLib.getBlockSize
+  getDictionary                  =  CompressionLib.getDictionary
+  setDictionary                  =  CompressionLib.setDictionary
+  limitCompressionMem            =  CompressionLib.limitCompressionMem
+  limitDecompressionMem          =  CompressionLib.limitDecompressionMem
+  limitMinDecompressionMem       =  CompressionLib.limitMinDecompressionMem
+  limitDictionary                =  CompressionLib.limitDictionary
 
 instance Compression Compressor where
-  getCompressionMem              =  calcMem getCompressionMem
-  getDecompressionMem            =  calcMem getDecompressionMem
+  getCompressionMem              =  calcMem getCompressionMem   isMemoryBarrier_Compression
+  getDecompressionMem            =  calcMem getDecompressionMem isMemoryBarrier_Decompression
+  getMinCompressionMem           =  maximum . map getMinCompressionMem
+  getMinDecompressionMem         =  maximum . map getMinDecompressionMem
   getBlockSize                   =  maximum . map getBlockSize
   getDictionary                  =  maximum . map getDictionary
   setDictionary                  =  mapLast . setDictionary
-  limitCompressionMem            =  map . limitCompressionMem
-  limitDecompressionMem          =  map . limitDecompressionMem
+  -- |Уменьшает потребности в памяти каждого алгоритма в цепочке до mem и затем вставляет между ними вызовы tempfile там, где необходимо
+  limitCompressionMem      mem   =  map (limitCompressionMem   mem)  >>>  insertTempfile getCompressionMem   isMemoryBarrier_Compression   mem
+  limitDecompressionMem    mem   =  map (limitDecompressionMem mem)  >>>  insertTempfile getDecompressionMem isMemoryBarrier_Decompression mem
+  -- |Ограничивает алгоритм так, чтобы его можно было распаковать в заданном объёме памяти
+  limitMinDecompressionMem mem   =  map (limitMinDecompressionMem mem)
   limitDictionary                =  compressionLimitDictionary
-  limitCompressionMemoryUsage    =  compressionLimitMemoryUsage
-  limitDecompressionMemoryUsage  =  genericLimitMemoryUsage getDecompressionMem
 
 instance Compression UserCompressor where
   -- Определить максимальное потребление памяти / размер блока в заданном UserCompressor
-  getCompressionMem              =  maximum . map (getCompressionMem   . snd)
-  getDecompressionMem            =  maximum . map (getDecompressionMem . snd)
-  getBlockSize                   =  maximum . map (getBlockSize        . snd)
-  getDictionary                  =  maximum . map (getDictionary       . snd)
+  getCompressionMem              =  maximum . map (getCompressionMem      . snd)
+  getDecompressionMem            =  maximum . map (getDecompressionMem    . snd)
+  getMinCompressionMem           =  maximum . map (getMinCompressionMem   . snd)
+  getMinDecompressionMem         =  maximum . map (getMinDecompressionMem . snd)
+  getBlockSize                   =  maximum . map (getBlockSize           . snd)
+  getDictionary                  =  maximum . map (getDictionary          . snd)
   -- Установить словарь / Ограничить используемую при сжатии/распаковке память
   -- сразу для всех методов, входящих в UserCompressor
   setDictionary                  =  mapSnds . setDictionary
   limitCompressionMem            =  mapSnds . limitCompressionMem
   limitDecompressionMem          =  mapSnds . limitDecompressionMem
+  limitMinDecompressionMem       =  mapSnds . limitMinDecompressionMem
   limitDictionary                =  mapSnds . limitDictionary
-  limitCompressionMemoryUsage    =  mapSnds . limitCompressionMemoryUsage
-  limitDecompressionMemoryUsage  =  mapSnds . limitDecompressionMemoryUsage
 
-
--- |Минимальный объём памяти, необходимый для упаковки/распаковки
-compressorGetShrinkedCompressionMem    = maximum . map (compressionGetShrinkedCompressionMem . snd)
-compressorGetShrinkedDecompressionMem  = maximum . map (compressionGetShrinkedDecompressionMem . snd)
-compressionGetShrinkedCompressionMem    = maximum . map getCompressionMem
-compressionGetShrinkedDecompressionMem  = maximum . map getDecompressionMem
 
 -- |Ограничить словари для цепочки алгоритмов, прекратив это делать после первого алгоритма,
 -- который может существенно раздуть данные (типа precomp). Среди внутренних алгоритмов
@@ -208,25 +201,23 @@ compressionLimitDictionary mem (x:xs) =  new_x : (not(isEXTERNAL_Method new_x)  
                                              where new_x = limitDictionary mem x
 compressionLimitDictionary mem []     =  []
 
--- |Уменьшает потребности в памяти каждого алгоритма в цепочке до mem
--- и затем вставляет между ними вызовы tempfile, если необходимо
-compressionLimitMemoryUsage mem  =  genericLimitMemoryUsage getCompressionMem mem . map (limitCompressionMem mem)
 
 -- |Вставляет вызовы tempfile между алгоритмами сжатия, разбивая их на "кластера",
 -- умещающиеся в memory_limit+5% (при этом "маленькие" алгоритмы не должны начинать новых кластеров,
 -- а external compressors обнуляют потребление памяти).
-genericLimitMemoryUsage getMem memory_limit | memory_limit==CompressionLib.aUNLIMITED_MEMORY  =  id
-                                            | otherwise                                       =  go (0::Double) ""
-  where go _   _    []      =  []
-        go mem prev (x:xs) | isEXTERNAL_Method x          =  x: go 0            x xs
-                           | mem+newMem < memlimit*1.05   =  x: go (mem+newMem) x xs
-                           | otherwise                    =  "tempfile":x: go newMem x xs
+insertTempfile getMem isMemoryBarrier memory_limit | memory_limit==CompressionLib.aUNLIMITED_MEMORY  =  id
+                                                   | otherwise                                       =  go (0::Double)
+  where go _   []                                    =  []
+        go mem (x:xs) | isMemoryBarrier x            =               x : go 0            xs
+                      | mem==0                       =               x : go newMem       xs    -- не вставлять tempfile в начале цепочки или сразу за MemoryBarrier методом
+                      | mem+newMem < memlimit*1.05   =               x : go (mem+newMem) xs
+                      | otherwise                    =  "tempfile" : x : go newMem       xs
 
            where newMem   = realToFrac (getMem x)
                  memlimit = realToFrac memory_limit
 
 -- |Посчитать потребности в памяти цепочки алгоритмов сжатия с учётом их разбиения на кластеры по compressionIs "external?"
-calcMem getMem  = maximum . map (sum.map(i.getMem)) . splitOn isEXTERNAL_Method
+calcMem getMem isMemoryBarrier  =  maximum . map (sum.map(i.getMem)) . splitOn isMemoryBarrier
 
 -- |Удаляет все упоминания о "tempfile" из записи алгоритма сжатия.
 compressionDeleteTempCompressors = filter (/="tempfile")
@@ -241,8 +232,7 @@ freearcCompress   num method | isFakeMethod method =  eat_data
 freearcCompress   num method                       =  CompressionLib.compress method
 
 -- |Процедуры распаковки для различных алгоритмов сжатия.
-freearcDecompress num method | isFakeMethod method =  impossible_to_decompress   -- эти типы сжатых данных не подлежат распаковке
-freearcDecompress num method                       =  CompressionLib.decompress method
+freearcDecompress num  =  CompressionLib.decompress
 
 -- |Читаем всё, не пишем ничего, а CRC считается в другом месте ;)
 eat_data callback = do
@@ -257,9 +247,6 @@ eat_data callback = do
             then go
             else return len   -- Возвратим 0, если данные кончились, и отрицательное число, если произошла ошибка/больше данных не нужно
     go  -- возвратить результат
-
-impossible_to_decompress callback = do
-  return CompressionLib.aFREEARC_ERRCODE_GENERAL   -- сразу возвратить ошибку, поскольку этот алгоритм (FAKE/CRC_ONLY) не подлежит распаковке
 
 
 ----------------------------------------------------------------------------------------------------
@@ -370,7 +357,7 @@ builtinMethodSubsts = [
     , "x  = 9            ;highest compression mode using only internal algorithms"
     , "ax = 9p           ;highest compression mode involving external compressors"
     , "0  = storing"
-    , "1  = 1b  / $exe=exe+1b"
+    , "1  = 1b"
     , "1x = 1"
     , "#  = #rep+exe+#xb / $obj=#b / $text=#t"
     , "#x = #xb/#xt"
@@ -384,10 +371,12 @@ builtinMethodSubsts = [
     , "#t  = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + ppmd:16:384m"
     , ""
     , ";Binary files compression with slow and/or memory-expensive decompression"
-    , "1b  = 1xb"
     , "#b  = #rep+#bx"
-    , "#rep  = rep:  96m"
-    , "5rep  = rep: 128m"
+    , "1rep  = rep:  96m:256:c256"
+    , "2rep  = rep:  96m:256:c256"
+    , "3rep  = rep:  96m"
+    , "4rep  = rep:  96m"
+    , "5rep  = rep:  96m"
     , "6rep  = rep: 256m"
     , "7rep  = rep: 512m"
     , "8rep  = rep:1024m"
@@ -406,11 +395,11 @@ builtinMethodSubsts = [
     , "#xb = delta + #binary"
     , ""
     , ";Binary files compression with fast decompression"
-    , "1binary = tor:3                 | ex1binary"
-    , "2binary = tor:  96m:h64m        | ex2binary"
-    , "3binary = lzma: 96m:fast  :mc8  | ex3binary"
-    , "4binary = lzma: 96m:normal:mc16 | ex4binary"
-    , "5binary = lzma: 16m:max"
+    , "1binary = tor:4                       | ex1binary"
+    , "2binary = tor:6                       | ex2binary"
+    , "3binary = lzma: 96m:fast  :32:mc4     | ex3binary"
+    , "4binary = lzma: 96m:normal:16:mc8   | | ex4binary"
+    , "5binary = lzma: 96m:normal:32:mc32  | | ex5binary"
     , "6binary = lzma: 32m:max"
     , "7binary = lzma: 64m:max"
     , "8binary = lzma:128m:max"
@@ -424,42 +413,24 @@ builtinMethodSubsts = [
     , "#bx = #xb"
     , "#tx = #xt"
     , "x#  = #x"    -- принимаем опции типа "-mx7" для мимикрии под 7-zip
+    , "copy = storing"
+    , "exe2 = dispack"
+    , "dispack = dispack070"
     , ""
     , ""
-    , ";Compression modes involving external PPMONSTR.EXE"
-    , "#p  = #rep+exe+#xb / $obj=#pb / $text=#pt / $wav = #$wav / $bmp = #$bmp"
-    , "5pt = dict:p: 64m:80% + lzp: 64m:32:h22:85% + pmm: 8:160m:r0"
-    , "6pt = dict:p: 64m:80% + lzp: 64m:64:h22:85% + pmm:16:384m:r1"
-    , "7pt = dict:p:128m:80% + lzp:128m:64:h23:85% + pmm:20:768m:r1"
-    , "8pt = dict:p:128m:80% + lzp:128m:64:h23:85% + pmm:24:1536m:r1"
-    , "9pt = dict:p:128m:80% + lzp:128m:64:h23:85% + pmm:25:2040m:r1"
-    , "#pt = #t"
-    , "#pb = #b"
-    , ""
-    , "#q  = #qb/#qt"
-    , "5qt = dict:p:64m:80% + lzp:64m:64:d1m:24:h22:85% + pmm:10:160m:r1"
-    , "5qb = rep: 128m      + delta                     + pmm:16:160m:r1"
-    , "6qb = rep: 256m      + delta                     + pmm:20:384m:r1"
-    , "7qb = rep: 512m      + delta                     + pmm:22:768m:r1"
-    , "8qb = rep:1024m      + delta                     + pmm:24:1536m:r1"
-    , "9qb = rep:2040m      + delta                     + pmm:25:2040m:r1"
-    , "#qt = #pt"
-    , "#qb = #pb"
-    , ""
-    , ""
-    , ";Sound wave files are compressed best with TTA"
+    , ";Sound wave files are best compressed with TTA"
     , "wav     = tta      ;best compression"
     , "wavfast = tta:m1   ;faster compression and decompression"
-    , "1$wav  = wavfast | bmpfastest"
+    , "1$wav  = ;;; wavfast | bmpfastest"
     , "2$wav  = wavfast"
     , "#$wav  = wav"
     , "#x$wav = wavfast"
     , ""
-    , ";Bitmap graphic files are compressed best with GRZip"
+    , ";Bitmap graphic files are best compressed with GRZip"
     , "bmp        = mm    + grzip:m1:l2048:a  ;best compression"
     , "bmpfast    = mm    + grzip:m4:l:a      ;faster compression"
     , "bmpfastest = mm:d1 + 1binary:t0        ;fastest one"
-    , "1$bmp  = bmpfastest"
+    , "1$bmp  = ;;; bmpfastest"
     , "2$bmp  = bmpfastest | bmpfast"
     , "3$bmp  = bmpfast    | bmp"
     , "#$bmp  = bmp"
@@ -468,39 +439,47 @@ builtinMethodSubsts = [
     , "#x$bmp = mm+#binary"
     , ""
     , ";Quick & dirty compression for already compressed data"
-    , "1$compressed   = storing"
+    , "1$compressed   = storing | 1rep"
     , "2$compressed   = 2rep + 1binary"
     , "3$compressed   = 3rep + 1binary"
     , "4$compressed   = 4rep + etor:c3"
     , "#$compressed   = "
     , ""
-    , "1x$compressed  = storing"
-    , "2x$compressed  = rep:8m + 1binary"
-    , "3x$compressed  = rep:8m + 1binary"
+    , "1x$compressed  = storing | 1rep"
+    , "2x$compressed  = 2rep:8m + 1binary"
+    , "3x$compressed  = 3rep:8m + 1binary"
     , "4x$compressed  = etor:8m:c3"
     , "#x$compressed  = "
+    , ""
+    , ";LZ4 support"
+    , "xlz4   = 4x4:lz4"
+    , "elz4   = (|x)lz4"
+    , "lz4hc  = lz4:hc"
+    , "xlz4hc = 4x4:lz4:hc"
+    , "elz4hc = (|x)lz4hc"
     , ""
     , ""
     , ";Multi-threading compression modes"
     , "xtor  = 4x4:tor"
     , "xlzma = 4x4:lzma"
-    , "xppmd = 4x4:b7mb:ppmd:c7mb"
+    , "xppmd = 4x4:b7mb:ppmd"
     , "etor  = (|x)tor"
     , "elzma = (|x)lzma"
     , "eppmd = (|x)ppmd"
     , ""
-    , "ex1 = ex1b / $exe=exe+ex1b / $wav=mm:d1+ex1b:t0 / $bmp=mm:d1+ex1b:t0 / $compressed = #$compressed"
+    , "ex1 = ex1b / $wav=mm:d1+ex1b:t0 / $bmp=mm:d1+ex1b:t0 / $compressed = #$compressed"
     , "ex# = #rep+exe+ex#b / $obj=#rep+ex#b / $text=ex#t / $wav = #$wav / $bmp = #$bmp / $compressed = #$compressed"
+    , "#ex = ex#"
     , ""
     , "ex1b = ex1binary"
     , "ex2b = ex2binary"
     , "ex#b = delta + ex#binary"
     , ""
-    , "ex1binary = xtor:3:2m:h256k"
-    , "ex2binary = xtor:5:8m"
-    , "ex3binary = xlzma:fast:8mb:8:mc4:h1m"
-    , "ex4binary = xlzma:16mb:24:mc8:h4m"
-    , "ex5binary = 4x4:i0:lzma: 4mb:max"
+    , "ex1binary = xtor:3:8mb"
+    , "ex2binary = xtor:5"
+    , "ex3binary = xlzma:96mb:fast  :32:mc4"
+    , "ex4binary = xlzma:96mb:normal:16:mc8"
+    , "ex5binary = xlzma:96mb:normal:32:mc32"
     , "ex6binary = 4x4:i0:lzma: 8mb:max"
     , "ex7binary = 4x4:i0:lzma:16mb:max"
     , "ex8binary = 4x4:i0:lzma:32mb:max"
@@ -508,7 +487,7 @@ builtinMethodSubsts = [
     , ""
     , "ex1t = ex1b"
     , "ex2t = grzip:m4"
-    , "ex3t = grzip:m3"
+    , "ex3t = grzip:m2"
     , "ex4t = grzip:m1"        -- dict:p: 64m:80% + lzp:  8m: 45:d1m:s16:h15:92% + xppmd:6:48m
     , "ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:8:96m"
     , "ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m"
@@ -555,6 +534,9 @@ process_algorithms process compressor = do
        >>=  mapM process
        >>== join_compressor
 
+-- |Соеденить метод сжатия из его названия и параметров
+join_method = joinWith ":"
+
 -- |Разбить метод сжатия на заголовок и отдельные параметры
 split_method = split ':'
 
@@ -580,4 +562,3 @@ roundMemUp mem | mem>=4096*kb = mem `roundUp` mb
 {-# NOINLINE builtinMethodSubsts #-}
 {-# NOINLINE decode_method #-}
 {-# NOINLINE showMem #-}
-

@@ -27,7 +27,7 @@
 
 // Для обработки ошибок во вложенных процедурах - longjmp сигнализирует процедуре верхнего уровня о произошедшей ошибке
 static jmp_buf jumper;
-#define CHECK(a,b)               {if(!(a)) longjmp(jumper,1);}
+#define CHECK(e,a,b)             {if(!(a)) longjmp(jumper,1);}
 #define FreeAndNil(ptr)          {delete (ptr); (ptr)=NULL;}
 #include "ArcStructure.h"
 
@@ -80,7 +80,7 @@ BOOL WINAPI _export OpenArchive(const char *Name,int *Type)
 
   // Прочитаем структуру архива
   arcinfo = new ARCHIVE (FILENAME (utf8name));
-  arcinfo->read_structure();
+  arcinfo->read_structure (NULL, NULL);
   *Type   = 0;
 
   // Сделаем так, чтобы следующий вызов GetArcItem привёл к чтению первого блока
@@ -108,7 +108,7 @@ int WINAPI _export GetArcItem(struct PluginPanelItem *Item,struct ArcItemInfo *I
       BLOCK& descriptor = arcinfo->control_blocks_descriptors [current_block];
       if (descriptor.type == DIR_BLOCK)
       {
-         dirblock = new DIRECTORY_BLOCK (*arcinfo, descriptor);
+         dirblock = new DIRECTORY_BLOCK (*arcinfo, descriptor, NULL, NULL);
          current_file_in_block = current_data_block = 0;
          if (dirblock->total_files>0)  break;
          FreeAndNil (dirblock);
@@ -142,9 +142,8 @@ int WINAPI _export GetArcItem(struct PluginPanelItem *Item,struct ArcItemInfo *I
     Item->PackSizeHigh = packed >> 32;
     Item->PackSize     = packed;
     // Запомним информацию о солид-блоке для использования её со всеми файлами из этого солид-блока
-    char *c = dirblock->data_block[b].compressor;
     Solid     = dirblock->block_start(b)+1 != dirblock->block_end(b);
-    Encrypted = strstr (c, "+aes-")!=NULL || strstr (c, "+serpent-")!=NULL || strstr (c, "+blowfish-")!=NULL || strstr (c, "+twofish-")!=NULL;
+    Encrypted = compressorIsEncrypted_Guess   (dirblock->data_block[b].compressor);
     DictSize  = compressorGetDecompressionMem (dirblock->data_block[b].compressor);
   }
   // Заполним поля информацией, считанной при обработке первого файла в солид-блоке

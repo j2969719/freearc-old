@@ -42,7 +42,7 @@ extern "C" {
 #define gb (1024*mb)
 
 // Количество байт, которые должны читаться/записываться за один раз во всех упаковщиках
-#define BUFFER_SIZE (64*kb)
+#define BUFFER_SIZE (256*kb)
 
 // Количество байт, которые должны читаться/записываться за один раз в быстрых методах и при распаковке асимметричных алгоритмов
 #define LARGE_BUFFER_SIZE (256*kb)
@@ -230,8 +230,76 @@ int CELS_Call (TABI_ELEMENT* params);
         fbuffer.put ((byte*)flocalBuf+rem, flocalSize-rem);                \
     }                                                                      \
 }
+#define FWRITESZ(value)                                                    \
+{                                                                          \
+    const char *flocalValue = (value);                                     \
+    int flocalBytes = strlen(flocalValue) + 1;                             \
+    FWRITE ((void*)flocalValue, flocalBytes);                              \
+}
+#define FWRITE4(value)                                                     \
+{                                                                          \
+    unsigned char flocalHeader[4];                                         \
+    setvalue32 (flocalHeader, value);                                      \
+    FWRITE (flocalHeader, 4);                                              \
+}
+#define FWRITE1(value)                                                     \
+{                                                                          \
+    unsigned char flocalHeader = (value);                                  \
+    FWRITE (&flocalHeader, 1);                                             \
+}
 #define FFLUSH()  { WRITE (fbuffer.buf, fbuffer.len());  fbuffer.empty(); }
-#define FCLOSE()  { FFLUSH();  fbuffer.free(); }
+#define FCLOSE()  { FFLUSH(); }
+
+
+// Буфер, используемый для организации нескольких независимых потоков записи
+// в программе. Буфер умеет записывать в себя 8/16/32-разрядные числа и расширяться
+// при необходимости. Позднее содержимое буфера сбрасывается в выходной поток.
+// Дополнительно буфер поддерживает чтение ранее записанных в него данных.
+// Конец записанной части буфера - это max(p,end), где p - текущий указатель,
+// а end - максимальная позиция ранее записанных данных.
+struct Buffer
+{
+    byte*  buf;              // адрес выделенного буфера
+    byte*  p;                // текущий указатель чтения/записи внутри этого буфера
+    byte*  end;              // адрес после конца прочитанных/записанных данных
+    byte*  bufend;           // конец самого буфера
+
+    Buffer (uint size=64*kb) { buf=p=end= (byte*) malloc(size);  bufend=buf+size; }
+    ~Buffer()                { freebuf(); }
+    void   freebuf()         { free(buf);  buf=p=end=NULL; }
+    void   empty()           { p=end=buf; }
+    int    len()             { return mymax(p,end)-buf; }
+
+    void   put8 (uint x)     { reserve(sizeof(uint8 ));  *(uint8 *)p=x;    p+=sizeof(uint8 ); }
+    void   put16(uint x)     { reserve(sizeof(uint16));  setvalue16(p,x);  p+=sizeof(uint16); }
+    void   put32(uint x)     { reserve(sizeof(uint32));  setvalue32(p,x);  p+=sizeof(uint32); }
+
+    void   put(void *b, int n)  { reserve(n);  memcpy(p,b,n);  p+=n; }
+    void   puts (char *s)    { put (s, strlen(s)); }
+    void   putsz(char *s)    { put (s, strlen(s)+1); }
+
+    int    remainingSpace()  { return bufend-p; }
+    void   reserve(uint n)   {
+                               if (remainingSpace() < n)
+                               {
+                                 uint newsize = mymax(p+n-buf, (bufend-buf)*2);
+                                 byte* newbuf = (byte*) realloc (buf, newsize);
+                                 bufend = newbuf + newsize;
+                                 p   += newbuf-buf;
+                                 end += newbuf-buf;
+                                 buf  = newbuf;
+                               }
+                             }
+// Для чтения данных
+    void   rewind()          { end=mymax(p,end);  p=buf; }
+    uint   get8 ()           { uint x = *(uint8 *)p;  p+=sizeof(uint8 );  return x; }
+    uint   get16()           { uint x = value16(p);   p+=sizeof(uint16);  return x; }
+    uint   get32()           { uint x = value32(p);   p+=sizeof(uint32);  return x; }
+    int    get(void *b, int n)  { n = mymin(remainingData(), n);  memcpy(b,p,n);  p+=n;  return n;}
+    int    remainingData()   { return p<end? end-p : 0; }
+    bool   eof()             { return remainingData()==0; }
+};
+
 #endif // !FREEARC_STANDALONE_TORNADO
 
 
@@ -244,6 +312,13 @@ void Pbkdf2Hmac (const BYTE *pwd, int pwdSize, const BYTE *salt, int saltSize,
                  int numIterations, BYTE *key, int keySize);
 
 int fortuna_size (void);
+
+
+// ****************************************************************************************************************************
+// TEMPORARY DEFINITIONS ******************************************************************************************************
+// ****************************************************************************************************************************
+
+inline int GetCompressionThreads (void)         {return 8;}
 
 
 #ifdef __cplusplus

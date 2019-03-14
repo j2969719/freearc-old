@@ -7,6 +7,7 @@ import Prelude hiding (catch)
 import Control.Concurrent
 import Control.OldException
 import Control.Monad
+import Data.Bits
 import Data.Char
 import Data.IORef
 import Data.List
@@ -100,7 +101,7 @@ fmChdir fm' filename' = do
                        return (map fiToFileData filelist, FM_Directory dir)
     -- Список файлов в архиве
     ArcPath arcname arcdir -> do
-                       arc <- if isFM_Archive fm && arcname==fm_arcname fm && not (arcPhantom (fm_archive fm))
+                       arc <- if isFM_Archive fm && arcname==fm_arcname fm && not (isArcPhantom (fm_archive fm))
                                 then return ((fm.$subfm) {subfm_arcdir=arcdir})
                                 else newFMArc fm' arcname arcdir
                        -- Если arcdir - имя существующего файла внутри архива, то перейти в него нельзя :)
@@ -182,7 +183,11 @@ fmFindCursor fm' filename = do
   return (fmap (:[])$  findIndex ((filename==).fmname) fullList)
 
 -- |Вывести на экран новый список файлов
-fmSetFilelist fm' files = do
+fmSetFilelist fm' orig_files = do
+  showHiddenFiles <- fmGetHistoryBool fm' "ShowHiddenFiles" False
+  let file_is_hidden fd | isWindows =  (fdAttr fd .&. (aFI_ATTR_HIDDEN .|. aFI_ATTR_SYSTEM) /= 0)
+                        | otherwise =  anyf [beginWith ".", endWith "~"] (fdBasename fd)
+      files = orig_files.$ (not showHiddenFiles &&& filter (not.file_is_hidden))
   fm <- val fm'
   fm' =: fm {fm_filelist = files}
   changeList (fm_model fm) (fm_selection fm) files
@@ -286,6 +291,8 @@ calcNewSortOrder "Size"     "SizeDesc"     = "SizeAsc"
 calcNewSortOrder "Size"     _              = "SizeDesc"
 calcNewSortOrder "Modified" "ModifiedDesc" = "ModifiedAsc"
 calcNewSortOrder "Modified" _              = "ModifiedDesc"
+calcNewSortOrder "Type"     "TypeAsc"      = "TypeDesc"
+calcNewSortOrder "Type"     _              = "TypeAsc"
 
 -- |Выбор функции сортировки по имени колонки
 sortOnColumn "NameAsc"       =  sortOn (\fd -> (not$ fdIsDir fd, strLower$ fmname fd))
@@ -297,6 +304,9 @@ sortOnColumn "SizeDesc"      =  sortOn (\fd -> if fdIsDir fd  then aFILESIZE_MIN
 sortOnColumn "ModifiedAsc"   =  sortOn (\fd -> (not$ fdIsDir fd,  fdTime fd))
 sortOnColumn "ModifiedDesc"  =  sortOn (\fd -> (not$ fdIsDir fd, -fdTime fd))
 --
+sortOnColumn "TypeAsc"       =  sortOn (\fd -> (not$ fdIsDir fd, strLower$ fdType fd))
+sortOnColumn "TypeDesc"      =  sortOn (\fd -> (     fdIsDir fd, strLower$ fdType fd))  >>> reverse
+--
 sortOnColumn _               =  id
 
 
@@ -307,10 +317,12 @@ sortOnColumn _               =  id
 fmAddHistory         fm' tags text             =  do fm <- val fm';  hfAddHistory         (fm_history fm) tags text
 fmReplaceHistory     fm' tags text             =  do fm <- val fm';  hfReplaceHistory     (fm_history fm) tags text
 fmModifyHistory      fm' tags text deleteCond  =  do fm <- val fm';  hfModifyHistory      (fm_history fm) tags text deleteCond
-fmGetHistory1        fm' tags deflt            =  do fm <- val fm';  hfGetHistory1        (fm_history fm) tags deflt
 fmGetHistory         fm' tags                  =  do fm <- val fm';  hfGetHistory         (fm_history fm) tags
-fmGetHistoryBool     fm' tag deflt             =  do fm <- val fm';  hfGetHistoryBool     (fm_history fm) tag deflt
-fmReplaceHistoryBool fm' tag x                 =  do fm <- val fm';  hfReplaceHistoryBool (fm_history fm) tag x
+fmGetHistory1        fm' tags deflt            =  do fm <- val fm';  hfGetHistory1        (fm_history fm) tags deflt
+fmGetHistoryInt      fm' tag  deflt            =  do fm <- val fm';  hfGetHistoryInt      (fm_history fm) tag  deflt
+fmGetHistoryBool     fm' tag  deflt            =  do fm <- val fm';  hfGetHistoryBool     (fm_history fm) tag  deflt
+fmReplaceHistoryBool fm' tag  x                =  do fm <- val fm';  hfReplaceHistoryBool (fm_history fm) tag  x
+fmReplaceHistoryInt  fm' tag  x                =  do fm <- val fm';  hfReplaceHistoryInt  (fm_history fm) tag  x
 fmSaveSizePos        fm' dialog name           =  do fm <- val fm';  hfSaveSizePos        (fm_history fm) dialog name
 fmSaveMaximized      fm' dialog name           =  do fm <- val fm';  hfSaveMaximized      (fm_history fm) dialog name
 fmRestoreSizePos     fm' window name deflt     =  do fm <- val fm';  hfRestoreSizePos     (fm_history fm) window name deflt
@@ -326,6 +338,7 @@ fmUpdateConfigFile   fm'                       =  do fm <- val fm';  hfUpdateCon
 data EntryWithHistory = EntryWithHistory
   { ehGtkWidget   :: GtkWidget ComboBoxEntry String
   , entry         :: Entry
+  , changeTag     :: String -> IO ()
   }
 
 instance GtkWidgetClass EntryWithHistory ComboBoxEntry String where
@@ -341,7 +354,7 @@ instance GtkWidgetClass EntryWithHistory ComboBoxEntry String where
 
 
 {-# NOINLINE fmEntryWithHistory #-}
--- |Создать комбо-бокс с историей под тегом tag;
+-- |Создать комбо-бокс с историей под тегом tag (пустой тэг означает что мы его зададим позже, через changeTag);
 -- перед запоминанием в истории пропускать введённый текст через операцию process
 fmEntryWithHistory fm' tag filter_p process = do
   -- Create GUI controls
@@ -349,10 +362,11 @@ fmEntryWithHistory fm' tag filter_p process = do
   Just entry <- binGetChild comboBox >>== fmap castToEntry
   set entry [entryActivatesDefault := True]
   -- Define callbacks
-  last <- fmGetHistory fm' (tag++"Last")
-  let fixedOrder  =  (last>[])   -- True - keep order of dropdown "menu" elements fixed
-  history' <- mvar []
+  history'        <- mvar []
+  tag'            <- mvar tag
+  disableOnUpdate <- mvar False
   let readHistory = do
+        tag <- val tag'
         history' .<- \oldHistory -> do
           replicateM_ (1+length oldHistory) (New.comboBoxRemoveText comboBox 0)
           history <- fmGetHistory fm' tag >>= Utils.filterM filter_p
@@ -363,27 +377,40 @@ fmEntryWithHistory fm' tag filter_p process = do
   let setText text = do
         entry =: text
   let saveHistory = do
-        text <- getText
+        tag     <- val tag'
+        when (tag>"") $ do
+        text    <- getText
         history <- val history'
+        last    <- fmGetHistory fm' (tag++"Last")
+        let fixedOrder  =  (last>[])   -- True - keep order of dropdown "menu" elements fixed
         when fixedOrder $ do
           fmReplaceHistory fm' (tag++"Last") text
         unless (fixedOrder && (text `elem` history)) $ do
           New.comboBoxPrependText comboBox text
           fmAddHistory fm' tag text
-  readHistory
-  -- Установить текст в поле ввода
-  case last of
-    last:_ -> entry =: last
-    []     -> do history <- val history'
-                 when (history > []) $ do
-                   New.comboBoxSetActive comboBox 0
+  let changeTag save_old tag = do
+        bracket_ (disableOnUpdate =: True) (disableOnUpdate =: False) $ do
+        when save_old $ do
+          saveHistory
+        --
+        tag' =: tag
+        readHistory
+        -- Установить текст в поле ввода
+        last <- fmGetHistory fm' (tag++"Last")
+        case last of
+          last:_ -> entry =: last
+          []     -> do history <- val history'
+                       when (history > []) $ do
+                         New.comboBoxSetActive comboBox 0
   --
+  tag &&& changeTag False tag
   return EntryWithHistory
            {                           entry           = entry
+           ,                           changeTag       = changeTag True
            , ehGtkWidget = gtkWidget { gwWidget        = comboBox
                                      , gwGetValue      = getText
                                      , gwSetValue      = setText
-                                     , gwSetOnUpdate   = \action -> on comboBox changed action >> return ()
+                                     , gwSetOnUpdate   = \action -> on comboBox changed (unlessM (val disableOnUpdate) action) >> return ()
                                      , gwSaveHistory   = saveHistory
                                      , gwRereadHistory = readHistory
                                      }
@@ -400,34 +427,51 @@ fmLabeledEntryWithHistory fm' tag title = do
   boxPackStart  hbox  (widget inputStr)  PackGrow    5
   return (hbox, inputStr)
 
-
-{-# NOINLINE fmCheckedEntryWithHistory #-}
 -- |Ввод строки с историей под тэгом tag и чекбоксом слева
-fmCheckedEntryWithHistory fm' tag title = do
+fmCheckedEntryWithHistory fm' tag title  =  fmCheckedEntryWithHistory2 fm' tag False title
+
+{-# NOINLINE fmCheckedEntryWithHistory2 #-}
+-- |Ввод строки с историей под тэгом tag и чекбоксом с историей слева
+fmCheckedEntryWithHistory2 fm' tag deflt title = do
   hbox  <- hBoxNew False 0
   checkBox <- checkBox title
+  let checkBoxTag = tag++".Enabled"
+  let rereadHistory = do
+        checkBox =:: fmGetHistoryBool fm' checkBoxTag deflt
+  let saveHistory = do
+        fmReplaceHistoryBool fm' checkBoxTag =<< val checkBox
+  rereadHistory
+  let checkBoxWithHistory  =  checkBox { gwSaveHistory   = saveHistory
+                                       , gwRereadHistory = rereadHistory
+                                       }
   inputStr <- fmEntryWithHistory fm' tag (const$ return True) (return)
   boxPackStart  hbox  (widget checkBox)  PackNatural 0
   boxPackStart  hbox  (widget inputStr)  PackGrow    5
+  setOnUpdate inputStr (checkBox =: True)
   --checkBox `onToggled` do
   --  on <- val checkBox
   --  (if on then widgetShow else widgetHide) (widget inputStr)
-  return (hbox, checkBox, inputStr)
+  return (hbox, checkBoxWithHistory, inputStr)
 
+-- |Ввод строки с историей под тэгом tag и доп. выбором через переданный диалог
+{-# NOINLINE fmCheckedEntryWithHistoryAndChooser #-}
+fmCheckedEntryWithHistoryAndChooser fm' tag makeControl filter_p process chooserDialog = do
+  hbox     <- hBoxNew False 0
+  control  <- makeControl
+  inputStr <- fmEntryWithHistory fm' tag filter_p process
+  chooserButton <- button "9999 ..."
+  chooserButton `onClick` do
+    chooserDialog (val inputStr) (inputStr =:)
+  boxPackStart  hbox  (widget control)        PackNatural 0
+  boxPackStart  hbox  (widget inputStr)       PackGrow    5
+  boxPackStart  hbox  (widget chooserButton)  PackNatural 0
+  setOnUpdate inputStr (control =: True)
+  return (hbox, control, inputStr)
 
 {-# NOINLINE fmFileBox #-}
 -- |Ввод имени файла/каталога с историей под тэгом tag и поиском по диску через вызываемый диалог
 fmFileBox fm' dialog tag dialogType makeControl dialogTitle filters filter_p process = do
-  hbox     <- hBoxNew False 0
-  control  <- makeControl
-  filename <- fmEntryWithHistory fm' tag filter_p process
-  chooserButton <- button "9999 ..."
-  chooserButton `onClick` do
-    chooseFile dialog dialogType dialogTitle filters (val filename) (filename =:)
-  boxPackStart  hbox  (widget control)        PackNatural 0
-  boxPackStart  hbox  (widget filename)       PackGrow    5
-  boxPackStart  hbox  (widget chooserButton)  PackNatural 0
-  return (hbox, control, filename)
+  fmCheckedEntryWithHistoryAndChooser fm' tag makeControl filter_p process (chooseFile dialog dialogType dialogTitle filters)
 
 {-# NOINLINE fmInputString #-}
 -- |Запросить у пользователя строку (с историей ввода)
@@ -446,7 +490,6 @@ fmInputString fm' tag title filter_p process = do
     case choice of
       ResponseOk -> do saveHistory x; val x >>== Just
       _          -> return Nothing
-
 
 {-# NOINLINE fmCheckButtonWithHistory #-}
 -- |Создать чекбокс с историей под тегом tag
@@ -476,6 +519,20 @@ fmExpanderWithHistory fm' tag deflt title = do
                    }
           ,innerBox)
 
+{-# NOINLINE fmComboBoxWithHistory #-}
+-- |Создать комбобокс с историей под тегом tag
+fmComboBoxWithHistory fm' tag deflt title variants = do
+  control <- comboBox title variants
+  let rereadHistory = do
+        control =:: fmGetHistoryInt fm' tag deflt
+  let saveHistory = do
+        fmReplaceHistoryInt fm' tag =<< val control
+  rereadHistory
+  return$ control
+           { gwSaveHistory   = saveHistory
+           , gwRereadHistory = rereadHistory
+           }
+
 {-# NOINLINE fmDialog #-}
 -- |Диалог со стандартными кнопками OK/Cancel
 fmDialog fm' title flags action = do
@@ -496,7 +553,7 @@ fmDialog fm' title flags action = do
     action (dialog,okButton)
 
 -- |Доп. флаги для настройки fmDialog
-data FMDialogFlags = AddDetachButton  -- ^Добавлять Detach button в диалог?
+data FMDialogFlags = AddDetachButton  -- ^Add the Detach button to the dialog?
                      deriving Eq
 
 {-# NOINLINE fmDialogRun #-}
@@ -516,12 +573,13 @@ fmDialogRun fm' dialog name = do
 ----------------------------------------------------------------------------------------------------
 
 createFilePanel = do
-  let columnTitles = ["0015 Name", "0016 Size", "0017 Modified", "0018 DIRECTORY"]
+  let columnTitles = ["0015 Name", "0016 Size", "0497 Type", "0017 Modified", "0018 DIR"]
       n = map i18no columnTitles
   s <- i18ns columnTitles
   createListView fmname [(n!!0, s!!0, fmname,                                                       []),
-                         (n!!1, s!!1, (\fd -> if (fdIsDir fd) then (s!!3) else (show3$ fdSize fd)), [cellXAlign := 1]),
-                         (n!!2, s!!2, (guiFormatDateTime.fdTime),                                   [])]
+                         (n!!1, s!!1, (\fd -> if (fdIsDir fd) then (last s) else (show3$ fdSize fd)), [cellXAlign := 1]),
+                         (n!!2, s!!2, fdType,                                                       []),
+                         (n!!3, s!!3, (guiFormatDateTime.fdTime),                                   [])]
 
 createListView searchField columns = do
   -- Scrolled window where this list will be put
@@ -529,7 +587,7 @@ createListView searchField columns = do
   scrolledWindowSetPolicy scrwin PolicyAutomatic PolicyAutomatic
   -- Create a new ListView
   view  <- New.treeViewNew
-  set view [ {-New.treeViewSearchColumn := 0, -} New.treeViewRulesHint := True]
+  set view [ {-New.treeViewSearchColumn := 0, -} New.treeViewRulesHint := True, treeViewRubberBanding := True]
   New.treeViewSetHeadersVisible view True
   -- Создаём и устанавливаем модель
   model <- New.listStoreNew []
@@ -611,4 +669,3 @@ restoreColumnsOrderAndWidths fm' listname listView columns = do
 -- |Атрибут, хранящий имя столбца
 nameAttr :: Attr TreeViewColumn (Maybe String)
 nameAttr = unsafePerformIO objectCreateAttribute
-

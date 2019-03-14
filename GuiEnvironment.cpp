@@ -99,5 +99,14 @@ void GuiFormatDateTime (time_t t, char *buf, int bufsize, char *date_format, cha
   GetTimeFormatA(LOCALE_USER_DEFAULT, 0, &datetime, time_format, p, bufsize - (p-buf));
 }
 
-#endif // Windows/Unix
+// Получить тип файла по его расширению
+void GuiGetFileType (TCHAR *ext, TCHAR *buf)
+{
+  SHFILEINFO sfi;
+  if (SHGetFileInfoW(ext, FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi), SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES))
+    _tcscpy(buf, sfi.szTypeName);
+  else
+    _tcscpy(buf, _T(""));
+}
 
+#endif // Windows/Unix

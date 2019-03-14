@@ -4,7 +4,7 @@ ALL: $(TEMPDIR)/Common.o $(TEMPDIR)/CompressionLibrary.o $(TEMPDIR)/CELS.o _TABI
 
 CODE_FLAGS = -fno-exceptions -fno-rtti \
                 -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
-OPT_FLAGS = -Os -march=i486 -mtune=pentiumpro -fomit-frame-pointer \
+OPT_FLAGS = -Os -fomit-frame-pointer \
                  -ffast-math -fforce-addr -fstrict-aliasing
 DEBUG_FLAGS = -g0
 CFLAGS = -c $(CODE_FLAGS) $(OPT_FLAGS) $(DEBUG_FLAGS) $(DEFINES)
@@ -19,4 +19,4 @@ $(TEMPDIR)/CELS.o: CELS.cpp CELS.h _TABI/tabi.h Common.h makefile
 	$(GCC) -c $(CFLAGS) -fexceptions -o $*.o $<
 
 _TABI/TABI.hs: _TABI/TABI.hsc
-	hsc2hs $<
+	hsc2hs --cc=ghc $<

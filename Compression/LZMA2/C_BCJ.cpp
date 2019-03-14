@@ -44,13 +44,13 @@ int BCJ_X86_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
   return bcj_x86_de_compress (1, callback, auxdata);
 }
 
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия (функция, обратная к parse_BCJ_X86)
 void BCJ_X86_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
   sprintf (buf, "exe");
 }
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа BCJ_X86_METHOD или возвращает NULL, если это другой метод сжатия
 COMPRESSION_METHOD* parse_BCJ_X86 (char** parameters)

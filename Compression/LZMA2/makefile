@@ -4,7 +4,7 @@ ALL: $(TEMPDIR)/C_LZMA.o $(TEMPDIR)/C_BCJ.o
 
 CODE_FLAGS = -fno-rtti -Wall \
                 -Wno-non-virtual-dtor -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
-OPT_FLAGS   = -O2 -march=i486 -mtune=pentiumpro \
+OPT_FLAGS   = -O2 \
               -fomit-frame-pointer -fstrict-aliasing \
               -ffast-math -fforce-addr -funroll-loops
 DEBUG_FLAGS = -g0

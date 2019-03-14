@@ -1,4 +1,7 @@
 extern "C" {
+#include "7zAES/Aes.c"
+#include "7zAES/CpuArch.c"
+
 #include "C_Encryption.h"
 #define LTC_NO_CIPHERS
 #define   LTC_BLOWFISH
@@ -10,7 +13,6 @@ extern "C" {
 #define   LTC_CFB_MODE
 #define   LTC_CTR_MODE
 #define LTC_NO_HASHES
-#define   LTC_SHA1
 #define   LTC_SHA512
 #define LTC_NO_MACS
 #define   LTC_HMAC
@@ -36,7 +38,6 @@ extern "C" {
 #include "crypt/crypt_register_hash.c"
 #include "crypt/crypt_register_prng.c"
 #include "hashes/helper/hash_memory.c"
-#include "hashes/sha1.c"
 #include "hashes/sha2/sha512.c"
 #include "mac/hmac/hmac_done.c"
 #include "mac/hmac/hmac_init.c"
@@ -55,6 +56,7 @@ extern "C" {
 #include "modes/cfb/cfb_start.c"
 #include "prngs/fortuna.c"
 }
+#include "../MultiThreading.h"
 
 
 /*-------------------------------------------------*/
@@ -68,18 +70,18 @@ int register_all()
     register_cipher (&blowfish_desc);
     register_cipher (&serpent_desc);
     register_cipher (&twofish_desc);
-    register_hash (&sha1_desc);
+//  register_hash (&sha1_desc);
     register_hash (&sha512_desc);
 #ifndef LTC_NO_TEST
-    CHECK (blowfish_test()==CRYPT_OK, (s,"blowfish_test failed!"));
-//    CHECK (rijndael_test()==CRYPT_OK, (s,"rijndael_test failed!"));
-    CHECK (serpent_test ()==CRYPT_OK, (s,"serpent_test failed!"));
-    CHECK (twofish_test ()==CRYPT_OK, (s,"twofish_test failed!"));
-    CHECK (sha1_test    ()==CRYPT_OK, (s,"sha1_test failed!"));
-    CHECK (sha512_test  ()==CRYPT_OK, (s,"sha512_test failed!"));
-//    CHECK (hmac_test    ()==CRYPT_OK, (s,"hmac_test failed!"));
-//    CHECK (ctr_test     ()==CRYPT_OK, (s,"ctr_test failed!"));
-//    CHECK (cfb_test     ()==CRYPT_OK, (s,"cfb_test failed!"));
+    CHECK (FREEARC_ERRCODE_INTERNAL,  blowfish_test()==CRYPT_OK,  (s,"blowfish_test failed!"));
+//  CHECK (FREEARC_ERRCODE_INTERNAL,  rijndael_test()==CRYPT_OK,  (s,"rijndael_test failed!"));
+    CHECK (FREEARC_ERRCODE_INTERNAL,  serpent_test ()==CRYPT_OK,  (s,"serpent_test failed!"));
+    CHECK (FREEARC_ERRCODE_INTERNAL,  twofish_test ()==CRYPT_OK,  (s,"twofish_test failed!"));
+//  CHECK (FREEARC_ERRCODE_INTERNAL,  sha1_test    ()==CRYPT_OK,  (s,"sha1_test failed!"));
+    CHECK (FREEARC_ERRCODE_INTERNAL,  sha512_test  ()==CRYPT_OK,  (s,"sha512_test failed!"));
+//  CHECK (FREEARC_ERRCODE_INTERNAL,  hmac_test    ()==CRYPT_OK,  (s,"hmac_test failed!"));
+//  CHECK (FREEARC_ERRCODE_INTERNAL,  ctr_test     ()==CRYPT_OK,  (s,"ctr_test failed!"));
+//  CHECK (FREEARC_ERRCODE_INTERNAL,  cfb_test     ()==CRYPT_OK,  (s,"cfb_test failed!"));
 #endif
     return 0;
 }
@@ -96,51 +98,109 @@ int fortuna_size (void)
 /* Обобщённый интерфейс к режимам шифрования (CFB,CTR)  */
 /*------------------------------------------------------*/
 
+#define roundup_ptr(p,n) ((p)+(n)-ptrdiff_t(p)%(n))
+
 struct EncryptionMode
 {
-    int mode;
-    symmetric_CTR ctr;
-    symmetric_CFB cfb;
+    enum {CTR,CFB}      mode;
+    union
+    {
+        symmetric_CTR   ctr;
+        symmetric_CFB   cfb;
+        char            aesbuf [AES_NUM_IVMRK_WORDS*sizeof(UInt32) + AES_BLOCK_SIZE];    // buffer for g_AesCtr_Code
+    };
+    char               *aesctr;
 
-    EncryptionMode (int _mode) {mode = _mode;}
+    EncryptionMode (int _mode) {mode = (_mode==0? CTR:CFB);}
 
     char *name()
     {
         switch (mode) {
-        case 0: return "ctr";
-        case 1: return "cfb";
+        case CTR: return "ctr";
+        case CFB: return "cfb";
+        default:  abort();
         }
     }
 
     int start (int cipher, BYTE *iv, BYTE *key, int keysize, int rounds)
     {
+        // 7-zip code implements only AES-CTR with default number of rounds
+        if (strequ(cipher_descriptor[cipher].name,"aes")  &&  mode==CTR  &&  rounds==0)
+        {
+            // Init the AES-CTR library
+            static Mutex exclusive_access;
+            {
+                Lock _(exclusive_access);
+                static volatile bool initialized = false;
+                if (!initialized)
+                {
+                    initialized = true;
+                    AesGenTables();
+                    if (CPU_Is_Aes_Supported())
+                    {
+                        FARPROC Fast_AesCtr_Code = LoadFromDLL("Fast_AesCtr_Code");
+                        if (Fast_AesCtr_Code)  g_AesCtr_Code = (AES_CODE_FUNC) Fast_AesCtr_Code;
+                    }
+                }
+            }
+
+            // aesctr[] should be aligned to 16-byte boundary
+            aesctr = roundup_ptr (aesbuf, AES_BLOCK_SIZE);
+            // Store in aesctr[] InitVector-1 (since 7-zip code does *pre*increment of counter)
+            memcpy (aesctr, iv, AES_BLOCK_SIZE);
+            for (int i=0; i<AES_BLOCK_SIZE; i++)
+                if(aesctr[i]--) break;
+            // Calculate and store in aesctr[] number of rounds and roundKeys
+            Aes_SetKey_Enc ((UInt32*)(aesctr+AES_BLOCK_SIZE), key, keysize);
+            return 0;
+        }
+        aesctr = NULL;
+
         switch (mode) {
-        case 0: return ctr_start (cipher, iv, key, keysize, rounds, CTR_COUNTER_LITTLE_ENDIAN, &ctr);
-        case 1: return cfb_start (cipher, iv, key, keysize, rounds, &cfb);
+        case CTR: return ctr_start (cipher, iv, key, keysize, rounds, CTR_COUNTER_LITTLE_ENDIAN, &ctr);
+        case CFB: return cfb_start (cipher, iv, key, keysize, rounds, &cfb);
+        default:  abort();
         }
     }
 
-    int encrypt (BYTE *pt, BYTE *ct, int len)
+    int encrypt (BYTE *buf, int len)
     {
+        if (aesctr)
+        {
+            g_AesCtr_Code ((UInt32*)aesctr, buf, len/AES_BLOCK_SIZE);
+            return 0;
+        }
         switch (mode) {
-        case 0: return ctr_encrypt(pt, ct, len, &ctr);
-        case 1: return cfb_encrypt(pt, ct, len, &cfb);
+        case CTR: return ctr_encrypt (buf, buf, len, &ctr);
+        case CFB: return cfb_encrypt (buf, buf, len, &cfb);
+        default:  abort();
         }
     }
 
-    int decrypt (BYTE *pt, BYTE *ct, int len)
+    int decrypt (BYTE *buf, int len)
     {
+        if (aesctr)
+        {
+            g_AesCtr_Code ((UInt32*)aesctr, buf, len/AES_BLOCK_SIZE);
+            return 0;
+        }
         switch (mode) {
-        case 0: return ctr_decrypt(pt, ct, len, &ctr);
-        case 1: return cfb_decrypt(pt, ct, len, &cfb);
+        case CTR: return ctr_decrypt (buf, buf, len, &ctr);
+        case CFB: return cfb_decrypt (buf, buf, len, &cfb);
+        default:  abort();
         }
     }
 
     int done()
     {
+        if (aesctr)
+        {
+            return 0;
+        }
         switch (mode) {
-        case 0: return ctr_done (&ctr);
-        case 1: return cfb_done (&cfb);
+        case CTR: return ctr_done (&ctr);
+        case CFB: return cfb_done (&cfb);
+        default:  abort();
         }
     }
 };
@@ -158,7 +218,7 @@ int find_mode (char *name)
 /* Пользовательские функции                        */
 /*-------------------------------------------------*/
 
-// Генерация ключа по паролю и salt с использованием numIterations итераций хеширования (PKCS5#2)
+// Generate key from password and salt using numIterations of sha-512 hashing (PKCS5#2)
 void Pbkdf2Hmac (const BYTE *pwd, int pwdSize, const BYTE *salt, int saltSize,
                  int numIterations, BYTE *key, int keySize)
 {
@@ -176,26 +236,34 @@ int docrypt (enum TEncrypt DoEncryption, int cipher, int mode, BYTE *key, int ke
 
     int InSize = FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;  // количество прочитанных байт или код ошибки
     int RemainderSize = 0;                           // необработанный остаток предыдущего блока (всегда 0 в нынешней реализации)
-    BYTE* Buf = (BYTE*)malloc(LARGE_BUFFER_SIZE);    // место для данных
-    if (!Buf)   goto Exit;                           // выход при нехватке памяти
+    BYTE* Buf0 = (BYTE*)malloc(LARGE_BUFFER_SIZE+AES_BLOCK_SIZE);    // место для данных, с учётом требований к выравниванию адреса буфера
+    if (!Buf0)   goto Exit;                          // выход при нехватке памяти
+   {BYTE* Buf = roundup_ptr (Buf0, AES_BLOCK_SIZE);
 
     while ( (InSize = callback ("read", Buf+RemainderSize, LARGE_BUFFER_SIZE-RemainderSize, auxdata)) >= 0 )  // выход при ошибке чтения
     {
-        if ((InSize+=RemainderSize)==0)     break;  // выход, если данных больше нет
+        bool LastBlock = (InSize==0);               // True for the last block that should be processed in the special way
+        if ((InSize+=RemainderSize)==0)     break;  // break if there's no more data
+
+        int OutSize = encryptor.aesctr==NULL? InSize                        // process all input data unless optimized AES-CTR code used
+                      : LastBlock? roundUp   (InSize, AES_BLOCK_SIZE)       // process more data if these are the last bytes in input stream
+                                 : roundDown (InSize, AES_BLOCK_SIZE), x;   // process less data and move the rest to the next processing cycle
 
         DoEncryption==ENCRYPT
-          ? encryptor.encrypt(Buf, Buf, InSize)
-          : encryptor.decrypt(Buf, Buf, InSize);
+          ? encryptor.encrypt(Buf, OutSize)
+          : encryptor.decrypt(Buf, OutSize);
 
-        int OutSize = InSize, x;
-        if( (x=callback("write",Buf,OutSize,auxdata))<0 )   {InSize=x; break;}  // выход при ошибке записи
+        if (OutSize>InSize)  OutSize=InSize;
+
+        if( (x=callback("write",Buf,OutSize,auxdata))<0 )   {InSize=x; break;}  // break on write rror
+        if( LastBlock )                                     {InSize=0; break;}  // break if the last block
         RemainderSize = InSize-OutSize;
         // Перенесём необработанный остаток данных в начало буфера
         if (RemainderSize>0)                memmove (Buf, Buf+OutSize, RemainderSize);
-    }
+    }}
 Exit:
     encryptor.done();
-    free (Buf);
+    free (Buf0);
     return InSize;  // возвратим код ошибки или 0 если всё в порядке
 }
 
@@ -212,6 +280,7 @@ ENCRYPTION_METHOD::ENCRYPTION_METHOD()
     numIterations = 1000;
     rounds        = 0;
     keySize       = -1;
+    fixed         = FALSE;
     strcpy(key,  "");
     strcpy(iv,   "");
     strcpy(salt, "");
@@ -228,19 +297,11 @@ int ENCRYPTION_METHOD::doit (char *what, int param, void *data, CALLBACK_FUNC *c
     else                                      return COMPRESSION_METHOD::doit (what, param, data, callback);  // Передать остальные вызовы родительской процедуре
 }
 
-// Декодирование строки, записанной в шестнадцатеричном виде, в последовательность байт
-void decode16 (char *src, BYTE *dst)
-{
-    for( ; src[0] && src[1]; src+=2)
-        *dst++ = char2int(src[0]) * 16 + char2int(src[1]);
-}
-
-
 // Функция распаковки
 int ENCRYPTION_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
-    BYTE key_bytes[MAXKEYSIZE];  decode16 (key, key_bytes);
-    BYTE iv_bytes [MAXKEYSIZE];  decode16 (iv,  iv_bytes);
+    BYTE key_bytes[MAXKEYSIZE];  fixed? decode16 (key, key_bytes) : buggy_decode16 (key, key_bytes);
+    BYTE iv_bytes [MAXKEYSIZE];  fixed? decode16 (iv,  iv_bytes)  : buggy_decode16 (iv,  iv_bytes);
     return docrypt (DECRYPT, cipher, mode, key_bytes, strlen(key)/2, rounds, iv_bytes, callback, auxdata);
 }
 
@@ -249,17 +310,21 @@ int ENCRYPTION_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 // Функция упаковки
 int ENCRYPTION_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
-    BYTE key_bytes[MAXKEYSIZE];  decode16 (key, key_bytes);
-    BYTE iv_bytes [MAXKEYSIZE];  decode16 (iv,  iv_bytes);
+    BYTE key_bytes[MAXKEYSIZE];  fixed? decode16 (key, key_bytes) : buggy_decode16 (key, key_bytes);
+    BYTE iv_bytes [MAXKEYSIZE];  fixed? decode16 (iv,  iv_bytes)  : buggy_decode16 (iv,  iv_bytes);
     return docrypt (ENCRYPT, cipher, mode, key_bytes, strlen(key)/2, rounds, iv_bytes, callback, auxdata);
 }
+
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_ENCRYPTION)
 void ENCRYPTION_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
-    sprintf (buf, "%s-%d/%s:n%d:r%d%s%s%s%s%s%s%s%s"
+    sprintf (buf, "%s-%d/%s%s:n%d:r%d%s%s%s%s%s%s%s%s"
                                         , cipher_descriptor[cipher].name, keySize*8
                                         , EncryptionMode(mode).name()
+                                        , fixed? ":f" : ""
                                         , numIterations
                                         , rounds
                                         , *key ?":k":"", key
@@ -268,8 +333,6 @@ void ENCRYPTION_METHOD::ShowCompressionMethod (char *buf, bool purify)
                                         , *code?":c":"", code
                                         );
 }
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа ENCRYPTION_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка в параметрах
@@ -305,6 +368,9 @@ COMPRESSION_METHOD* parse_ENCRYPTION (char** parameters)
     while (*++parameters && !error)
     {
       char* param = *parameters;
+      if (strequ (param, "f")) {
+        p->fixed = TRUE; continue;
+      }
       switch (*param) {                    // Параметры, содержащие значения
         case 'k':  strncopy (p->key,  param+1, sizeof (p->key));    continue;
         case 'i':  strncopy (p->iv,   param+1, sizeof (p->iv));     continue;
@@ -320,4 +386,3 @@ COMPRESSION_METHOD* parse_ENCRYPTION (char** parameters)
 }
 
 static int ENCRYPTION_x = AddCompressionMethod (parse_ENCRYPTION);   // Зарегистрируем парсер метода ENCRYPTION
-

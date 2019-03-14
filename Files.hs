@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -cpp #-}
+{-# OPTIONS_GHC -cpp -XRecordWildCards #-}
 ----------------------------------------------------------------------------------------------------
 ---- Операции с именами файлов, манипуляции с файлами на диске, ввод/вывод.                     ----
 ----------------------------------------------------------------------------------------------------
@@ -28,7 +28,7 @@ import Data.List
 import Foreign
 import Foreign.C
 import Foreign.Marshal.Alloc
-import System.Posix.Internals
+import System.Posix.Internals (o_BINARY, o_TRUNC)
 import System.Posix.Types
 import System.IO
 import System.IO.Error hiding (try, catch)
@@ -49,7 +49,7 @@ import System.Posix.Files hiding (fileExist)
 #endif
 
 -- |Размер одного буфера, используемый в различных операциях
-aBUFFER_SIZE = 64*kb
+aBUFFER_SIZE = 256*kb
 
 -- |Количество байт, которые должны читаться/записываться за один раз в быстрых методах и при распаковке асимметричных алгоритмов
 aLARGE_BUFFER_SIZE = 256*kb
@@ -59,7 +59,7 @@ aLARGE_BUFFER_SIZE = 256*kb
 aHUGE_BUFFER_SIZE = 8*mb
 
 -- |Optimal size of buffers for I/O operations
-aIO_BUFFER_SIZE = 64*kb
+aIO_BUFFER_SIZE = 1*mb
 
 
 ----------------------------------------------------------------------------------------------------
@@ -91,6 +91,18 @@ filenameLower = id
 
 -- |Return False for special filenames like "." and ".." - used to filtering results of getDirContents
 exclude_special_names s  =  (s/=".")  &&  (s/="..")
+
+-- |Remove "." and ".." components from the path
+remove_unsafe_dirs path  =  path .$ splitDirectories .$ reverse .$ filter (/=".") .$ process .$ reverse .$ joinPath
+  where
+    -- Replace "dir\.." with "", and remove "." entries
+    process ("..":_:xs) = process xs
+    process [".."]      = []
+    process (x:xs)      = x : process xs
+    process []          = []
+
+-- |Does filename have directory part?
+hasDirectory  =  not . null . takeDirectory
 
 -- Strip "drive:/" at the beginning of absolute filename
 stripRoot = dropDrive
@@ -127,6 +139,13 @@ updateBaseName f pth  =  dir </> f name <.> ext
 ----------------------------------------------------------------------------------------------------
 ---- Поиск конфиг-файлов программы и SFX модулей ---------------------------------------------------
 ----------------------------------------------------------------------------------------------------
+
+-- |Найти конфиг-файлы, удовлетворяющие шаблону cfgfilenames.
+-- Если шаблон не включает имя каталога, то поиск ведётся в каталогах possibleFilePlaces с удалением дубликатов.
+findFiles possibleFilePlaces cfgfilenames = do
+  cfgfilenames <- if hasDirectory cfgfilenames   then return [cfgfilenames]   else possibleFilePlaces cfgfilenames
+  found <- foreach cfgfilenames $ \name -> (dirWildcardFullnames name >>= Utils.filterM fileExist)
+  return (concat found.$ keepOnlyFirstOn takeFileName)
 
 -- |Найти конфиг-файл с заданным именем или возвратить ""
 findFile = findName fileExist
@@ -240,7 +259,7 @@ runProgram cmd = do
 
 -- |Execute file/command in the directory `curdir` optionally waiting until it finished
 runFile    = runIt c_RunFile
-runCommand = runIt c_RunCommand
+runCommand = runIt (\a b c -> c_RunCommand a b c nullPtr nullPtr)
 runIt c_run_it filename curdir wait_finish = do
   withCFilePath filename $ \c_filename -> do
   withCFilePath curdir   $ \c_curdir   -> do
@@ -250,7 +269,7 @@ foreign import ccall safe "Environment.h RunFile"
   c_RunFile :: CFilePath -> CFilePath -> CInt -> IO ()
 
 foreign import ccall safe "Environment.h RunCommand"
-  c_RunCommand :: CFilePath -> CFilePath -> CInt -> IO ()
+  c_RunCommand :: CFilePath -> CFilePath -> CInt -> Ptr () -> Ptr () -> IO ()
 
 -- |Составить строку команды из списка строк аргументов
 unparseCommand  =  joinWith " " . map quote
@@ -320,6 +339,42 @@ foreign import stdcall unsafe "pthread.h pthread_self"
 #endif
 
 
+
+#if defined(FREEARC_WIN)
+-- |OS version
+getWindowsVersion = unsafePerformIO$ allocaBytes 256 $ \buf -> do getOSDisplayString buf; peekCString buf
+
+foreign import ccall unsafe "Environment.h GetOSDisplayString"
+  getOSDisplayString :: Ptr CChar -> IO ()
+#endif
+
+
+#if defined(FREEARC_WIN)
+-- Operations on mutex shared by all FreeArc instances
+foreign import ccall unsafe "Environment.h"  myCreateMutex   :: Ptr CChar -> IO HANDLE
+foreign import ccall unsafe "Environment.h"  myCloseMutex    :: HANDLE    -> IO ()
+foreign import ccall   safe "Environment.h"  myWaitMutex     :: HANDLE    -> IO ()
+foreign import ccall unsafe "Environment.h"  myGrabMutex     :: HANDLE    -> IO ()
+foreign import ccall unsafe "Environment.h"  myReleaseMutex  :: HANDLE    -> IO ()
+
+use_global_queue enabled mutexName = bracketOS_ (do m <- withCString mutexName myCreateMutex
+                                                    if enabled  then myWaitMutex m  else myGrabMutex m
+                                                    return m)
+                                                (\m -> do myReleaseMutex m
+                                                          myCloseMutex m)
+
+-- |bracket_ с гарантией выполненифя пре- и пост-акции в одном треде
+bracketOS_ pre post action = do
+  [a,b,c] <- replicateM 3 newEmptyMVar
+  forkOS $ do m<-pre; putMVar a (); takeMVar b; post m; putMVar c ()
+  bracket_ (takeMVar a)  (do putMVar b (); takeMVar c)  action
+
+#else
+use_global_queue enabled mutexName = id
+#endif
+
+
+
 ----------------------------------------------------------------------------------------------------
 ---- Операции с неоткрытыми файлами и каталогами ---------------------------------------------------
 ----------------------------------------------------------------------------------------------------
@@ -346,7 +401,11 @@ createDirectoryHierarchy dir0 = do
   when (d/= "" && exclude_special_names d) $ do
     unlessM (dirExist dir) $ do
       createDirectoryHierarchy (takeDirectory dir)
-      dirCreate dir
+      exc <- try (dirCreate dir)
+      case exc of
+        Left e  -> unlessM (dirExist dir) $ throw e
+        Right _ -> return ()
+
 
 -- |Создать недостающие каталоги на пути к файлу
 buildPathTo filename  =  createDirectoryHierarchy (takeDirectory filename)
@@ -357,20 +416,30 @@ getCurrentDirectory = myCanonicalizePath "."
 -- | @'dirRemoveRecursive' dir@  removes an existing directory /dir/
 -- together with its content and all subdirectories. Be careful,
 -- if the directory contains symlinks, the function will follow them.
-dirRemoveRecursive :: FilePath -> IO ()
-dirRemoveRecursive startLoc = do
+dirRemoveRecursive :: (FilePath -> IO ()) -> FilePath -> IO ()
+dirRemoveRecursive removeAction startLoc = do
   contents <- dirList startLoc
-  sequence_ [rm (startLoc </> x) | x <- contents, x /= "." && x /= ".."]
+  sequence_ [rm (startLoc </> x) | x <- contents.$ filter exclude_special_names]
   dirRemove startLoc
   where
     rm :: FilePath -> IO ()
-    rm f = do temp <- try (fileRemove f)     -- todo: check that exception is really generated
+    rm f = do temp <- try (removeAction f)     -- todo: check that exception is really generated
               case temp of
                 Left e  -> do isDir <- dirExist f
                               -- If f is not a directory, re-throw the error
                               unless isDir $ throw e
-                              dirRemoveRecursive f
+                              dirRemoveRecursive removeAction f
                 Right _ -> return ()
+
+
+-- Функция удаления, при необходимости снимающая атрибуты у файла
+forcedFileRemove :: FilePath -> IO ()
+forcedFileRemove filename = do
+  fileRemove filename `catch` \e -> do
+    -- Remove readonly/hidden/system attributes and try to remove file/directory again
+    clearFileAttributes filename
+    fileRemove filename
+
 
 -- | Given path referring to a file or directory, returns a
 -- canonicalized path, with the intent that two paths referring
@@ -386,11 +455,11 @@ myCanonicalizePath fpath | isURL fpath = return fpath
   withCFilePath fpath $ \pInPath ->
   allocaBytes (long_path_size*4) $ \pOutPath ->
   alloca $ \ppFilePart ->
-    do c_GetFullPathName pInPath (fromIntegral long_path_size*2) pOutPath ppFilePart
+    do c_myGetFullPathName pInPath (fromIntegral long_path_size*2) pOutPath ppFilePart
        peekCFilePath pOutPath >>== dropTrailingPathSeparator
 
 foreign import stdcall unsafe "GetFullPathNameW"
-            c_GetFullPathName :: CWString
+          c_myGetFullPathName :: CWString
                               -> CInt
                               -> CWString
                               -> Ptr CWString
@@ -475,20 +544,33 @@ liftMVar3  action mvar x y =  withMVar mvar (\a -> action a x y)
 returnMVar action          =  action >>= newMVar
 
 -- |Архивный файл, заворачивается в MVar для реализации параллельного доступа из разных тредов ко входным архивам
-data Archive = Archive { archiveName :: FilePath
-                       , archiveFile :: MVar File
-                       }
-archiveOpen     name = do file <- fileOpen name >>= newMVar; return (Archive name file)
-archiveCreate   name = do file <- fileCreate name >>= newMVar; return (Archive name file)
+data Archive = Archive       { archiveName :: FilePath
+                             , archiveFile :: MVar File
+                             }
+             |
+               ArchiveStdOut { archiveName :: FilePath
+                             , archiveFile :: MVar File
+                             , archivePos  :: MVar Integer
+                             }
+
+archiveOpen     name = do file <- fileOpen name     >>= newMVar; return (Archive name file)
+archiveCreate   name = do file <- fileCreate name   >>= newMVar; return (Archive name file)
 archiveCreateRW name = do file <- fileCreateRW name >>= newMVar; return (Archive name file)
-archiveGetPos        = liftMVar1 fileGetPos   . archiveFile
 archiveGetSize       = liftMVar1 fileGetSize  . archiveFile
 archiveSeek          = liftMVar2 fileSeek     . archiveFile
 archiveRead          = liftMVar2 fileRead     . archiveFile
 archiveReadBuf       = liftMVar3 fileReadBuf  . archiveFile
 archiveWrite         = liftMVar2 fileWrite    . archiveFile
-archiveWriteBuf      = liftMVar3 fileWriteBuf . archiveFile
-archiveClose         = liftMVar1 fileClose    . archiveFile
+
+-- For stdout support (to do: redirect console output to stderr, don't create temp.archive)
+--archiveCreateRW name          = do file <- newMVar (FileOnDisk 1); pos <- newMVar 0; return (ArchiveStdOut "stdout" file pos)
+archiveWriteBuf Archive{..}       buf size  =  do liftMVar3 fileWriteBuf archiveFile buf size
+archiveWriteBuf ArchiveStdOut{..} buf size  =  do liftMVar3 fileWriteBuf archiveFile buf size; archivePos += i size
+archiveGetPos   Archive{..}                 =  liftMVar1 fileGetPos archiveFile
+archiveGetPos   ArchiveStdOut{..}           =  val archivePos
+archiveClose    Archive{..}                 =  liftMVar1 fileClose archiveFile
+archiveClose    ArchiveStdOut{..}           =  return ()
+
 
 -- |Скопировать данные из одного архива в другой и затем восстановить позицию в исходном архиве
 archiveCopyData srcarc pos size dstarc = do
@@ -646,11 +728,28 @@ fileWithStatus loc name f = do
 
 #endif
 
-fileRead      file size = allocaBytes size $ \buf -> do fileReadBuf file buf size; peekCStringLen (buf,size)
+-- |Full names of files matching given wildcard
+dirWildcardFullnames wc = dirWildcardList wc >>== map (takeDirectory wc </>)
+
+fileRead      file size = allocaBytes size $ \buf -> do len <- fileReadBuf file buf size; peekCStringLen (buf,len)
 fileWrite     file str  = withCStringLen str $ \(buf,size) -> fileWriteBuf file buf size
-fileGetBinary name      = bracket (fileOpen   name) fileClose (\file -> fileGetSize file >>= fileRead file.i)
+fileGetBinary name      = bracket (fileOpen   name) fileClose fileGetContents
 filePutBinary name str  = bracket (fileCreate name) fileClose (`fileWrite` str)
 
+{-# NOINLINE fileGetContents #-}
+-- |Прочитать содержимое файла целиком
+fileGetContents file = do
+  allocaBytes aBUFFER_SIZE $ \buf -> do
+  let go xs = do len <- fileReadBuf file buf aBUFFER_SIZE
+                 s   <- peekCStringLen (buf,len)
+                 if len == aBUFFER_SIZE
+                   then go (s:xs)
+                   else return$ concat (reverse (s:xs))
+  --
+  go []
+
+
+{-# NOINLINE fileCopyBytes #-}
 -- |Скопировать заданное количество байт из одного открытого файла в другой
 fileCopyBytes srcfile size dstfile = do
   allocaBytes aHUGE_BUFFER_SIZE $ \buf -> do        -- используем `alloca`, чтобы автоматически освободить выделенный буфер при выходе

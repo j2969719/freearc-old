@@ -1,11 +1,13 @@
 #include "../Compression.h"
 
-int external_compress   (char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, void *auxdata);
-int external_decompress (char *packcmd, char *unpackcmd, char *datafile, char *packedfile, CALLBACK_FUNC *callback, void *auxdata);
-
 // Добавить в таблицу методов сжатия описанный пользователем в arc.ini внешний упаковщик.
 // params содержит описание упаковщика из arc.ini. Возвращает 1, если описание корректно.
 int AddExternalCompressor (char *params);
+
+// Синхронизация доступа к консоли
+void SynchronizeConio_Enter (void);
+void SynchronizeConio_Leave (void);
+
 
 #ifdef __cplusplus
 
@@ -26,6 +28,7 @@ public:
   char     option_strings[MAX_METHOD_STRLEN];   // Текстовый буфер для хранения текста параметров
   char    *defaultopt;      // Значения параметров по умолчанию
   int      solid;           // Разрешено делать солид-блоки?
+  int      useHeader;       // TRUE, если в начало сжатого потока записывается 0/1 - данные несжаты/сжаты; FALSE - при подмене внутренних методов
 
   // Параметры, специфичные для PPMonstr
   int     order;            // Порядок модели (по скольким последним сивмолам предсказывается следующий)
@@ -33,32 +36,27 @@ public:
   int     MinCompression;   // Минимальный процент сжатия. Если выходные данные больше, то вместо них будут записаны оригинальные (несжатые) данные
 
   EXTERNAL_METHOD() {};
+
   // Универсальный метод: возвращаем различные простые характеристики метода сжатия
-  virtual int doit (char *what, int param, void *data, CALLBACK_FUNC *callback)
-  {
-      if      (strequ (what,"external?"))  return 1;
-      else if (strequ (what,"nosolid?"))   return !solid;
-      else return COMPRESSION_METHOD::doit (what, param, data, callback);
-  }
+  virtual int doit (char *what, int param, void *data, CALLBACK_FUNC *callback);
+
+  // Упаковка/распаковка
+  int DeCompress (COMPRESSION direction, CALLBACK_FUNC *callback, void *auxdata);
 
   // Функции распаковки и упаковки
-  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
+  virtual int decompress (CALLBACK_FUNC *callback, void *auxdata)     {return DeCompress (DECOMPRESS, callback, auxdata);}
 #ifndef FREEARC_DECOMPRESS_ONLY
-  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
+  virtual int compress   (CALLBACK_FUNC *callback, void *auxdata)     {return DeCompress (COMPRESS, callback, auxdata);}
+
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void)               {return cmem;}
+  virtual void    SetCompressionMem        (MemSize _mem);
+  virtual void    SetMinDecompressionMem   (MemSize _mem)       {SetCompressionMem(_mem);}
+#endif
+  virtual MemSize GetDecompressionMem      (void)               {return dmem;}
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_EXTERNAL)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)          {return cmem;}
-  virtual MemSize GetDictionary         (void)          {return 0;}
-  virtual MemSize GetBlockSize          (void)          {return 0;}
-  virtual void    SetCompressionMem     (MemSize _mem);
-  virtual void    SetDecompressionMem   (MemSize _mem)  {SetCompressionMem(_mem);}
-  virtual void    SetDictionary         (MemSize dict)  {}
-  virtual void    SetBlockSize          (MemSize bs)    {}
-#endif
-  virtual MemSize GetDecompressionMem   (void)          {return dmem;}
 };
 
 // Разборщик строки препроцессора EXTERNAL

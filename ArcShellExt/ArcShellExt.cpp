@@ -57,8 +57,8 @@ typedef struct{
 
 #ifdef ISS_JOINER
 #define ProductName "IssJoiner"
-#elif 0
-#define ProductName "Hamster"
+#elif defined(HAMSTER)
+#define ProductName "Hamster Free Archiver"
 #else
 #define ProductName "FreeArc"
 #endif
@@ -354,9 +354,9 @@ static int Lua_read_from_file (lua_State *L) {
   MultiByteToWideChar (CP_UTF8, 0, filename, -1, filenameW, MY_FILENAME_MAX);
 
   // Where and how many bytes to read
-  int origin = luaL_checkinteger(L, 2);
-  int offset = luaL_checkinteger(L, 3);
-  int size   = luaL_checkinteger(L, 4);
+  int     origin = luaL_checkinteger(L, 2);
+  __int64 offset = (__int64) luaL_checknumber(L, 3);
+  int     size   = luaL_checkinteger(L, 4);
 
   // Open file
   int f = _wopen (filenameW, _O_BINARY | _O_RDONLY);
@@ -366,15 +366,25 @@ static int Lua_read_from_file (lua_State *L) {
 
   // Alloc buffer
   void *buf = malloc(size);
-  if (!buf)
+  if (!buf) {
+    _close(f);
     return 0;  ////lua_pushstring (L, errormsg); luaL_error / lua_error
+  }
 
-  // Seek to and read data requested
-  _lseek (f, offset, origin);
+  // Seek to position specified
+  if (_lseeki64 (f, offset, origin) < 0) {
+    free(buf);
+    _close(f);
+    return 0;  ////lua_pushstring (L, errormsg); luaL_error / lua_error
+  }
+
+  // Read requested data
   int len = _read (f, buf, size);
   _close(f);
-  if (len<0)
+  if (len<0) {
+    free(buf);
     return 0;  ////lua_pushstring (L, errormsg); luaL_error / lua_error
+  }
 
   // Return the data read
   lua_pushlstring(L, (const char*)buf, len);
@@ -612,7 +622,7 @@ STDMETHODIMP CShellExt::QueryContextMenu(HMENU _hMenu, UINT _nIndex, UINT _idCmd
       // Push UTF8 names of files selected to the Lua stack and save them to filenames[]
       TCHAR *WSelectedFilename = (TCHAR*) malloc (sizeof(TCHAR) * MY_FILENAME_MAX);
       int    total_size = 0;
-      for (UINT i = 0; i < numFiles; i++)
+      for (int i = 0; i < numFiles; i++)
       {
         DragQueryFile ((HDROP)m_stgMedium.hGlobal, i, WSelectedFilename, MY_FILENAME_MAX);
         WideCharToMultiByte (CP_UTF8, 0, WSelectedFilename, -1, SelectedFilename, MY_FILENAME_MAX, NULL, NULL);
@@ -626,7 +636,7 @@ STDMETHODIMP CShellExt::QueryContextMenu(HMENU _hMenu, UINT _nIndex, UINT _idCmd
 
       // Concat all filenames to one buffer
       char *p = listfile_data = (char*) malloc (sizeof(char) * (total_size+1));
-      for (UINT i = 0; i < numFiles; i++)
+      for (int i = 0; i < numFiles; i++)
       {
         DragQueryFile ((HDROP)m_stgMedium.hGlobal, i, WSelectedFilename, MY_FILENAME_MAX);
         WideCharToMultiByte (CP_UTF8, 0, WSelectedFilename, -1, SelectedFilename, MY_FILENAME_MAX, NULL, NULL);

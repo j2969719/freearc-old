@@ -27,6 +27,7 @@ import Charsets
 import Errors
 import FileInfo
 import Compression
+import Arhive7zLib
 import Options
 #if defined(FREEARC_WIN)
 import System.Win32.File    (fILE_ATTRIBUTE_ARCHIVE)
@@ -43,13 +44,16 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   -- Если командная строка не содержит ничего кроме опций - напечатать help/конфигурацию и выйти
   if args==options then do
       putStr $ if options `contains` "--print-config"
-                 then unlines ("":";You can insert these lines into ARC.INI":compressionMethods:builtinMethodSubsts)
+                 then unlines ("":";You can insert these lines into ARC.INI":aCOMPRESSION_METHODS:builtinMethodSubsts)
                  else aHELP
       return Nothing
     else do
 
+  -- Additional filters for params of some options when required to resolve ambiguity
+  let option_checks  =  [("type", (\arctype -> (arctype `elem` ["--",aFreeArcExt]) || (arctype/="" && szCheckType arctype)))]
+
   -- Прочитаем опции из переменной среды FREEARC или заданной в опции -env
-  (o0, _) <- parseOptions options [] []
+  (o0, _) <- parseOptions options option_checks [] []
   let no_configs = findReqList o0 "config" `contains` "-"
   env_options <- case (findReqArg o0 "env" "--") of
                     "--" | no_configs -> return ""  -- Опция -cfg- в командной строке отключает использование И arc.ini, И %FREEARC
@@ -62,26 +66,34 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   -- РАЗБОР КОНФИГ-ФАЙЛА ------------------------------------------------------------------------------------
   -----------------------------------------------------------------------------------------------------------
 
-  -- Прочитаем конфиг-файл arc.ini или указанный опцией -cfg
-  (o1, _)  <- parseOptions (words env_options++options) [] []   -- опция -cfg может быть задана в командной строке или в переменной среды
-  cfgfile <- case (findReqArg o1 "config" "--") of
-               "--" -> findFile configFilePlaces aCONFIG_FILE
-               "-"  -> return ""
-               cfg  -> return cfg
-  -- Обработаем опцию --charset/-sc, чтобы определить кодировку для чтения конфиг-файла
+  -- Прочитаем конфиг-файлы arc*.ini или указанные опцией -cfg
+  (o1, _)  <- parseOptions (words env_options++options) option_checks [] []   -- опция -cfg может быть задана в командной строке или в переменной среды
+  cfgfiles <- case (findReqArg o1 "config" "--") of
+                "-"  -> return []
+                "--" -> findFiles configFilePlaces aCONFIG_FILES
+                cfg  -> findFiles configFilePlaces cfg
+  -- Обработаем опцию --charset/-sc, чтобы определить кодировку для чтения конфиг-файлов
   let (_, parseFile1, _, _, _)  =  parse_charset_option (findReqList o1 "charset")
-  -- Прочитаем опции из конфиг-файла, если он есть, и удалим из него пустые строки и комментарии
-  config  <-  cfgfile  &&&  parseFile1 'i' cfgfile >>== map trim >>== deleteIfs [null, match ";*"]
+  -- Прочитаем содержимое конфиг-файлов, и удалим из них пустые строки и комментарии
+  configs  <-  foreach cfgfiles $ \cfgfile -> do
+                 config <- parseFile1 'i' cfgfile >>== map trim >>== deleteIfs [null, match ";*"]
+                 -- Разобьём конфиг на две части - опции по умолчанию из первой строки и секции конфигурации
+                 return$ case config of
+                           x:xs | not (isSectionHeading x) -> (x, xs)
+                           _                               -> ("", config)
+  -- Собрерём информацию из всех конфиг-файлов
+  let config_1st_line  = unwords (map fst configs)
+      config_remainder = concatMap snd configs
 
-  -- Эти определения превращают содержимое конфиг-файла в набор секций,
-  -- содержимое которых может быть запрошено функцией configSection.
-  -- К примеру, configSection "[Compression methods]" - список строк в секции "[Compression methods]"
-  let configSections = map makeSection $ makeGroups selectSectionHeadings config
-      makeSection (x:xs) = (cleanupSectionName x, xs)
-      configSection name = lookup (cleanupSectionName name) configSections `defaultVal` []
+  -- Эти определения превращают содержимое конфиг-файлов в набор секций, текст которых может быть запрошен функцией configSection.
+  -- К примеру, configSection "[Compression methods]" - список строк в секциях "[Compression methods]"
+  let (externalSections, otherSections)  =  partition (match aEXTERNAL_COMPRESSOR.head) $ makeGroups isSectionHeading config_remainder
+      joinedSections  =  otherSections .$ map makeSection .$ groupFst .$ mapSnds concat  -- слить одноимённые секци из разных конфиг-файлов
+      configSection name  =  lookup (cleanupSectionName name) joinedSections `defaultVal` []
+      makeSection (x:xs)  =  (cleanupSectionName x, xs)
       -- Декодировать метод сжатия/доп. алгоритмы, используя настройки из секции "[Compression methods]"
-      decode_compression_method cpus = decode_method cpus (configSection compressionMethods)
-      decode_methods cpus s = ("0/"++s).$decode_compression_method cpus.$lastElems (length (elemIndices '/' s) + 1)
+      decode_compression_method cpus  =  decode_method cpus (configSection aCOMPRESSION_METHODS)
+      decode_method_sequence    cpus  =  snd . head . decode_compression_method cpus
 
   -- А эти определения позволяют вытащить из секции элемент с заданным именем,
   -- включая случаи, когда левая сторона определения содержит несколько слов,
@@ -97,15 +109,9 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
                                                     in  map (\w->(w,trim b)) (words$ trim a))
       configElement section element  =  configSection section .$ sectionElement element
 
-  -- Если первая значащая строка конфиг-файла не является заголовком секции, то
-  -- она описывает опции, общие для всех команд
-  let config_1st_line  =  case (head1 config) of
-                              '[' : _  -> ""    -- это заголовок секции
-                              str      -> str
-
   -- Имя команды: "a", "create" и так далее. Опции по умолчанию для этой команды, заданные в конфиг-файле
   let cmd = head1$ filter (not.match "-*") args
-      default_cmd_options = configElement defaultOptions cmd
+      default_cmd_options = configElement aDEFAULT_OPTIONS cmd
 
   -----------------------------------------------------------------------------------------------------------
   -----------------------------------------------------------------------------------------------------------
@@ -113,12 +119,12 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   -- Настройки, сделанные в GUI Settings dialog
   gui_options <- not no_configs &&& readGuiOptions
 
-  -- Добавим в начало командной строки опции по умолчанию для всех команд,
+  -- Добавим в начало командной строки опции по умолчанию для всех команд, опции из freearc.ini (в GUI-версии),
   -- опции по умолчанию для этой команды и содержимое переменной среды
-  let additional_args  =  gui_options ++ concatMap words [config_1st_line, default_cmd_options, env_options]
+  let additional_args  =  words config_1st_line ++ gui_options ++ words default_cmd_options ++ words env_options
 
   -- Разберём командную строку, получив набор опций и список "свободных аргументов"
-  (o, freeArgs)  <-  parseOptions (additional_args++args) [] []
+  (o, freeArgs)  <-  parseOptions (additional_args++args) option_checks [] []
   -- Сообщить об ошибке, если "свободных аргументов" меньше двух - отсутствует команда или имя архива
   case freeArgs of
     []     ->  registerError$ CMDLINE_NO_COMMAND args
@@ -144,7 +150,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
       pretest               =  findOptArg   o "pretest"       "1" .$  changeTo [("-","0"), ("+","2"), ("","2")]
       broken_archive        =  findReqArg   o "BrokenArchive" "-"  ||| "0"
       language              =  findReqArg   o "language"      "--"
-      pause_before_exit     =  findOptArg   o "pause-before-exit" "--"   .$changeTo [("--",iif isGUI (iif (cmd=="t") "on" "on-warnings") "off"), ("","on"), ("yes","on"), ("no","off"), ("always","on"), ("never","off")]
+      pause_before_exit     =  findOptArg   o "pause-before-exit" "--"   .$changeTo [("--",iif isGUI (iif (cmd=="t" || test_opt) "on" "on-warnings") "off"), ("","on"), ("yes","on"), ("no","off"), ("always","on"), ("never","off")]
       shutdown              =  findNoArg    o "shutdown"
       noarcext              =  findNoArg    o "noarcext"
       crconly               =  findNoArg    o "crconly"
@@ -152,6 +158,13 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
       url_proxy             =  findOptArg   o "proxy"         "--"
       url_bypass            =  findOptArg   o "bypass"        ""
       exclude_path          =  findOptArg   o "ExcludePath"   "--"
+      global_queueing_opt   =  findNoArg    o "queue"
+      test_opt              =  findNoArg    o "test"
+
+      -- In absence of -tTYPE option, type of new archives is defined by the arcspec extension: "a a.zip" is the same as "a a.zip -tzip"
+      default_arctype   =  szFindFormatForArchiveName pure_arcspec ||| aFreeArcExt
+      archive_type      =  findReqArg o "type" "--"  .$  changeTo [("--", default_arctype)]
+      archive_extension =  if archive_type==aFreeArcInternalExt   then aDEFAULT_ARC_EXTENSION   else szDefaultExtension archive_type
 
       add_exclude_path  =  exclude_path .$ changeTo [("--", "9"), ("", "0")] .$ readInt
       dir_exclude_path  =  if                cmd=="e"          then 0
@@ -165,7 +178,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   setup (url_setup_bypass_list.$ withCString (replace ',' ' ' url_bypass))
 
   -- Загрузить файл локализации
-  setup (setLocale language)
+  setup (setLocale [language])
 
   -- Вручную раскидать опции -o/-op
   let (op, o_rest) = partition is_op_option (findReqList o "overwrite")
@@ -184,7 +197,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
 
   -- Определить имя SFX-модуля, который будет добавлен в начало архива
   let sfxname  =  findOptArg o "sfx" (if take 1 cmd=="s"  then drop 1 cmd  else "--")   -- команда "s..." эквивалентна команде "ch -sfx..."
-                    ||| aDEFAULT_SFX  -- при пустом параметре использовать модуль SFX по умолчанию (arc.sfx из стандартного каталога)
+                    |||  default_sfx archive_type  -- при пустом параметре использовать модуль SFX по умолчанию (в зависимости от типа архива, freearc.sfx/7z.sfx из каталога программы)
   sfx <- if sfxname `notElem` words "- --" && takeFileName sfxname == sfxname
            then findFile libraryFilePlaces sfxname   -- использовать модуль с заданным именем из стандартного каталога
            else return sfxname
@@ -198,7 +211,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
                    _    -> updateBaseName (++ showtime autogenerate_arcname current_time)
 
   -- Добавим к имени архива расширение по умолчанию, если нет другого расширения и не используется опция --noarcext
-  let arcspec  =  addArcExtension noarcext$ add_ag pure_arcspec
+  let arcspec  =  addArcExtension noarcext archive_extension$ add_ag pure_arcspec
 
   -- Обработать список опций --charset/-sc, возвратив таблицу кодировок
   -- и процедуры чтения/записи файлов с её учётом
@@ -224,17 +237,13 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   setup (display_option' =: display)
 
   -- Зарегистрируем описания внешних упаковщиков из секций [External compressor:...]
-  let externalSections = filter (matchExternalCompressor.head) $ makeGroups selectSectionHeadings config
-      matchExternalCompressor s = and[ head externalCompressor          ==    head s
-                                     , init (tail externalCompressor) `match` init (tail s)
-                                     , last externalCompressor          ==    last s]
   let registerExternalCompressors makeWarnings = do
         CompressionLib.clearExternalCompressorsTable
         for externalSections $ \section -> do
           result <- CompressionLib.addExternalCompressor (unlines section)
           when (result/=1 && makeWarnings) $ do
-            registerWarning (BAD_CFG_SECTION cfgfile section)
-  -- Зарегистрируем их сейчас для парсинга командной строки и перерегистриуем при выполнении для собственно сжатия.
+            registerWarning (BAD_CFG_SECTION "configuration file" section)
+  -- Зарегистрируем их сейчас для парсинга командной строки и перерегистрируем при выполнении для собственно сжатия.
   registerExternalCompressors True
   setup_command <<= (registerExternalCompressors False)
 
@@ -252,52 +261,73 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
           otherwise                 ->  Nothing                          -- иначе - это не опция -md, а опция -m, начинающаяся с -md...
 
   -- Цикл, вручную обрабатывающий различные опции, начинающиеся на "-m"
-  method <- ref "";    methods <- ref "";  mc' <- newList;  dict <- ref 0;
-  mm'    <- ref "--";  threads <- ref 0 ;  ma' <- ref "--"
-  for compression_options $ \option ->
-    case option of
-      -- Опция -mс позволяет быстро отключить отдельные алгоритмы сжатия (-mcd-, -mc-rep)
-      'c':rest  | anyf [beginWith "-", endWith "-"] rest
-                    ->  mc' <<= rest.$tryToSkip "-".$tryToSkipAtEnd "-"
-                                    .$changeTo [("d","delta"), ("e","exe"),  ("l","lzp")
-                                               ,("r","rep"),   ("z","dict")
-                                               ,("a","$wav"),  ("c","$bmp"), ("t","$text")
-                                               ]
-      -- Опция -md устанавливает размер словаря как в старом добром RAR :)
-      'd':rest  | Just md <- parseDict rest ->  dict =: md
-      -- Опция -mm выбирает режим мультимедиа-сжатия.
-      'm':rest  | mmflag <- rest.$tryToSkip "=",
-                  mmflag `elem` ["","--","+","-","max","fast"]  ->  mm' =: mmflag
-      -- Опция -ms задаёт использование быстрого метода сжатия для уже сжатых файлов
-      "s"  ->  methods ++= "/$compressed="++join_compressor aCOMPRESSED_METHOD
-      "s-" ->  mc' <<= "$compressed"
-      -- Опция -ma выбирает режим автоопределения типов файлов
-      'a':rest  | maflag <- rest.$tryToSkip "=".$changeTo [("+","--"), ("","--"), ("-","0")],
-                  maflag `elem` ["--"]++map show [0..9]  ->  ma' =: maflag
-      -- Опция -mt включает/выключает многотредовость и устанавливает количество тредов
-      't':rest  | n <- rest.$tryToSkip "=".$changeTo [("-","1"), ("+","0"), ("","0"), ("--","0")],
-                  all isDigit n  ->  threads =: readInt n
-      -- Опции -m$type=method устанавливают алгоритмы сжатия для отдельных типов файлов
-      '$':_ -> case (break (`elem` "=:.") option) of
-                 (_type, '=':method) -> methods ++= '/':option                      -- -m$type=method: архивировать файлы этого типа заданным компрессором
-                 -- (_type, ':':names)  -> types  ++= split ':' names               -- -m$type:name1:name2: добавить в список файлов этого типа заданные маски
-                 -- (_type, ',':exts)   -> types  ++= map ("*."++) $ split '.' exts -- -m$type.ext1.ext2: добавить расширения в список типа
-                 otherwise -> registerError$ CMDLINE_BAD_OPTION_FORMAT ("-m"++option)
-      -- Все остальные опции, начинающиеся на -m0= или просто -m, задают основной метод сжатия.
-      m  ->  method =: m.$tryToSkip "0="
+  method <- ref "";    methods <- ref "";  dict <- ref 0;    change_methods' <- newList
+  mm'    <- ref "--";  threads <- ref 0 ;  ma'  <- ref "--"
+  when (archive_type == aFreeArcInternalExt) $ do                        -- если -tarc, то обработаем опции -m... для arc-формата
+    for compression_options $ \option ->
+      case option of
+        -- Syntax: -mc[$group1,$group2][:]-$group,-algo,+algo,algo1/algo2
+        'c':rest  |  anyf [beginWith "-", beginWith "+", beginWith ":", beginWith "$", allf [isInfixOf "/", not.isInfixOf "/$"], endWith "-", endWith "+"] rest
+
+            -> do let parseGroups xs@('$':_) = do
+                        let (group_str,operation)  =  break (`elem` ":-+") xs
+                            groups                 =  split ',' group_str
+                        if any (not.beginWith "$") groups   -- названия групп должны начинаться с '$'
+                          then registerError$ CMDLINE_BAD_OPTION_FORMAT ("-m"++option)
+                          else return (groups,operation)
+                      --
+                      parseGroups xs = return ([],xs)
+                  --
+                  let rarAbbrevs = changeTo [("d","delta"), ("e","exe"), ("l","lzp"), ("r","rep"), ("z","dict"), ("a","$wav"), ("c","$bmp"), ("t","$text")]
+                  --
+                  let parseOperation operation
+                        | beginWith "+" operation || endWith "+" operation  =  return ('+', operation .$tryToSkip "+" .$tryToSkipAtEnd "+", "")
+                        | beginWith "-" operation || endWith "-" operation  =  return ('-', operation .$tryToSkip "-" .$tryToSkipAtEnd "-" .$rarAbbrevs, "")
+                        | (algo1,'/':algo2)  <-  break (=='/') operation,
+                           algo1 > "",  algo2 > ""                          =  return ('/', algo1, algo2)
+                        | otherwise                                         =  registerError$ CMDLINE_BAD_OPTION_FORMAT ("-m"++option)
+                  --
+                  -- Split `rest` into list of groups and operation
+                  (groups,operation) <- parseGroups rest
+                  -- Parse `operation` string
+                  (op,algo1,algo2) <- parseOperation (tryToSkip ":" operation)
+                  change_methods' <<= (op, groups.$replace "$default" "", algo1, algo2)
+
+        -- Опция -md устанавливает размер словаря как в старом добром RAR :)
+        'd':rest  | Just md <- parseDict rest ->  dict =: md
+        -- Опция -mm выбирает режим мультимедиа-сжатия.
+        'm':rest  | mmflag <- rest.$tryToSkip "=",
+                    mmflag `elem` ["","--","+","-","max","fast"]  ->  mm' =: mmflag
+        -- Опция -ms задаёт использование быстрого метода сжатия для уже сжатых файлов
+        "s"  ->  methods ++= "/$compressed="++join_compressor aCOMPRESSED_METHOD
+        "s-" ->  change_methods' <<= ('-',[],"$compressed","")
+        -- Опция -ma выбирает режим автоопределения типов файлов
+        'a':rest  | maflag <- rest.$tryToSkip "=".$changeTo [("+","--"), ("","--"), ("-","0")],
+                    maflag `elem` ["--"]++map show [0..9]  ->  ma' =: maflag
+        -- Опция -mt включает/выключает многотредовость и устанавливает количество тредов
+        't':rest  | n <- rest.$tryToSkip "=".$changeTo [("-","1"), ("+","0"), ("","0"), ("--","0")],
+                    all isDigit n  ->  threads =: readInt n
+        -- Опции -m$type=method устанавливают алгоритмы сжатия для отдельных типов файлов
+        '$':_ -> case (break (`elem` "=:.") option) of
+                   (_type, '=':method) -> methods ++= '/':option                      -- -m$type=method: архивировать файлы этого типа заданным компрессором
+                   -- (_type, ':':names)  -> types  ++= split ':' names               -- -m$type:name1:name2: добавить в список файлов этого типа заданные маски
+                   -- (_type, ',':exts)   -> types  ++= map ("*."++) $ split '.' exts -- -m$type.ext1.ext2: добавить расширения в список типа
+                   otherwise -> registerError$ CMDLINE_BAD_OPTION_FORMAT ("-m"++option)
+        -- Все остальные опции, начинающиеся на -m0= или просто -m, задают основной метод сжатия.
+        m  ->  method =: m.$tryToSkip "0="
   -- Прочитаем окончательные значения переменных
-  dictionary  <- val dict       -- размер словаря (-md)
-  cthreads    <- val threads    -- количество compression threads (-mt)
-  mainMethod  <- val method     -- основной метод сжатия.
-  userMethods <- val methods    -- дополнительные методы для конкретных типов файлов (-m$/-ms)
-  mm          <- val mm'        -- мультимедиа-сжатие
-  mc          <- listVal mc'    -- список алгоритмов сжатия, которые требуется отключить
-  ma          <- val ma'        -- режим автоопределения типов файлов
+  dictionary      <- val dict                  -- размер словаря (-md)
+  cthreads        <- val threads               -- количество compression threads (-mt)
+  mainMethod      <- val method                -- основной метод сжатия.
+  userMethods     <- val methods               -- дополнительные методы для конкретных типов файлов (-m$/-ms)
+  mm              <- val mm'                   -- мультимедиа-сжатие
+  change_methods  <- listVal change_methods'   -- список операций, которые нужно выполнить над алгоритмами сжатия
+  ma              <- val ma'                   -- режим автоопределения типов файлов
 
   -- Уровень сжатия, 0..9. Пытаемся угадать его по цифре, начинающей или завершающей строку сжатия.
   let clevel = case mainMethod of
-                 xs | xs &&& isDigit (head xs) &&& all isAlpha (tail xs)  ->  digitToInt (head xs)
-                 xs | xs &&& isDigit (last xs) &&& all isAlpha (init xs)  ->  digitToInt (last xs)
+                 xs | xs &&& isDigit (head xs) &&& all isAlpha (tail xs) &&& length(xs)<=3  ->  digitToInt (head xs)
+                 xs | xs &&& isDigit (last xs) &&& all isAlpha (init xs) &&& length(xs)<=3  ->  digitToInt (last xs)
                  "mx"                -> 9
                  "max"               -> 9
                  _                   -> 4  -- default compression level
@@ -308,6 +338,9 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   -- Передать в библиотеку упаковки количество тредов, которое она должна использовать
   let cpus  =  cthreads ||| i getProcessorsCount      -- By default, use number of threads equal to amount of available processors/cores
   setup (CompressionLib.setCompressionThreads cpus)
+
+  -- Включить/выключить режим отладочного вывода
+  setup (CompressionLib.setDebugMode (if display `contains_one_of` "$" then 1 else 0))
 
   -- Ограничения на память при упаковке/распаковке
   let climit = parseLimit "75%"$ findReqArg o "LimitCompMem"   "--"
@@ -320,23 +353,35 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
 
   -- Управление мультимедиа-сжатием
   let multimedia mm = case mm of
-        "-"    -> filter ((`notElem` words "$wav $bmp").fst)    -- удалим группы $wav и $bmp из списка методов сжатия.
-        "fast" -> (++decode_methods cpus "$wav=wavfast/$bmp=bmpfast") . multimedia "-"
-        "max"  -> (++decode_methods cpus "$wav=wav/$bmp=bmp")         . multimedia "-"
-        "+"    -> \m -> case () of
-                          _ | m.$isFastDecompression  -> m.$multimedia "fast"
-                            | otherwise               -> m.$multimedia "max"
+        "-"    -> (++"/$wav=/$bmp=")    -- удалим группы $wav и $bmp из списка методов сжатия.
+        "fast" -> (++"/$wav=wavfast/$bmp=bmpfast")
+        "max"  -> (++"/$wav=wav/$bmp=bmp")
+        "+"    -> multimedia "max"
         ""     -> multimedia "+"
         "--"   -> id
 
-  -- Удаление заданного алгоритма сжатия.
-  let method_change mc x = case mc of
-        '$':_  -> -- удалим группу mc (например, "$bmp") из списка методов сжатия.
-                  x.$ filter ((/=mc).fst)
-        _      -> -- удалим группы, в которых mc - последний алгоритм сжатия (например -mc-tta приведёт к удалению групп, цепочки сжатия которых заканчиваются алгоритмом tta)
-                  x.$ (\(x:xs) -> x:(xs.$ filter ((/=mc).method_name.last1.snd)))   -- Не трогаем основную группу сжатия (голову списка)
-                  -- удалим алгоритм mc из остальных цепочек сжатия.
-                   .$ map (mapSnd$ filter ((/=mc).method_name))
+
+  -- Выполнение операций, заданных опцией -mc:
+  let -- удалим группу mc (например, "$bmp") из списка методов сжатия.
+      changeMethod ('-',groups,group@('$':_),_)  =  filter ((/=group).fst)
+
+      -- 1. удалим группы, в которых algo - последний алгоритм сжатия (например -mc-tta приведёт к удалению групп, цепочки сжатия которых заканчиваются алгоритмом tta)
+      -- 2. удалим алгоритм algo из остальных цепочек сжатия.
+      changeMethod ('-',groups,algo,_)         =  processTail (deleteIf ((algo==).method_name.last1.snd))      -- Не трогаем основную группу сжатия (голову списка)
+                                              >>> applyToGroups groups (deleteIf ((algo==).method_name))
+
+      -- добавим заданный алгоритм сжатия.
+      changeMethod ('+',groups,algo,_)         =  applyToGroups groups (decode_method_sequence cpus algo++)
+
+      -- заменим алгоритм сжатия на другой
+      changeMethod ('/',groups,algo1,algo2)    =  applyToGroups groups (concatMap (replace algo1 algo2))
+                                                      where  replace algo1 algo2 algo  =  if method_name algo==algo1  then (decode_method_sequence cpus algo2)  else [algo]
+
+
+      -- Применить операцию op только к группам, перечисленным в списке groups (ко всем если список пуст)
+      applyToGroups []     op  =  mapSnds op
+      applyToGroups groups op  =  map (\x@(grp,_) -> if grp `elem` groups  then mapSnd op x  else x)
+
 
   -- Если задана опция "--nodata", то симулировать сжатие данных.
   -- Если задана опция "--crconly", то ограничиться подсчётом CRC архивируемых файлов.
@@ -346,16 +391,14 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   let data_compressor = if      nodata   then [("", [aFAKE_COMPRESSION])]
                         else if crconly  then [("", [aCRC_ONLY_COMPRESSION])]
                         else ((mainMethod ||| aDEFAULT_COMPRESSOR) ++ userMethods)
-                               .$ decode_compression_method cpus
                                .$ multimedia mm
-                               .$ applyAll (map method_change mc)
+                               .$ decode_compression_method cpus
+                               .$ applyAll (map changeMethod change_methods)
                                .$ setDictionary dictionary
-                               .$ limitCompressionMem   climit
-                               .$ limitDecompressionMem dlimit
+                               .$ limitMinDecompressionMem dlimit
 
   -- Ограничить сжатие каталога последним методом в основной цепочке и наличным объёмом памяти
-  let dir_compressor = orig_dir_compressor.$ limitCompressionMem   climit
-                                          .$ limitDecompressionMem dlimit
+  let dir_compressor = orig_dir_compressor.$ limitMinDecompressionMem dlimit
                                           .$ getMainCompressor
                                           .$ reverse .$ take 1
 
@@ -365,15 +408,15 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
   let compressionMem = getCompressionMem data_compressor
 
   -- Вычислить, сколько памяти нужно использовать под буфер упреждающего чтения файлов.
-  -- Если размер кеша не задан явно опцией --cache, мы используем от 256 кб до 16 мб,
+  -- Если размер кеша не задан явно опцией --cache, мы используем от 1 до 16 мб,
   -- стараясь сделать так, чтобы общее потребление памяти программой не превосходило
   -- половины от её физического объёма (не считая памяти, необходимой для распаковки данных
   -- в обновляемых архивах). Разумеется, при наличии параллельно выполняющихся memory-intensive
   -- tasks (и в частности, параллельно работающих копиях FreeArc) эта тактика не очень удачна.
-  -- Лучше было бы смотреть на объём *свободного* физического ОЗУ + дискового кеша ОС в момент запуска программы.
-  let minCache   =  4*aIO_BUFFER_SIZE   -- Мин. разумный размер кеша при сжатии
+  -- To do: лучше было бы смотреть на объём *свободного* физического ОЗУ + дискового кеша ОС в момент запуска программы.
+  let minCache   =  1*aIO_BUFFER_SIZE   -- Мин. разумный размер кеша при сжатии
       maxCache   =  16*mb               -- Макс. размер кеша - 16 мб
-      availCMem  =  i(parsePhysMem "50%" `min` climit) `minusPositive` compressionMem  -- "Свободно памяти" = min(50% ОЗУ,-lc) минус память, требуемая для сжатия.
+      availCMem  =  i(parsePhysMem "50%" `min` climit) `minusPositive` compressionMem  -- "Свободно памяти" = min(50% ОЗУ,lc) минус память, требуемая для сжатия.
       compression_cache    =  clipToMaxInt $
                                 case (findReqArg o "cache" "--") of
                                     "--" -> availCMem.$clipTo minCache maxCache
@@ -381,7 +424,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
                                     s    -> parsePhysMem s
       decompression_cache  =  clipToMaxInt $
                                 case (findReqArg o "cache" "--") of
-                                    "--" -> minCache
+                                    "--" -> 4*aIO_BUFFER_SIZE
                                     "-"  -> 0
                                     s    -> parsePhysMem s
 
@@ -473,7 +516,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
 
   -- Отбор файлов по размеру
   let size_filter _  "--"   = []
-      size_filter op option = [(`op` parseSize option)]
+      size_filter op option = [(`op` parseSize 'b' option)]
 
   -- Отбор файлов по времени модификации, time в формате YYYYMMDDHHMMSS
   let time_filter _  "--" = []
@@ -588,7 +631,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
           -- Добавим в список паролей распаковки введённый пользователем пароль и пустой пароль, если для расшифровки может быть использован keyfile
           asked_password      &&&  modifyMVar_ mvar_unpack_passwords (return.(asked_password:))
           oldKeyfileContents  &&&  modifyMVar_ mvar_unpack_passwords (return.("":))
-          -- Добавить к паролю содержимое keyfile и заменить обозначения "--"/"?"
+          -- Добавить к паролю содержимое keyfile и заменить обозначения "--"/"?". 0.75: добавить unicode2utf8 asked_password/pwd
           let cook "--"             = ""                                -- шифрование отключено
               cook pwd | askPwd pwd = asked_password++keyfileContents   -- пароль, введёный с клавиатуры + содержимое keyfile
                        | otherwise  = pwd++keyfileContents              -- пароль из командной строки + содержимое keyfile
@@ -658,6 +701,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
                                     (True,  _  )  ->  "a"
                                     (False, "p")  ->  " "
 
+
   -- Список действий, которые надо выполнить непосредственно перед началом выполнения команды
   setup_command'  <-  listVal setup_command >>== sequence_
 
@@ -697,7 +741,8 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
     , opt_overwrite            = ref_overwrite
     , opt_keep_time            = findNoArg    o "keeptime"
     , opt_time_to_last         = findNoArg    o "timetolast"
-    , opt_test                 = findNoArg    o "test"
+    , opt_global_queueing      = global_queueing_opt
+    , opt_test                 = test_opt
     , opt_pretest              = readInt pretest
     , opt_keep_broken          = findNoArg    o "keepbroken"
     , opt_match_with           = match_with
@@ -706,6 +751,7 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
     , opt_keep_original        = keep_original
     , opt_noarcext             = noarcext
     , opt_nodir                = findNoArg    o "nodir"
+    , opt_nodates              = findNoArg    o "nodates"
     , opt_compression_cache    = compression_cache
     , opt_decompression_cache  = decompression_cache
     , opt_update_type          = update_type
@@ -734,6 +780,10 @@ parseCmdline cmdline  =  (`mapMaybeM` split ";" cmdline) $ \args -> do
     , opt_shutdown             = shutdown
     , opt_limit_compression_memory   = climit
     , opt_limit_decompression_memory = dlimit
+    , opt_volumes              = findReqList   o "volume"  .$lastElems 1  .$map (parseSize 'm')
+    , opt_archive_type         = archive_type
+    , opt_archive_extension    = archive_extension
+    , opt_7z_compression       = compression_options
 
     , opt_encryption_algorithm = encryptionAlgorithm
     , opt_cook_passwords       = cookPasswords
@@ -757,17 +807,22 @@ testOption fullname shortname option valid_values = do
 {-# NOINLINE addArcExtension #-}
 -- |Если имя архива не содержит расширения и не используется опция --noarcext,
 -- то добавить к нему расширение по умолчанию
-addArcExtension noarcext filespec =
+addArcExtension noarcext default_ext filespec =
   case (hasExtension filespec, noarcext) of
-    (False, False)  ->  filespec ++ aDEFAULT_ARC_EXTENSION
+    (False, False)  ->  filespec ++ default_ext
     _               ->  filespec
 
 {-# NOINLINE replace_list_files #-}
 -- |Заменить ссылки на лист-файлы ("@listfile") их содержимым
 replace_list_files parseFile  =  concatMapM $ \filespec ->
   case (startFrom "@" filespec) of
-    Just listfile  ->  parseFile 'l' listfile >>== deleteIf null
+    Just listfile  ->  parseFile 'l' listfile >>== map removeComment >>== deleteIf null
     _              ->  return [filespec]
+  where
+    -- Remove "//" comment and preceding spaces from the string
+    removeComment str | pos:_ <- strPositions str "//"  = str .$take pos .$trimRight
+                      | otherwise                       = str
+
 
 -- |Если ком. строка представлена в виде одного параметра @cmdfile, то надо прочитать её из указанного файла
 processCmdfile args =
@@ -801,9 +856,13 @@ parseSolidOption opt =
     --   "-s/-se/-s10m/-s100f" - группировать все/по расширению/по 10 мб/по 100 файлов, соответственно.
     -- `parse1` обрабатывает одно описание группировки,
     -- а `parse` - их последовательность, например -se100f10m
-    parse = map parse1 . recursive split
-      where split ('e':xs) = ("e",xs)
-            split xs       = spanBreak (anyf [isDigit, (=='e')]) xs
+    parse = map parse1 . recursive (split "")
+      where split text ""                          =  (reverse text,      "")
+            split ""   ('e':xs)                    =  ("e",               xs)
+            split text ('e':xs)                    =  (reverse text,      'e':xs)
+            split text (x:xs)   | not (isDigit x)  =  (reverse (x:text),  xs)
+                                | otherwise        =  split (x:text) xs
+
     parse1 s = case s of
                 ""  -> GroupAll
                 "e" -> GroupByExt
@@ -811,4 +870,5 @@ parseSolidOption opt =
                          (num, 'b') -> GroupBySize (i num)
                          (1,   'f') -> GroupNone
                          (num, 'f') -> GroupByNumber (i num)
+                         _          -> error$ "bad solid grouping option '"++s++"'"
 

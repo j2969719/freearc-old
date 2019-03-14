@@ -5,6 +5,9 @@
 #ifdef FREEARC_GUI
 module UI (module UI, module UIBase, module GUI) where
 import GUI
+#elif defined(FREEARC_DLL)
+module UI (module UI, module UIBase, module DLLUI) where
+import DLLUI
 #else
 module UI (module UI, module UIBase, module CUI) where
 import CUI
@@ -26,7 +29,7 @@ import Errors
 import Charsets
 import Files
 import FileInfo
-import Compression (encode_method, showMem, getCompressionMem, getDecompressionMem)
+import Compression (encode_method, showMem, getCompressionMem, getMinDecompressionMem)
 import Options
 import UIBase
 
@@ -87,20 +90,18 @@ uiStartArchive command method = do
   condPrintLine "ac" $ "\n"
   when (cmdType cmd == ADD_CMD) $ do
       condPrintLineLn "m" $
-          "Memory for compression "++showMem (getCompressionMem     method)
-          ++", decompression "     ++showMem (getDecompressionMem   method)
-          ++", cache "             ++showMem (opt_compression_cache command)
+          "Memory for compression "++showMem (getCompressionMem      method)
+          ++", decompression "     ++showMem (getMinDecompressionMem method)
+          ++", cache "             ++showMem (opt_compression_cache  command)
   -- Сохранить информацию для последующего использования
   ref_w0 =:: val warnings
   ref_arcExist =: exist
 
 -- |Отметить начало упаковки или распаковки данных
-uiStartProcessing filelist archive_total_bytes archive_total_compressed = do
+uiStartProcessing total_files' total_bytes' archive_total_bytes archive_total_compressed = do
   refArchiveProcessingTime =: 0
   command <- val ref_command
   let cmd = cmd_name command
-      total_files' = i$ length filelist
-      total_bytes' = sum (map fiSize filelist)
       ui_state = UI_State {
           total_files     = total_files'
         , total_bytes     = total_bytes'
@@ -136,6 +137,7 @@ uiStartProcessing filelist archive_total_bytes archive_total_compressed = do
       total = do ui_state <- val ref_ui_state
                  return$ total_bytes ui_state + (bytes_per_sec `div` 100)*i (total_files ui_state)
   uiStartProgressIndicator INDICATOR_FULL command current total
+  guiStartProcessing
   myFlushStdout
 
 
@@ -223,6 +225,7 @@ uiFakeFiles filelist compsize = do
   uiUnpackedBytes           origsize
   uiCompressedBytes         compsize
   uiUpdateProgressIndicator origsize
+  guiUpdateProgressIndicator
 
 -- |Отметить, что было обработано столько-то байт сжатых данных (неважно, результат
 -- ли это упаковки, входные данные для распаковки или просто упакованные данные, переданные
@@ -247,7 +250,7 @@ uiUnpackedBytes len = do
 
 -- |Отметить начало упаковки или распаковки солид-блока
 uiStartDeCompression deCompression = do
-  x <- getCPUTime
+  x <- myGetCPUTime
   newMVar (x,deCompression,[])
 
 -- |Добавить в список время работы одного из алгоритмов в цепочке
@@ -259,18 +262,19 @@ uiDeCompressionTime times t =  do
 -- или использовать wall clock time, если хотя бы одно из возвращённых времён == -1
 uiFinishDeCompression times = do
   (timeStarted, deCompression, results) <- takeMVar times
-  timeFinished <- getCPUTime
+  timeFinished <- myGetCPUTime
   let deCompressionTimes  =  map snd3 results
   refArchiveProcessingTime +=  {-if (all (>=0) deCompressionTimes)      -- Commented out until all compression methods (lzma, grzip) will include timing for all threads
                                  then sum deCompressionTimes
-                                 else-} i(timeFinished - timeStarted) / 1e12
-  let total_times = if (all (>=0) deCompressionTimes)
-                                 then " ("++showFFloat (Just 3) (sum deCompressionTimes) ""++" seconds)"
-                                 else ""
+                                 else-} timeFinished - timeStarted
   when (results>[]) $ do
-    debugLog0$ "  Solid block "++deCompression++" results"++total_times
+    debugLog0$ "  Solid block "++deCompression++" results ("++showFFloat (Just 3) (timeFinished - timeStarted) ""++" seconds)"
     for results $ \(method,time,size) -> do
         debugLog0$ "    "++method++": "++show3 size++" bytes in "++showFFloat (Just 3) time ""++" seconds"
+
+-- |Time CPU spent in the program
+foreign import ccall unsafe  "Common.h  GetCPUTime"
+   myGetCPUTime :: IO Double
 
 -- |Обработка очередного архива завершена -> напечатать статистику и вернуть её вызывающей процедуре
 uiDoneArchive = do
@@ -306,9 +310,9 @@ uiDoneArchive = do
   -- Информация о времени работы и скорости упаковки/распаковки
   secs <- val refArchiveProcessingTime   -- время, затраченное непосредственно на упаковку/распаковку
   real_secs <- return_real_secs          -- полное время выполнения команды над текущим архивом
-  condPrintLine                          "t" $ msgStat cmd ++ "time: "++(secs>0 &&& "cpu " ++ showTime secs ++ ", ")
+  condPrintLine                          "t" $ msgStat cmd ++ "time: cpu " ++ showTime secs ++ "/"
   condPrintLine                          "t" $ "real " ++ showTime real_secs
-  when (real_secs>=0.01) $ condPrintLine "t" $ ". Speed " ++ showSpeed (bytes-fake_bytes) real_secs
+  when (real_secs>=0.01) $ condPrintLine "t" $ " = " ++ showFFloat (Just 0) (secs/real_secs*100) "%. Speed " ++ showSpeed (bytes-fake_bytes) real_secs
 
   condPrintLineNeedSeparator "rdt" "\n"
   myFlushStdout
@@ -425,10 +429,11 @@ uiReadData num bytes = do
       --print (rnum_bytes0, bytes, r_bytes0, r_bytes-r_bytes0)
       -- Возвращаем количество байт на входе первого алгоритма относительно предыдущего значения этой величины
       return (r_bytes-r_bytes0)
-    uiUpdateProgressIndicator (toRational unpBytes*9/10)
-  when (num==1) $ do  -- 90% на последний алгоритм в цепочке и 10% на первый (чтобы сгладить вывод для external compression and so on)
-    uiUpdateProgressIndicator (toRational bytes/10)
+    uiUpdateProgressIndicator (toRational unpBytes*9/10)   -- 90% на последний алгоритм в цепочке...
+  when (num==1) $ do
+    uiUpdateProgressIndicator (toRational bytes/10)        -- ... и 10% на первый (чтобы сгладить вывод для external compression and so on)
     uiUnpackedBytes bytes
+    guiUpdateProgressIndicator
 
  where
   -- Рекурсивно пересчитать bytes байт на входе алгоритма num в количество байт на входе алгоритма 1

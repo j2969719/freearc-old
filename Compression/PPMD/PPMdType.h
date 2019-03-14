@@ -67,7 +67,6 @@ public:
     }
     void  fill() {                             // it must fill Buf[]
       if (Error < 0)                      { Count=0; return; }
-      if (p>Buf && compress_all_at_once)  { Count=0; return; }         // read only once if compress_all_at_once
       Count = callback ("read", Buf, BufSize, auxdata);
       p = Buf;
       if (Count < 0) { Error=Count; Count=0; }

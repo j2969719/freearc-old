@@ -18,19 +18,15 @@ public:
 #ifndef FREEARC_DECOMPRESS_ONLY
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void)               {return 3*BlockSize+BlockSize/4+1024;}
+  virtual void    SetCompressionMem        (MemSize mem)        {if (mem>0)   BlockSize = mymax(mem/13*4,64*kb);}
+  virtual void    SetMinDecompressionMem   (MemSize mem)        {if (mem>0)   BlockSize = mymax(mem/ 9*4,64*kb);}
+#endif
+  virtual MemSize GetDecompressionMem      (void)               {return 2*BlockSize+BlockSize/4+1024;}
+
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DISPACK)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return 3*BlockSize+BlockSize/4+1024;}
-  virtual MemSize GetDictionary         (void)         {return 0;}
-  virtual MemSize GetBlockSize          (void)         {return 0;}
-  virtual void    SetCompressionMem     (MemSize mem)  {if (mem>0)   BlockSize = mymax(mem/13*4,64*kb);}
-  virtual void    SetDecompressionMem   (MemSize mem)  {if (mem>0)   BlockSize = mymax(mem/ 9*4,64*kb);}
-  virtual void    SetDictionary         (MemSize dict) {}
-  virtual void    SetBlockSize          (MemSize bs)   {}
-#endif
-  virtual MemSize GetDecompressionMem   (void)         {return 2*BlockSize+BlockSize/4+1024;}
 };
 
 // Разборщик строки метода сжатия DISPACK

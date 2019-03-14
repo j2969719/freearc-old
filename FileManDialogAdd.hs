@@ -69,16 +69,19 @@ addDialog fm' exec winoptions cmd files mode = do
 ------ Главная закладка ----------------------------------------------------------------------
     vbox <- newPage "0182 Main";  let pack x = boxPackStart vbox x PackNatural 1
     ------ Архив и каталог в нём ----------------------------------------------------------------------
-    (hbox, _, arcname) <- fmOutputArchiveFileBox fm' dialog;  pack hbox  `on_`  (cmd `notElem` words "ch cvt")
-    (hbox,    arcpath) <- fmLabeledEntryWithHistory fm' "arcpath" "0141 Base directory inside archive:";  pack hbox  `on_`  cmd=="a"
-    ep                 <- fmExcludePaths;  pack (widget ep)          `on_`  cmd=="a"
-    updateMode         <- fmUpdateMode;    pack (widget updateMode)  `on_`  cmd=="a"
+    arctype                  <- fmArchiveType fm';                  pack (widget arctype)     `on_`  (cmd `notElem` words "ch cvt")
+    (arcnameBox, _, arcname) <- fmOutputArchiveFileBox fm' dialog;  pack arcnameBox           `on_`  (cmd `notElem` words "ch cvt")
+    (outdirBox,  _, outdir)  <- fmOutputArchiveDirBox  fm' dialog;  pack outdirBox            `on_`  (cmd `notElem` words "ch cvt")
+    (hbox,          arcpath) <- fmLabeledEntryWithHistory fm' "arcpath" "0141 Base directory inside archive:";  pack hbox  `on_`  cmd=="a"
+    ep                       <- fmExcludePaths;                     pack (widget ep)          `on_`  cmd=="a"
+    updateMode               <- fmUpdateMode;                       pack (widget updateMode)  `on_`  cmd=="a"
     ------ Compression/Encryption/Protection ----------------------------------------------------------------------
-    (hbox, compression, compressionMethod) <- fmCheckedEntryWithHistory fm' "compression" "0183 Compression:";  pack hbox
-    (hbox, encryption,  encryptionMethod)  <- fmCheckedEntryWithHistory fm' "encryption"  "0184 Encryption:" ;  pack hbox
-    (hbox, protection,  protectionMethod)  <- fmCheckedEntryWithHistory fm' "protection"  "0185 Protection:" ;  pack hbox
-    (hbox, comment,     commentFile)       <- fmCheckedEntryWithHistory fm' "comment"     "0186 Comment:"    ;  pack hbox
-    (hbox, makeSFX,     sfxFile)           <- fmCheckedEntryWithHistory fm' "sfx"         "0227 Make EXE:"   ;  pack hbox
+    (compressionBox, compression, compressionMethod) <- fmCheckedEntryWithHistoryAndChooser fm' ""           (checkBox "0532 Compression:") (const$ return True) (return) (compressionMethodDialog fm');  pack compressionBox
+    (encryptionBox,  encryption,  encryptionMethod)  <- fmCheckedEntryWithHistoryAndChooser fm' "encryption" (checkBox "0533 Encryption:")  (const$ return True) (return) (encryptionMethodDialog  fm');  pack encryptionBox
+    (protectionBox,  protection,  protectionMethod)  <- fmCheckedEntryWithHistory fm' "protection"  "0185 Protection:"      ;  pack protectionBox
+    (commentBox,     comment,     commentFile)       <- fmCheckedEntryWithHistory fm' "comment"     "0186 Comment:"         ;  pack commentBox
+    (makeSFXBox,     makeSFX,     sfxFile)           <- fmCheckedEntryWithHistory fm' ""            "0227 Make EXE:"        ;  pack makeSFXBox
+    (volumesBox,     volumes,     volumesSize)       <- fmCheckedEntryWithHistory fm' "volumes"     "0486 Split to volumes:";  pack volumesBox
     -- The rest
     testAfter   <- checkBox "0128 Test archive after operation";        pack (widget testAfter)
     deleteFiles <- checkBox "0122 Delete files successfully archived";  pack (widget deleteFiles)  `on_`  cmd=="a"
@@ -96,7 +99,7 @@ addDialog fm' exec winoptions cmd files mode = do
                                 , "0206 Latest file time" ];  pack (widget archiveTimeMode)
 
     create <- checkBox "0207 Delete previous archive contents";  pack (widget create)  `on_`  cmd/="ch"
-    (hbox, sort, sortOrder)  <- fmCheckedEntryWithHistory fm' "sort" "0208 Order of files in archive:";  pack hbox  `on_`  (cmd `elem` words "a cvt")
+    (sortBox, sort, sortOrder)  <- fmCheckedEntryWithHistory fm' "sort" "0208 Order of files in archive:";  pack sortBox  `on_`  (cmd `elem` words "a cvt")
     recompressMode <- comboBox "0209 Recompression mode:"
                                [ "0210 Quickly append new files"
                                , "0211 Smart recompression of solid blocks (default)"
@@ -109,6 +112,7 @@ addDialog fm' exec winoptions cmd files mode = do
                                , "0218 Full: clear \"Archive\" attribute of files succesfully archived"
                                , "0219 Differential: select only files with \"Archive\" attribute set"
                                , "0220 Incremental: select by \"Archive\" attribute & clear it after compression" ];  pack (widget backupMode)  `on_`  (cmd `notElem` words "ch cvt")
+    globalQueueing <- fmCheckButtonWithHistory  fm' "GlobalQueueing" False global_queueing_msg;  pack (widget globalQueueing)
     shutdown <- checkBox shutdown_msg;  pack (widget shutdown)
 
 
@@ -119,14 +123,6 @@ addDialog fm' exec winoptions cmd files mode = do
     (hbox, larger,  largerSize)   <- fmCheckedEntryWithHistory fm' "larger"  "0224 Include only files larger than:";  pack hbox
     (hbox, smaller, smallerSize)  <- fmCheckedEntryWithHistory fm' "smaller" "0225 Include only files smaller than:";  pack hbox
     --times: -tn/to/ta/tb
-
------- Закладка сжатия ------------------------------------------------------------------------
-    (onCompressionChanged, saveCompressionHistories)  <-  compressionPage fm' =<< newPage "0106 Compression"
-    onCompressionChanged (compressionMethod =:)
-
------- Закладка шифрования ------------------------------------------------------------------------
-    (onEncryptionChanged, encryptionOnOk)  <-  encryptionPage fm' dialog okButton =<< newPage "0119 Encryption"
-    onEncryptionChanged (encryptionMethod =:)
 
 ------ Закладка архивного комментария --------------------------------------------------------------------------
     vbox <- newPage "0199 Comment";  let pack x = boxPackStart vbox x PackGrow 1
@@ -139,33 +135,57 @@ addDialog fm' exec winoptions cmd files mode = do
     protection      =: mode==ProtectionMode
     comment         =: mode==CommentMode
     makeSFX         =: mode==MakeSFXMode
+    volumes         =: False
     ep              =: 2
     updateMode      =: 0
     archiveTimeMode =: 0
     recompressMode  =: 1
     backupMode      =: 0
 
-    -- Имя создаваемого по умолчанию архива зависит от имён архивируемых файлов/сливаемых архивов
+    -- Имя по умолчанию создаваемого архива (выходного каталога) зависит от имён архивируемых файлов/сливаемых архивов
     arcnameBase <- case files of
       [file] -> do let realname = dropTrailingPathSeparator file
                    isFile <- fileExist realname
                    return$ if isFile then dropExtension realname  -- один файл    - избавимся от расширения
                                      else realname                -- один каталог - избавимся от слеша в конце
       _      -> return$ takeFileName (fm_curdir fm)               -- много файлов - используем имя текущего каталога
-    arcname =: if isFM_Archive fm then fm_arcname fm
-                                  else (arcnameBase ||| "archive") ++ aDEFAULT_ARC_EXTENSION
+    outdir  =: fm_curdir fm
     arcpath =: ""
 
+    -- Показать те или иные контролы в зависимости от опции separate и типа создаваемого архива
+    let showHideOptions = do
+          let showOn flag  =  (if flag then widgetShow else widgetHide)
+          separate' <- val separate
+          arcnameBox.$ showOn (not separate')
+          outdirBox .$ showOn separate'
+
+          arcext <- fmap (archiveTypes!!) (val arctype)
+          arcname =: if isFM_Archive fm then fm_arcname fm
+                                        else (arcnameBase ||| "archive") ++ "." ++ arcext
+          mapM_ (showOn$ arcext == aFreeArcInternalExt)  [protectionBox, commentBox, widget deleteFiles, widget lock
+                                                         ,widget archiveTimeMode, widget recompressMode, sortBox, widget recompressMode, widget backupMode]
+          mapM_ (showOn$ arcext /= aZipExt)              [makeSFXBox]
+          mapM_ (showOn$ arcext /= aFreeArcInternalExt)  [volumesBox]
+          let plusArctype  =  if arcext == aFreeArcInternalExt   then id   else (++"."++arcext)
+          changeTag compressionMethod (plusArctype "compression")
+          changeTag sfxFile           (plusArctype "sfx")
+    --
+    setOnUpdate arctype  showHideOptions
+    setOnUpdate separate showHideOptions
 
 ------ Чтение значений полей и сохранение их для истории ------------------------------------------
-    widgetShowAll dialog
+    widgetShowAll dialog; showHideOptions
     --current_time  <- getClockTime;  debugMsg (show (1000*(diffTimes current_time start_time))++" ms")
     choice <- fmDialogRun fm' dialog "AddDialog"
     when (choice `elem` [ResponseOk, aResponseDetach]) $ do
       -- Запустить команду в отдельной копии FreeArc?
       let detach = (choice == aResponseDetach)
       -- Main settings
-      arcname' <- val arcname;  saveHistory arcname   `on_`  (cmd `notElem` words "ch cvt")
+      saveHistory arctype
+      arcext   <- fmap (archiveTypes!!) (val arctype)   -- default archive extension
+      separate'<- val separate
+      arcname' <- val arcname;  saveHistory arcname   `on_`  (not separate' && (cmd `notElem` words "ch cvt"))
+      outdir'  <- val outdir;   saveHistory outdir    `on_`  (    separate' && (cmd `notElem` words "ch cvt"))
       arcpath' <- val arcpath;  saveHistory arcpath   `on_`  cmd=="a"
       -- Если "имя архива" на самом деле указывает каталог внутри архива, то не ударим в грязь лицом :)
       x <- splitArcPath fm' arcname'
@@ -189,8 +209,9 @@ addDialog fm' exec winoptions cmd files mode = do
       ; commentText'       <- val commentText
       sfxEnabled  <- val makeSFX
       ; sfxFile'  <- val sfxFile;   saveHistory sfxFile  `on_` sfxEnabled
+      volumesEnabled     <- val volumes
+      ; volumesSize'       <- val volumesSize;        saveHistory volumesSize  `on_` volumesEnabled
       -- Archive settings
-      separate'  <- val separate
       agEnabled  <- val ag
       ; agTemplate' <- val agTemplate;      saveHistory agTemplate   `on_` agEnabled
       archiveTimeMode' <- val archiveTimeMode
@@ -200,6 +221,7 @@ addDialog fm' exec winoptions cmd files mode = do
       ; sortOrder' <- val sortOrder;        saveHistory sortOrder    `on_` sortEnabled
       recompressMode' <- val recompressMode
       backupMode'     <- val backupMode
+      globalQueueing' <- val globalQueueing -- don't save to history - this selection is for one command only
       shutdown'       <- val shutdown
       -- File selection settings
       includeEnabled  <- val include
@@ -210,9 +232,10 @@ addDialog fm' exec winoptions cmd files mode = do
       ; largerSize'   <- val largerSize;    saveHistory largerSize   `on_` largerEnabled
       smallerEnabled  <- val smaller
       ; smallerSize'  <- val smallerSize;   saveHistory smallerSize  `on_` smallerEnabled
-      -- Compression/encryption/decryption settings
-      saveCompressionHistories "partial"
-      encryptionOptions <- encryptionOnOk "partial" (encryptionEnabled &&& encryptionMethod')
+      -- Encryption and decryption options
+      pwd' <- val encryptionPassword
+      encryptionOptions <- return$ (words encryptionMethod' `contains` "-p?") &&& pwd' &&& ["-p"++pwd']
+      decryptionOptions <- fmGetDecryptionOptions fm'
 {-
       -- Запомним настройки в истории
       fmAddHistory fm' "acmd"$ joinWith "," [ "simpleMethod="  ++simpleMethod'
@@ -224,7 +247,7 @@ addDialog fm' exec winoptions cmd files mode = do
       -- Отобразим изменение имени архива
       when sfxEnabled $ do
         when (isFM_Archive fm) $ do
-        let newname' = changeSfxExt True (clear sfxFile') arcname'
+        let newname' = changeSfxExt True (clear sfxFile') arcext arcname'
         when (newname'/=arcname') $ do
           fmChangeArcname fm' newname'
 
@@ -239,13 +262,16 @@ addDialog fm' exec winoptions cmd files mode = do
                   _   -> ["0243 Adding to %1",
                           "0244 FILES SUCCESFULLY ADDED TO %1",
                           "0245 %2 WARNINGS WHILE ADDING TO %1"]
-      let options =
+      let use_winrar = (arcext==aRarExt)
+          options =
             -- Main page settings
+            [not use_winrar     &&& ("-t"++arcext)]++
             (compressionEnabled &&&  cvt "-m"   compressionMethod')++
-            (encryptionEnabled  &&&  cvt "-ae=" encryptionMethod')++encryptionOptions++
+            (encryptionEnabled  &&& (cvt "-ae=" encryptionMethod' ++ encryptionOptions))  ++decryptionOptions++
             (protectionEnabled  &&&  cvt "-rr"  protectionMethod')++
             (commentEnabled     &&&  [((clear commentFile' !~ "-z*" &&& "--archive-comment=")++) (clear commentFile' ||| commentText')])++
             (sfxEnabled         &&&  cvt "-sfx" sfxFile')++
+            (volumesEnabled     &&&  cvt "-v" volumesSize')++
             (testAfter'         &&&  ["-t"])++
             (deleteFiles'       &&&  ["-d"])++
             (null files         &&&  ["-r"])++
@@ -260,7 +286,8 @@ addDialog fm' exec winoptions cmd files mode = do
             (backupMode'      `select`  ",-ac,-ao,-ac -ao")++
             (recompressMode'  `select`  "--append,,--recompress,--nodata,--crconly,--nodir")++
             ((cmd `notElem` words "a cvt") &&& (compressionEnabled || encryptionEnabled)  &&&  ["--recompress"])++
-            (shutdown'            &&&  ["--shutdown"])++
+            (globalQueueing'  &&&  ["--queue"])++
+            (shutdown'        &&&  ["--shutdown"])++
             -- File selection settings
             (includeEnabled   &&&  cvt1 "-n" includeMasks')++
             (excludeEnabled   &&&  cvt1 "-x" excludeMasks')++
@@ -278,9 +305,9 @@ addDialog fm' exec winoptions cmd files mode = do
         do all2arc <- all2arc_path
            Files.runCommand (unparseCommand$ [all2arc] ++ options ++ ["--"] ++ files) (fm_curdir fm) False
         else do
-      exec detach doNothing$
+      exec detach use_winrar doNothing$
              if cmd=="ch" then (files ||| ["*"]) .$map (\archive -> command (fm_curdir fm </> archive) [])
-        else if separate' then files.$map (\file -> command (fm_curdir fm </> dropTrailingPathSeparator file++aDEFAULT_ARC_EXTENSION) [file])
+        else if separate' then files.$map (\file -> command (outdir' </> dropTrailingPathSeparator file++"."++arcext) [file])
                           else [command arcname' files]
 
 
@@ -295,6 +322,16 @@ fmOutputArchiveFileBox fm' dialog =
      (label "0131 Output archive:")
             "0132 Select output archive"
             aARCFILE_FILTER
+            (const$ return True)
+            (fmCanonicalizeDiskPath fm')
+
+-- |Поле выбора выходного каталога при создании нескольких архивов
+fmOutputArchiveDirBox fm' dialog =
+  fmFileBox fm' dialog
+            "dir" FileChooserActionSelectFolder
+     (label "0004 Output directory:")
+            "0021 Select output directory"
+            aANYFILE_FILTER
             (const$ return True)
             (fmCanonicalizeDiskPath fm')
 
@@ -314,4 +351,23 @@ fmUpdateMode =
            , "0196 Add and update files"
            , "0197 Fresh existing files"
            , "0198 Synchronize archive with disk contents" ]
+
+-- |Поле выбора типа архива.
+fmArchiveType fm' =
+  fmComboBoxWithHistory fm' "arctype" 0 "0495 Archive type:"
+#ifndef HAMSTER
+           [ "0496 arc (default)"
+           , "0999 zip"
+--         , "0999 rar"
+#else
+           [ "0999 zip (default)"
+#endif
+           , "0999 7z"]
+
+-- Тип архива (-t) и одновременно расширение по умолчанию архивных файлов. В том же порядке, что в комбобоксе выше.
+#ifndef HAMSTER
+archiveTypes  =  words "arc zip 7z"  -- add rar before 7z
+#else
+archiveTypes  =  words "zip 7z"
+#endif
 

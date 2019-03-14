@@ -23,12 +23,13 @@ public:
 
     // Set queue size - the class relies on assumption that client code
     // will never try to put excessive elements to the queue
-    void SetSize (int max_elements)
+    int SetSize (int max_elements)
     {
         Close();
         head = tail = 0;
         size = max_elements+1;   // +1 simplifies distinguishing between full and empty queues
-        a = (T*) malloc_msg(size * sizeof(T));
+        a = (T*) malloc(size * sizeof(T));
+        return  (a==NULL? FREEARC_ERRCODE_NOT_ENOUGH_MEMORY : 0);
     }
 
     // Add object to the queue
@@ -64,163 +65,329 @@ public:
 };
 
 
+
+// *************************************************************************************************
+// *** Background thread processing data ***********************************************************
+// *************************************************************************************************
+
+// General idea of background thread
+struct BackgroundThread
+{
+    Thread BackgroundThreadPtr;
+    void start();
+    virtual void run() = 0;
+    virtual ~BackgroundThread() {};
+};
+
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE RunBackgroundThread (void *param)  {((BackgroundThread*) param) -> run(); return 0;}
+
+inline void BackgroundThread::start()
+{
+    BackgroundThreadPtr.Create(RunBackgroundThread, this);
+}
+
+
+// Background thread performing process() on enqueued jobs
+template <class Job>
+struct ProcessingThread : BackgroundThread
+{
+    SyncQueue<Job> WorkerQueue, FinishedQueue;
+
+    void SetMaxJobs (int max_jobs)
+    {
+        WorkerQueue.SetSize(max_jobs+2);
+        FinishedQueue.SetSize(max_jobs+2);
+    }
+
+    virtual void run()
+    {
+        SetCompressionThreadPriority();                 // ѕонизить приоритет треда (рас)паковки чтоб не завешивать машину
+        for(;;)
+        {
+            Job job = WorkerQueue.Get();
+            job.process();
+            FinishedQueue.Put(job);
+        }
+    }
+
+    void Put (Job job)   {WorkerQueue.Put(job);}             // Enqueue job for processing
+    Job  Get ()          {return FinishedQueue.Get();}       // Get processed job
+};
+
+
+
+// *************************************************************************************************
+// *** Multiple background threads performing process() on enqueued jobs ***************************
+// *************************************************************************************************
+
+template <class Job>
+struct MultipleProcessingThreads
+{
+    struct Task         {Job job;  Event *event;};
+
+    int                 NumThreads, MaxJobs;
+    Thread*             WorkerThreadsPtr;
+    SyncQueue<Task>     WorkerQueue, FinishedQueue;
+    SyncQueue<Event*>   FreeEvents;
+    Event               WorkerThreadFinished;
+
+    MultipleProcessingThreads()  {NumThreads=MaxJobs=0;}
+
+    // Enqueue job for processing
+    void Put (Job job)
+    {
+        Event *event = FreeEvents.Get();
+        Task task = {job,event};
+        WorkerQueue.Put(task);
+        FinishedQueue.Put(task);
+    }
+
+    // Get processed job
+    Job Get()
+    {
+        Task task = FinishedQueue.Get();
+        task.event->Wait();
+        FreeEvents.Put(task.event);
+        return task.job;
+    }
+
+    // Thread performing jobs from queue
+    void WorkerThread()
+    {
+        SetCompressionThreadPriority();                 // ѕонизить приоритет треда (рас)паковки чтоб не завешивать машину
+        for(;;)
+        {
+            Task task = WorkerQueue.Get();
+            if (task.event==NULL) break;
+            task.job.process();
+            task.event->Signal();
+        }
+        WorkerThreadFinished.Signal();
+    }
+
+    // Alloc resources and start b/g threads
+    int start();
+
+    // Finish b/g threads and free resources
+    void finish()
+    {
+        for (int i=0; i<NumThreads; i++) {
+            Job job = {0};
+            Task task = {job, NULL};
+            WorkerQueue.Put(task);
+            WorkerThreadFinished.Wait();
+        }
+        delete[] WorkerThreadsPtr;
+        for (int i=0; i<MaxJobs; i++)
+            delete FreeEvents.Get();
+    }
+};
+
+// Main function of Worker thread
+template <class Job>  static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE
+MultipleProcessingThreads_RunWorkerThread (void *param)  {((MultipleProcessingThreads<Job>*)param) -> WorkerThread(); return 0;}
+
+// Alloc resources and start b/g threads
+template <class Job>
+int MultipleProcessingThreads<Job>::start()
+{
+    if (MaxJobs<=0 || NumThreads<=0)
+        return -1;  // Errcode
+
+    WorkerQueue  .SetSize (MaxJobs+1);   // +1 for a NULL job signalling thread to finish
+    FinishedQueue.SetSize (MaxJobs);
+    FreeEvents   .SetSize (MaxJobs);
+    for (int i=0; i<MaxJobs; i++)
+        FreeEvents.Put (new Event);
+
+    // Create worker threads
+    WorkerThreadsPtr = new Thread[NumThreads];
+    for (int i=0; i<NumThreads; i++)
+        WorkerThreadsPtr[i].Create (MultipleProcessingThreads_RunWorkerThread<Job>, this);
+
+    return 0;  // All OK
+}
+
+
+
+#ifndef MULTI_THREADING_BASICS
 // *************************************************************************************************
 // *** Multithreading block-wise compressor or decompressor ****************************************
 // *************************************************************************************************
 
-// Basic task structure
-struct BaseTask
+// Base (de)compression job
+struct CompressionJob
 {
-    CALLBACK_FUNC*   callback;        // I/O callback
-    void*            auxdata;         // and its additional parameter
-    volatile int     errcode;         // Error code to return or 0
-    int              NumThreads;      // Total amount of threads, including extra threads for I/O buffering
-    Semaphore        LimitThreads;    // Limits number of threads doing compression
-    Event            Finished;        // Signals that all compressed data was written
-
-    // Update operation errcode
-    virtual int SetErrCode (int e)  {if (e<0 && errcode==0)  errcode = e;  return e;}
-
-    virtual ~BaseTask() {};
+    char* InBuf;                                          // Buffer pointing to input (original) data
+    char* OutBuf;                                         // Buffer pointing to output (processed) data
+    int   InSize;                                         // Amount of data in inbuf
+    int   OutSize;                                        // Amount of data in outbuf
+    Event ReadyToWrite;                                   // Signals that data were processed and need to be written
+    int   result;                                         // Return code of last performed operation
 };
 
-// One worker thread
-struct WorkerThread
+// Multithreaded compressor performing multiple jobs simultaneously
+template <class Job=CompressionJob, typename Worker=void*>  struct MTCompressor
 {
-    BaseTask *task;                   // Task to which this job belongs
-    Event  StartOperation;            // Signals that data are ready to be processed
-    Event  OperationFinished;         // Signals that data were processed and need to be flushed
-    Event  Finished;                  // Signals that all compressed data was written
-    char*  InBuf;                     // Buffer pointing to input (original) data
-    char*  OutBuf;                    // Buffer pointing to output (processed) data
-    volatile int InSize;              // Amount of data in inbuf
-    volatile int OutSize;             // Amount of data in outbuf
+    int              NumThreads;                          // Number of worker threads
+    int              NumBuffers;                          // Number of I/O buffers and jobs
+    bool             ImmediatelyFreeInbuf;
 
-    virtual int  init()        {return 0;}    // Initialize job
-    virtual int  process()     {return 0;}    // Perform one operation
-    virtual int  after_write() {return 0;}    // Cleanup after processed data was written
-    virtual int  done()        {return 0;}    // Final cleanup
-    virtual void run()                        // Thread function performing process() on each input block
-    {
-        for(;;)
-        {
-            StartOperation.Wait();                    // wait for data to process
-            ////int InSize = job->InSize;  - the same insize should be inside process()
-            if (InSize <= 0)  break;                  // signal to finish thread execution and release resources
-            task->LimitThreads.Wait();                // wait for compression slot
-            task->SetErrCode (OutSize = process());   // process data and save errcode/outsize
-            task->LimitThreads.Release();             // release compression slot
-            OperationFinished.Signal();               // signal to Writer thread
-        }
-        done();
-        Finished.Signal();
+    Job*             Jobs;
+    Thread*          WorkerThreadsPtr;
+    Thread           WriterThreadPtr;
+
+    SyncQueue<Job*>  FreeJobs;                            // Queue of free jobs
+    SyncQueue<Job*>  WorkerJobs;                          // Queue of (de)compression jobs
+    SyncQueue<Job*>  WriterJobs;                          // Queue of jobs for Writer thread, ordered by input chunks
+
+    char             **buf0, **bufs;                      // Full list of I/O buffers
+    SyncQueue<char*> InputBuffers;                        // Queue of free input buffers
+    SyncQueue<char*> OutputBuffers;                       // Queue of free output buffers
+
+    volatile int ErrCode;                                 // Error code to return or 0
+    virtual  int SetErrCode (int e)  {if (e<0 && ErrCode==0)  ErrCode=e;  return e;}
+
+    virtual int  AllocateBuffers (int BufferSize);        // Allocate I/O buffers of given size
+    virtual int  Init();                                  // Creates threads and jobs
+    virtual int  Run();                                   // Main function performing all work
+    virtual void Process (Job &job, Worker &worker) = 0;  // Perform one (de)compression operation
+    virtual void Write   (Job &job)                 = 0;  // Write output buffer and perform post-processing if required
+
+    virtual int  ReaderThread()                     = 0;  // User-defined main thread reading input data
+    virtual void WorkerThread();                          // Thread performing jobs from queue
+    virtual void WriterThread();                          // Thread writing output data
+    virtual int  WorkerInit (Worker &worker) {return 0;}  // Init WorkerThread local data, returning non-zero error code on fail
+    virtual void WorkerDone (Worker &worker) {}           // Release WorkerThread local data
+
+    MTCompressor (int _NumThreads = -1,  int _NumExtraBuffers = -1)
+    {                                                                             // default values
+        NumThreads  =                 (_NumThreads>0?        _NumThreads       :  GetCompressionThreads());
+        NumBuffers  =  NumThreads  +  (_NumExtraBuffers>=0?  _NumExtraBuffers  :  2);
+        ImmediatelyFreeInbuf = true;  ErrCode = 0;  Jobs = NULL;  WorkerThreadsPtr = NULL;  bufs = buf0 = NULL;
     }
-    virtual ~WorkerThread() {};
+    virtual ~MTCompressor() {}
 };
 
-template <class Job>
-struct MTCompressor : BaseTask
+// Main function of Worker/Writer thread
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE RunWorkerThread (void *param)  {((MTCompressor<CompressionJob>*) param) -> WorkerThread(); return 0;}
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE RunWriterThread (void *param)  {((MTCompressor<CompressionJob>*) param) -> WriterThread(); return 0;}
+
+// Allocate I/O buffers of given size
+template <class Job, typename Worker>  int MTCompressor<Job,Worker>::AllocateBuffers (int BufferSize)
 {
-    Job*             jobs;            // Full list of jobs created
-    SyncQueue<Job*>  WriterJobs;      // Queue of jobs for Writer thread, ordered by input chunks
-    SyncQueue<Job*>  FreeJobs;        // Queue of free jobs
+    SetErrCode (InputBuffers. SetSize(NumBuffers));
+    SetErrCode (OutputBuffers.SetSize(NumBuffers));
+    if (ErrCode)  return ErrCode;
 
-    virtual int  run();               // Main function performing m/t work
-    virtual int  main_cycle() = 0;    // Main user cycle
-    virtual void WriterThread();      // Thread that saves compressed data to disk
-    virtual void WaitJobsFinished();  // Wait until all data are written and compression resources are freed
-    virtual void CreateJobs();        // Create all required threads
-    virtual ~MTCompressor() { WriterJobs.Close(); FreeJobs.Close(); };
-};
+    bufs = buf0 = new char* [NumBuffers*2];
+    if (bufs==NULL)   return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
 
-static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE RunWorkerThread (void *param)  {((WorkerThread*)               param) -> run();          return 0;}
-static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE RunWriterThread (void *param)  {((MTCompressor<WorkerThread>*) param) -> WriterThread(); return 0;}
-
-template <class Job>
-int MTCompressor<Job>::run()
-{
-    errcode = 0;
-    CreateJobs();
-    if (errcode == 0)
+    // Allocate I/O buffers
+    for (int i=0; i < NumBuffers; i++)
     {
-        Thread t;  t.Create(RunWriterThread, this);
-        // Perform (de)compression cycle
-        SetErrCode(main_cycle());
-        // Wait for Writer thread to finish
-        WriterJobs.Put(NULL);
-        Finished.Wait();
+        char *buf = (char*) BigAlloc(BufferSize);
+        if (buf==NULL)   return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
+        InputBuffers.Put(buf);   *bufs++ = buf;
+
+        buf = (char*) BigAlloc(BufferSize);
+        if (buf==NULL)   return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
+        OutputBuffers.Put(buf);  *bufs++ = buf;
     }
-    WaitJobsFinished();
-    LimitThreads.Close();
-    delete [] jobs;
-    return errcode;  // return error code or 0
+
+    return 0;
 }
 
-template <class Job>
-void MTCompressor<Job>::WriterThread()
+// Main function performing all work
+template <class Job, typename Worker>  int MTCompressor<Job,Worker>::Init()
+{
+    // Extend queues to hold all the jobs (including NULL jobs at EOF)
+    SetErrCode (FreeJobs.  SetSize(NumBuffers*2));
+    SetErrCode (WorkerJobs.SetSize(NumBuffers*2));
+    SetErrCode (WriterJobs.SetSize(NumBuffers*2));
+
+    // Create job objects and put them to the FreeJobs queue
+    Jobs = new Job[NumBuffers];
+    for (int i=0; i < NumBuffers; i++)
+        FreeJobs.Put (&Jobs[i]);
+
+    // Create compression threads
+    WorkerThreadsPtr = new Thread[NumThreads];
+    for (int i=0; i < NumThreads; i++)
+        WorkerThreadsPtr[i].Create (RunWorkerThread, this);
+
+    // Create writer thread
+    WriterThreadPtr.Create (RunWriterThread, this);
+
+    return ErrCode;
+}
+
+// Main function performing all work
+template <class Job, typename Worker>  int MTCompressor<Job,Worker>::Run()
+{
+    if (SetErrCode(Init()))  return ErrCode;
+
+
+    // *****************************************************************************************************
+    SetErrCode (ReaderThread());   // Main cycle: reading data and sending compression jobs to other threads
+    // *****************************************************************************************************
+
+
+    // Send EOF message to all other threads
+    for (int i=0; i < NumThreads; i++)   WorkerJobs.Put(NULL);
+    WriterJobs.Put(NULL);
+
+    // Wait for all threads to finish
+    for (int i=0; i < NumThreads; i++)   WorkerThreadsPtr[i].Wait();
+    WriterThreadPtr.Wait();
+
+    // Free memory
+    while (bufs > buf0)   BigFree(*--bufs);
+    delete [] buf0;
+    delete [] WorkerThreadsPtr;
+    delete [] Jobs;
+
+    // Return error code or 0
+    return ErrCode;
+}
+
+// Thread performing jobs from queue
+template <class Job, typename Worker>  void MTCompressor<Job,Worker>::WorkerThread()
+{
+    SetCompressionThreadPriority();                 // ѕонизить приоритет треда (рас)паковки чтоб не завешивать машину
+    Worker local;  SetErrCode (WorkerInit (local));
+    for(;;)
+    {
+        Job *job = WorkerJobs.Get();                // Acquire next (de)compression job
+        if (job == NULL  ||  ErrCode)       break;  // Quit on EOF or error in other thread
+        job->OutBuf = OutputBuffers.Get();          // Acquire output buffer
+        Process (*job, local);                      // *** COMPRESS OR DECOMPRESS THE DATA ***
+        SetErrCode (job->result);                   // Set errcode if we have an error
+        if (ImmediatelyFreeInbuf)
+            InputBuffers.Put (job->InBuf);          // Input buffer is no more required for this job
+        job->ReadyToWrite.Signal();                 // Signal to Writer thread
+    }
+    WorkerDone (local);
+}
+
+// Thread writing output data
+template <class Job, typename Worker>  void MTCompressor<Job,Worker>::WriterThread()
 {
     for(;;)
     {
-        // Acquire next writer job
-        Job *job = WriterJobs.Get();
-        // Break on EOF/error
-        if (job==NULL  ||  job->InSize <= 0)
-            break;
-        // Wait until (de)compression will be finished
-        job->OperationFinished.Wait();
-        // «аписать сжатый блок и выйти, если при записи произошла ошибка/больше данных не нужно
-        if (SetErrCode(callback("write", job->OutBuf, job->OutSize, auxdata)) < 0)
-            break;
-        // After-write cleanup
-        if (SetErrCode(job->after_write()) < 0)
-            break;
-        // Make thread available for next compression job
-        FreeJobs.Put(job);
+        Job *job = WriterJobs.Get();                // Acquire next writer job
+        if (job == NULL)                    break;  // Break on EOF
+        job->ReadyToWrite.Wait();                   // Wait until (de)compression will be finished
+        Write (*job);                               // *** WRITE OUTPUT DATA ***
+        if (SetErrCode(job->result) < 0)    break;  // Break on error (after we've wrote data - assuming they were produced before error)
+        if (!ImmediatelyFreeInbuf)
+            InputBuffers.Put (job->InBuf);          // Input buffer is no more required for this job
+        OutputBuffers.Put (job->OutBuf);            // Output buffer is no more required for this job
+        FreeJobs.Put(job);                          // Free the job
     }
-    Finished.Signal();
+    if (bufs)
+        InputBuffers.Put(NULL);                     // Wake up ReaderThread so that it can check ErrCode
+    FreeJobs.Put(NULL);                             // -.-
 }
 
-template <class Job>
-void MTCompressor<Job>::WaitJobsFinished()
-{
-    for (int i=0; i < NumThreads; i++)
-    {
-        jobs[i].InSize = 0;
-        jobs[i].StartOperation.Signal();
-        jobs[i].Finished.Wait();
-    }
-}
-
-template <class Job>
-void MTCompressor<Job>::CreateJobs ()
-{
-    int CompressionThreads = GetCompressionThreads();
-    // Semaphore limiting amount of threads doing (de)compression
-    LimitThreads.Create (CompressionThreads, CompressionThreads);
-
-    // Total amount of threads, including extra threads for I/O buffering
-    NumThreads = CompressionThreads + CompressionThreads/2 + 1;
-    WriterJobs.SetSize(NumThreads+1);      // +1 for NULL job at EOF
-    FreeJobs.  SetSize(NumThreads+1);
-    jobs = new Job[NumThreads];
-
-    int threads = 0;
-    for (int i=0; i < NumThreads; i++)
-    {
-        Job *job = &jobs[i];
-        job->task = this;
-        if (job->init() >= 0)
-        {
-            threads++;
-            Thread t;  t.Create (RunWorkerThread, job);
-            FreeJobs.Put(job);
-        }
-        else
-        {   // Free memory because thread (that will free memory before exit) was not created
-            SetErrCode (job->done());
-        }
-    }
-
-    if (threads==0)  SetErrCode (FREEARC_ERRCODE_NOT_ENOUGH_MEMORY);   ////
-}
-
+#endif

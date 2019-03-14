@@ -31,7 +31,7 @@ cc_option -m32 && PARM_ADDR=' -m32' || PARM_ADDR=''
 PARM_DEBUG='-s'
 PARM_ENDIANNES='-DFREEARC_INTEL_BYTE_ORDER'
 PARM_FULL=''
-PARM_STATS=''
+PARM_STAT=''
 if [ "$MSYSTEM" = 'MINGW32' ]; then
 	PARM_SYSTEM='-DFREEARC_WIN'
 	PARM_TIME=''
@@ -47,7 +47,7 @@ for P; do
 	else
 		case $P in
 		'-64')
-			PARM_ADDR=' -m64 -DFREEARC_64BIT'
+			PARM_ADDR=' -m64'
 			;;
 		'-be')
 			PARM_ENDIANNES='-DFREEARC_MOTOROLA_BYTE_ORDER'
@@ -70,7 +70,7 @@ for P; do
 			PARM_TIME='-DFREEARC_NO_TIMING'
 			;;
 		'-stats')
-			PARM_STATS=' -DSTATS'
+			PARM_STAT=' -DSTAT'
 			;;
 		'-h')
 			echo "usage: $0 [OPTIONS] [FILE_FOR_PROFILING]"
@@ -94,7 +94,7 @@ for P; do
 		esac
 	fi
 done
-CFLAGS="$CFLAGS$PARM_FULL$PARM_STATS$PARM_ADDR $PARM_ENDIANNES $PARM_SYSTEM $PARM_TIME -D_FILE_OFFSET_BITS=64 -o tor main.cpp"
+CFLAGS="main.cpp -o tor $CFLAGS$PARM_FULL$PARM_STAT$PARM_ADDR $PARM_ENDIANNES $PARM_SYSTEM $PARM_TIME -D_FILE_OFFSET_BITS=64"
 
 if [ "$PARM_PROF" = "$PROF_USE" ]; then
 	echo 'compiling binary for profiling...'

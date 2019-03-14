@@ -16,7 +16,7 @@ How to compile FreeArc:
      cd HsLua
      make
      cd ..
-8. Compile SFX modules, Unarc and FAR plugin (and icon.o required for building Arc.exe/FreeArc.exe):
+8. Compile SFX modules, Unarc.exe, Unarc.dll and FAR plugin (and icon.o required for building Arc.exe/FreeArc.exe):
      cd Unarc
      make
 9. Compile console version (Arc.exe will be placed to Tests directory):
@@ -40,7 +40,7 @@ How to compile FreeArc:
 
 == ON UNIX (tested on Fedora 12) ========================================================
 
-1. Install make, gcc, gcc c++, curl-devel, ncurses-devel, GHC 6.10.4 (http://haskell.org/ghc/download_ghc_6_10_4.html),
+1. Install GNU make, gcc, gcc c++, curl-devel, ncurses-devel, GHC 6.10.4 (http://haskell.org/ghc/download_ghc_6_10_4.html),
      Gtk2Hs 0.10.1 (http://darcs.haskell.org/gtk2hs/download).
    Package names for Fedora 12 are: make, gcc, gcc-c++, ghc, ghc-gtk2hs, curl-devel, ncurses-devel
 2. Extract sources to some directory and go to this directory. Execute command:

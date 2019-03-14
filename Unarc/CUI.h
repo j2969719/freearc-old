@@ -10,6 +10,7 @@ public:
   bool AllowProcessing (char cmd, int silent, FILENAME arcname, char* comment, int cmtsize, FILENAME outdir);
   FILENAME GetOutDir();
   char AskOverwrite (FILENAME filename, uint64 size, time_t modified);
+  char AskPassword  (char *pwd, int pwdbuf_size);
 
   void ListHeader (COMMAND &);
   void ListFooter (COMMAND &);
@@ -23,8 +24,8 @@ void CUI::DisplayHeader (char* header)
 
 bool CUI::ProgressFile (bool isdir, const char *operation, FILENAME filename, uint64 filesize)
 {
-  printf (isdir?  "%s %s" STR_PATH_DELIMITER "\n"  :  "%s %s (%llu bytes)\n",
-          operation, filename, filesize);
+  printf (isdir?  "%s %s" STR_PATH_DELIMITER "\n"  :  "%s %s (%.0lf bytes)\n",
+          operation, filename, double(filesize));
   return TRUE;
 }
 
@@ -84,6 +85,13 @@ char CUI::AskOverwrite (FILENAME filename, uint64 size, time_t modified)
   if (strlen(answer)!=1 || !strchr("ynasq", *answer))  {printf (help);  goto again;}
   if (*answer=='q') {printf ("Extraction aborted\n");  exit(1);}
   return *answer;
+}
+
+char CUI::AskPassword  (char *pwd, int pwdbuf_size)
+{
+  printf("Enter password: ");
+  gets (pwd);
+  return 'y';
 }
 
 
@@ -151,4 +159,3 @@ void CUI::ListFiles (DIRECTORY_BLOCK *dirblock, COMMAND &command)
     }
   }
 }
-

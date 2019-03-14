@@ -108,7 +108,7 @@ createDirBlock archive processDir decompress_pipe params@(command,bufOps,pipe,ba
   dirPos <- archiveGetPos archive
   -- Записать блок каталога и возвратить информацию о нём для формирования каталога каталогов
   writeControlBlock DIR_BLOCK (dir_compressor command) params $ do
-    archiveWriteDir blocks_info dirPos bufOps
+    archiveWriteDir blocks_info dirPos bufOps (opt_nodates command)
 
 
 -- |Создать солид-блок, содержащий данные из переданных файлов
@@ -152,8 +152,8 @@ printDebugInfo command pipe files totalBytes copy_solid_block compressor real_co
     sendP pipe$ DebugLog$  "Compressing "++show_files3(length files)++" of "++show_bytes3 totalBytes
     sendP pipe$ DebugLog0$ if copy_solid_block then "  Copying "++join_compressor compressor  else "  Using "++join_compressor real_compressor
     unless (copy_solid_block) $ do
-      sendP pipe$ DebugLog0$ "  Memory for compression "++showMem (getCompressionMem   real_compressor)
-                                    ++", decompression "++showMem (getDecompressionMem real_compressor)
+      sendP pipe$ DebugLog0$ "  Memory for compression "++showMem (getCompressionMem      real_compressor)
+                                    ++", decompression "++showMem (getMinDecompressionMem real_compressor)
 
 
 ---------------------------------------------------------------------------------------------------

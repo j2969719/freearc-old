@@ -4,7 +4,7 @@ ALL: $(TEMPDIR)/C_CLS.o
 
 CODE_FLAGS = -fno-rtti -Wall \
                 -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
-OPT_FLAGS   = -Os -march=i486 -mtune=pentiumpro \
+OPT_FLAGS   = -Os \
               -fomit-frame-pointer -fstrict-aliasing \
               -ffast-math -fforce-addr
 DEBUG_FLAGS = -g0

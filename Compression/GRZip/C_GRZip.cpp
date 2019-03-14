@@ -29,10 +29,10 @@
   George Plechanov, Michael Schindler, Robert Sedgewick,
   Julian Seward, David Wheeler, Vadim Yoockin.
 
-  Normal compression mode:
-    Compression     memory use : [7-9]*BlockLen  + 1Mb
+  BWT compression mode:
+    Compression     memory use : [6-9]*BlockLen  + 1Mb   (6 for fast bwt, 9 for strong bwt)
     Decompression   memory use : 5*BlockLen      + 1Mb
-  Fast compression mode:
+  ST4 compression mode:
     Compression     memory use : 5*BlockLen      + 1Mb
     Decompression   memory use : 5.125*BlockLen  + 1Mb
 
@@ -72,8 +72,7 @@ sint32 GRZip_StoreBlock(uint8 * Input ,sint32 Size,
   return (Size+28);
 }
 
-sint32 GRZip_CompressBlock(uint8 * Input ,sint32 Size,
-                           uint8 * Output,sint32 Mode)
+sint32 __cdecl GRZip_CompressBlock (uint8* Input, sint32 Size, uint8* Output, sint32 Mode)
 {
   sint32 SSize=Size;
 
@@ -230,7 +229,7 @@ sint32 GRZip_CheckBlockSign(uint8 * Input,sint32 Size)
   return (GRZ_NO_ERROR);
 }
 
-sint32 GRZip_DecompressBlock(uint8 * Input,sint32 Size,uint8 * Output)
+sint32 __cdecl GRZip_DecompressBlock (uint8* Input, sint32 Size, uint8* Output)
 {
   if (Size<28) return (GRZ_UNEXPECTED_EOF);
   if ((*(sint32 *)(Input+24))!=RESERVED)
@@ -346,7 +345,7 @@ sint32 GRZip_DecompressBlock(uint8 * Input,sint32 Size,uint8 * Output)
 #define ABS_MaxByte      256
 #define ABS_MinBlockSize 24*1024
 
-sint32 GRZip_GetAdaptiveBlockSize(uint8 * Input,sint32 Size)
+sint32 __cdecl GRZip_GetAdaptiveBlockSize (uint8* Input, sint32 Size)
 {
   sint32  TotFreq[ABS_MaxByte];
   sint32     Freq[ABS_MaxByte];
@@ -397,38 +396,24 @@ sint32 GRZip_GetAdaptiveBlockSize(uint8 * Input,sint32 Size)
 
 
 /*-------------------------------------------------*/
-/* Multithreaded grzip_compress/grzip_decompress   */
+/* Multi-threaded GRZip compressor                 */
 /*-------------------------------------------------*/
-struct GRZipMTCompressor;
-
-// Single GRZip compression thread
-struct GRZipCompressionThread : WorkerThread
+struct GRZipMTCompressor : MTCompressor<>
 {
-    GRZipMTCompressor* compressor;
-    int init();
-    int process();
-    int done();
-};
+    CALLBACK_FUNC*      callback;                // I/O callback
+    void*               auxdata;                 // and its additional parameter
 
-// Multi-threaded GRZip compressor
-struct GRZipMTCompressor : MTCompressor<GRZipCompressionThread>
-{
-    sint32  Mode;
-    int     BlockSize;
-    int     AdaptiveBlockSize;       // использовать переменный размер блока
+    sint32              Mode;
+    int                 BlockSize;               // Size of chunks input split to
+    int                 AdaptiveBlockSize;       // использовать переменный размер блока
 
-    GRZipMTCompressor (int Method,
-                       int BlockSize,
-                       int EnableLZP,
-                       int MinMatchLen,
-                       int HashSizeLog,
-                       int AlternativeBWTSort,
-                       int AdaptiveBlockSize,
-                       int DeltaFilter,
-                       CALLBACK_FUNC *callback,
-                       void *auxdata)
+
+    // Copy compression parameters into class fields
+    GRZipMTCompressor (GRZIP_METHOD *method, CALLBACK_FUNC *_callback, void *_auxdata)
+        : MTCompressor<> (method->GetNumThreads(), method->GetNumExtraBuffers())
     {
-        switch (Method)
+        callback = _callback;  auxdata = _auxdata;
+        switch (method->Method)
         {
             case 1:  Mode = GRZ_Compression_BWT + GRZ_Compression_WFC; break;
             case 2:  Mode = GRZ_Compression_BWT + GRZ_Compression_MTF; break;
@@ -436,148 +421,184 @@ struct GRZipMTCompressor : MTCompressor<GRZipCompressionThread>
             case 4:  Mode = GRZ_Compression_ST4 + GRZ_Compression_MTF; break;
             default: SetErrCode (FREEARC_ERRCODE_INVALID_COMPRESSOR);        ////
         }
-        Mode += EnableLZP? Encode_LZP_HT_Size(HashSizeLog)+Encode_LZP_MinMatchLen(MinMatchLen) : GRZ_Disable_LZP;
-        Mode += AlternativeBWTSort? GRZ_BWTSorting_Strong : GRZ_BWTSorting_Fast;
-        Mode += DeltaFilter? GRZ_Enable_DeltaFlt : GRZ_Disable_DeltaFlt;
-        this->AdaptiveBlockSize = AdaptiveBlockSize;
-        this->BlockSize = mymin (BlockSize, GRZ_MaxBlockSize);
-        this->callback  = callback;
-        this->auxdata   = auxdata;
+        Mode += method->EnableLZP? Encode_LZP_HT_Size(method->HashSizeLog)+Encode_LZP_MinMatchLen(method->MinMatchLen) : GRZ_Disable_LZP;
+        Mode += method->AlternativeBWTSort? GRZ_BWTSorting_Strong : GRZ_BWTSorting_Fast;
+        Mode += method->DeltaFilter? GRZ_Enable_DeltaFlt : GRZ_Disable_DeltaFlt;
+        BlockSize = mymin (method->BlockSize, GRZ_MaxBlockSize);
     }
 
-    int main_cycle()
+    int ReaderThread()
     {
-        GRZipCompressionThread *job = FreeJobs.Get();   // Acquire first compression job
-        char* RemainderPos; int RemainderSize=0;        // остаток данных с предыдущего раза - адрес и количество
-        while ( (job->InSize = callback ("read", job->InBuf + RemainderSize, BlockSize - RemainderSize, auxdata)) >= 0 )
+        int errcode = FREEARC_OK;
+    	if ((errcode = AllocateBuffers(BlockSize+LZP_MaxMatchLen))  <  0)   return errcode;
+
+        char* RemainderPos; int RemainderSize=0;            // остаток данных с предыдущего раза - адрес и количество
+        for(;;)
         {
-          if ((job->InSize+=RemainderSize)==0)     return 0;  // Данных больше нет
-          if (errcode < 0)                         return 0;  // Error in other thread
-          RemainderSize=0;
-          if (AdaptiveBlockSize)
-          {  // Пошукаем статистику прочитанных данных - может, нет смысла сжимать их общим блоком
-             sint32 NewSize = GRZip_GetAdaptiveBlockSize ((uint8*) job->InBuf, job->InSize);
-             // Принято решение сжать только первые NewSize байт. Остальное оставим на следующий раз
-             RemainderPos=job->InBuf+NewSize; RemainderSize=job->InSize-NewSize; job->InSize=NewSize;
-          }
-          WriterJobs.Put(job);
-          job->StartOperation.Signal();
-          job = FreeJobs.Get();                     // Acquire next compression job
-          // Перенесём необработанный остаток данных в начало буфера
-          if (RemainderSize>0)   memmove(job->InBuf, RemainderPos, RemainderSize);
+            CompressionJob *job = FreeJobs.Get();           // Acquire free job record
+            if (job == NULL  ||  ErrCode)  break;           // Quit on error in other thread
+
+            job->InBuf = InputBuffers.Get();                // Acquire read buffer
+            if (job->InBuf == NULL  ||  ErrCode)  break;    // Quit on error in other thread
+
+            // Перенесём необработанный остаток данных в начало буфера (может даже - того же самого)
+            if (RemainderSize>0)  memmove(job->InBuf, RemainderPos, RemainderSize);
+
+            if ( (job->InSize = callback ("read", job->InBuf + RemainderSize, BlockSize - RemainderSize, auxdata)) < 0 )
+            	return job->InSize;
+
+            if ((job->InSize+=RemainderSize)==0)  break;    // Данных больше нет
+            if (ErrCode)                          break;    // Quit on error in other thread
+
+            RemainderSize=0;
+            if (AdaptiveBlockSize)
+            {
+                // Пошукаем статистику прочитанных данных - может, нет смысла сжимать их общим блоком
+                sint32 NewSize = GRZip_GetAdaptiveBlockSize ((uint8*) job->InBuf, job->InSize);
+                // Принято решение сжать только первые NewSize байт. Остальное оставим на следующий раз
+                RemainderPos  = job->InBuf+NewSize;
+                RemainderSize = job->InSize-NewSize;
+                job->InSize = NewSize;
+            }
+
+            if (ErrCode)                          break;    // Quit on error in other thread
+            WorkerJobs.Put(job);
+            WriterJobs.Put(job);
         }
-        return job->InSize;
+
+        return errcode;
+    }
+
+
+    // Perform one compression operation
+    void Process (CompressionJob &job, void* &)
+    {
+        int res = GRZip_CompressBlock ((uint8*)job.InBuf, job.InSize, (uint8*)job.OutBuf, Mode);
+        job.OutSize = (res>=0? res : 0);
+        job.result  = (res == GRZ_NOT_ENOUGH_MEMORY? FREEARC_ERRCODE_NOT_ENOUGH_MEMORY :
+                       res <  0?                     FREEARC_ERRCODE_GENERAL :
+                                                     0);
+    }
+
+    // Write output buffer and perform post-processing if required
+    void Write (CompressionJob &job)
+    {
+        int res = callback("write", job.OutBuf, job.OutSize, auxdata);
+        if (job.result >= 0)
+        {
+            job.result = res;
+            PROGRESS (job.InSize, job.OutSize);
+            //// check result
+        }
+    }
+
+
+    sint32 GRZip_GetAdaptiveBlockSize (uint8* Input, sint32 Size)
+    {
+        // Use faster function from DLL if possible
+        static FARPROC f = LoadFromDLL ("GRZip_GetAdaptiveBlockSize");
+        if (!f) f = (FARPROC) ::GRZip_GetAdaptiveBlockSize;
+
+        return ((int (__cdecl *)(uint8*, sint32)) f) (Input, Size);
+    }
+
+    sint32 GRZip_CompressBlock (uint8* Input, sint32 Size, uint8* Output, sint32 Mode)
+    {
+        // Use faster function from DLL if possible
+        static FARPROC f = LoadFromDLL ("GRZip_CompressBlock");
+        if (!f) f = (FARPROC) ::GRZip_CompressBlock;
+
+        return ((int (__cdecl *)(uint8*, sint32, uint8*, sint32)) f) (Input, Size, Output, Mode);
     }
 };
 
-int GRZipCompressionThread::init()                   // Alloc resources
-{
-    compressor = (GRZipMTCompressor*) task;
-    InBuf   = (char*) BigAlloc (compressor->BlockSize + LZP_MaxMatchLen);
-    OutBuf  = (char*) BigAlloc (compressor->BlockSize + LZP_MaxMatchLen);
-    return (InBuf && OutBuf? 0 : FREEARC_ERRCODE_NOT_ENOUGH_MEMORY);
-}
-
-int GRZipCompressionThread::process()                // Perform one compression operation
-{
-    int res = GRZip_CompressBlock ((uint8*)InBuf, InSize, (uint8*)OutBuf, compressor->Mode);
-    return (res == GRZ_NOT_ENOUGH_MEMORY? FREEARC_ERRCODE_NOT_ENOUGH_MEMORY :
-            res <  0?                     FREEARC_ERRCODE_GENERAL :
-                                          res);
-}
-
-int GRZipCompressionThread::done()                   // Free resources
-{
-    BigFree(OutBuf);  OutBuf = NULL;
-    BigFree(InBuf);   InBuf  = NULL;
-    return 0;
-}
-
-
-int __cdecl grzip_compress (int Method,
-                    int BlockSize,
-                    int EnableLZP,
-                    int MinMatchLen,
-                    int HashSizeLog,
-                    int AlternativeBWTSort,
-                    int AdaptiveBlockSize,
-                    int DeltaFilter,
-                    CALLBACK_FUNC *callback,
-                    void *auxdata)
-{
-  GRZipMTCompressor grz (Method,
-                         BlockSize,
-                         EnableLZP,
-                         MinMatchLen,
-                         HashSizeLog,
-                         AlternativeBWTSort,
-                         AdaptiveBlockSize,
-                         DeltaFilter,
-                         callback,
-                         auxdata);
-  return grz.run();
-}
 
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 
-// Single GRZip decompression thread
-struct GRZipDecompressionThread : WorkerThread
+/*-------------------------------------------------*/
+/* Multi-threaded GRZip decompressor               */
+/*-------------------------------------------------*/
+struct GRZipMTDecompressor : MTCompressor<>
 {
-    int process()
-    {
-        int res = GRZip_DecompressBlock ((uint8*)InBuf, InSize+28, (uint8*)OutBuf);
-        return (res == GRZ_NOT_ENOUGH_MEMORY? FREEARC_ERRCODE_NOT_ENOUGH_MEMORY :
-                res <  0?                     FREEARC_ERRCODE_GENERAL :
-                                              res);
-    }
-    int after_write()                //// done() too
-    {
-        BigFree(OutBuf);  OutBuf = NULL;
-        BigFree(InBuf);   InBuf = NULL;
-        return 0;
-    }
-};
+    CALLBACK_FUNC*  callback;    // I/O callback
+    void*           auxdata;     // and its additional parameter
+    int             BlockSize;   // Size of chunks input split to
 
-// Multi-threaded GRZip decompressor
-struct GRZipMTDecompressor : MTCompressor<GRZipDecompressionThread>
-{
-    GRZipMTDecompressor (CALLBACK_FUNC *callback, void *auxdata)
+    // Copy compression parameters into class fields
+    GRZipMTDecompressor (GRZIP_METHOD *method, CALLBACK_FUNC *_callback, void *_auxdata)
+        : MTCompressor<> (method->GetNumThreads(), method->GetNumExtraBuffers())
     {
-        this->callback  = callback;
-        this->auxdata   = auxdata;
+        callback = _callback;  auxdata = _auxdata;
+        BlockSize = mymin (method->BlockSize, GRZ_MaxBlockSize);
     }
 
-    int main_cycle()
+    int ReaderThread()
     {
+        int errcode = FREEARC_OK;
+    	if ((errcode = AllocateBuffers(BlockSize+LZP_MaxMatchLen))  <  0)   return errcode;
+
         uint8 BlockSign[28];
-        while (1)
+        for(;;)
         {
             sint32 NumRead=callback("read",BlockSign,28,auxdata);
-            if (NumRead==0)                                          return FREEARC_OK;    // Конец данных
+            if (NumRead==0)                                          break;    // Конец данных
             if (NumRead!=28)                                         return NumRead<0? NumRead:FREEARC_ERRCODE_BAD_COMPRESSED_DATA;
             if (GRZip_CheckBlockSign(BlockSign,28)!=GRZ_NO_ERROR)    return FREEARC_ERRCODE_BAD_COMPRESSED_DATA;
 
-            GRZipDecompressionThread *job = FreeJobs.Get();            // Acquire next compression job
-            job->InBuf = (char*) BigAlloc (*(sint32*)(BlockSign+16) + LZP_MaxMatchLen);
-            if (job->InBuf==NULL)                                    return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
+            CompressionJob *job = FreeJobs.Get();                              // Acquire free job record
+            if (job == NULL  ||  ErrCode)                            break;    // Quit on error in other thread
+
+            job->InBuf = InputBuffers.Get();                                   // Acquire read buffer
+            if (job->InBuf == NULL  ||  ErrCode)                     break;    // Quit on error in other thread
+
             memcpy(job->InBuf,BlockSign,28);
-            job->OutBuf = (char*) BigAlloc (*(sint32*)job->InBuf + LZP_MaxMatchLen);
-            if (job->OutBuf==NULL)                                   return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
-            job->InSize = callback("read",job->InBuf+28,*(sint32 *)(job->InBuf+16),auxdata);
+
+            job->InSize = callback ("read", job->InBuf+28, *(sint32 *)(job->InBuf+16), auxdata);
             if (job->InSize != *(sint32 *)(job->InBuf+16))           return job->InSize<0? job->InSize : FREEARC_ERRCODE_BAD_COMPRESSED_DATA;
+
+            if (ErrCode)                                             break;    // Quit on error in other thread
+            WorkerJobs.Put(job);
             WriterJobs.Put(job);
-            job->StartOperation.Signal();
         }
+
+        return errcode;
+    }
+
+
+    // Perform one decompression operation
+    void Process (CompressionJob &job, void* &)
+    {
+        int res = GRZip_DecompressBlock ((uint8*)job.InBuf, job.InSize+28, (uint8*)job.OutBuf);
+        job.OutSize = (res>=0? res : 0);
+        job.result  = (res == GRZ_NOT_ENOUGH_MEMORY? FREEARC_ERRCODE_NOT_ENOUGH_MEMORY :
+                       res <  0?                     FREEARC_ERRCODE_GENERAL :
+                                                     0);
+    }
+
+    // Write output buffer and perform post-processing if required
+    void Write (CompressionJob &job)
+    {
+        int res = callback("write", job.OutBuf, job.OutSize, auxdata);
+        if (job.result >= 0)
+        {
+            job.result = res;
+            PROGRESS (job.InSize+28, job.OutSize);
+            //// check result
+        }
+    }
+
+
+    sint32 GRZip_DecompressBlock (uint8* Input, sint32 Size, uint8* Output)
+    {
+        // Use faster function from DLL if possible
+        static FARPROC f = LoadFromDLL ("GRZip_DecompressBlock");
+        if (!f) f = (FARPROC) ::GRZip_DecompressBlock;
+
+        return ((int (__cdecl *)(uint8*, sint32, uint8*)) f) (Input, Size, Output);
     }
 };
 
-
-int __cdecl grzip_decompress (CALLBACK_FUNC *callback, void *auxdata)
-{
-  GRZipMTDecompressor grz (callback, auxdata);
-  return grz.run();
-}
 
 
 /*-------------------------------------------------*/
@@ -586,24 +607,30 @@ int __cdecl grzip_decompress (CALLBACK_FUNC *callback, void *auxdata)
 // Конструктор, присваивающий параметрам метода сжатия значения по умолчанию
 GRZIP_METHOD::GRZIP_METHOD()
 {
-  Method              = 1;
-  BlockSize           = 8*mb;
-  EnableLZP           = 1;
-  MinMatchLen         = 32;
-  HashSizeLog         = 15;
-  AlternativeBWTSort  = 0;
-  AdaptiveBlockSize   = 0;
-  DeltaFilter         = 0;
+  Method              =  1;
+  BlockSize           =  8*mb;
+  EnableLZP           =  1;
+  MinMatchLen         =  32;
+  HashSizeLog         =  15;
+  AlternativeBWTSort  =  0;
+  AdaptiveBlockSize   =  0;
+  DeltaFilter         =  0;
+  NumThreads          =  0;
+  NumExtraBuffers     = -1;
+}
+
+// Универсальный метод, отвечает на запрос "has_progress?"
+int GRZIP_METHOD::doit (char *what, int param, void *data, CALLBACK_FUNC *callback)
+{
+  if (strequ (what, "has_progress?"))  return 1;                                                       // Да, этот алгоритм поддерживает отчёт о прогрессе упаковки
+  else                                 return COMPRESSION_METHOD::doit (what, param, data, callback);  // Передать остальные вызовы родительской процедуре
 }
 
 // Функция распаковки
 int GRZIP_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
-  // Use faster function from DLL if possible
-  static FARPROC f = LoadFromDLL ("grzip_decompress");
-  if (!f) f = (FARPROC) grzip_decompress;
-
-  return ((int (__cdecl *)(CALLBACK_FUNC*, void*)) f) (callback, auxdata);
+  GRZipMTDecompressor Decompressor (this, callback, auxdata);
+  return Decompressor.Run();
 }
 
 #ifndef FREEARC_DECOMPRESS_ONLY
@@ -611,21 +638,8 @@ int GRZIP_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 // Функция упаковки
 int GRZIP_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
-  // Use faster function from DLL if possible
-  static FARPROC f = LoadFromDLL ("grzip_compress");
-  if (!f) f = (FARPROC) grzip_compress;
-
-  return ((int (__cdecl *)(int, int, int, int, int, int, int, int, CALLBACK_FUNC*, void*)) f)
-                        (Method,
-                         BlockSize,
-                         EnableLZP,
-                         MinMatchLen,
-                         HashSizeLog,
-                         AlternativeBWTSort,
-                         AdaptiveBlockSize,
-                         DeltaFilter,
-                         callback,
-                         auxdata);
+  GRZipMTCompressor Compressor (this, callback, auxdata);
+  return Compressor.Run();
 }
 
 // Установить размер блока и уменьшить размер хэша, если он слишком велик для такого маленького блока
@@ -637,21 +651,79 @@ void GRZIP_METHOD::SetBlockSize (MemSize bs)
   }
 }
 
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
+
+// Get/Set amount of memory used for compression/decompression
+MemSize GRZIP_METHOD::GetSetDeCompressionMem (COMPRESSION direction, MemSize mem, bool MINMEM)
+{
+  int         t      =  MINMEM? 1 : GetNumThreads();
+  int         i      =  MINMEM? 0 : GetNumExtraBuffers();
+  bool        bwt    =  Method<3;                                                   // TRUE for BWT compression, FALSE for ST4 compression
+  double      koeff  =  direction==COMPRESS? (bwt?11:7):(bwt?7:7.125);              // MemoryUsage/BlockSize ratio, including 2 for InBuf+OutBuf
+  LongMemSize lzpmem =  direction==COMPRESS? (1<<HashSizeLog)*sizeof(uint32) : 0;   // Memory occupied by LZP hash
+  LongMemSize tmem   =  LongMemSize(koeff*BlockSize) + lzpmem + 1*mb;               // Сколько памяти требуется для одного треда упаковки/распаковки
+  LongMemSize imem   =  2*BlockSize;                                                // Сколько памяти требуется для одного набора доп. буферов I/O
+
+  if (mem==0)  return mymin(t*tmem+i*imem, MEMSIZE_MAX);   // Either Get(De)compressionMem() or Set(De)compressionMem(0) was called
+
+
+  // Если дошли досюда - значит выполняем одну из операций SetXxxMem. В зависимости от конкретной операции мы можем менять следующие параметры метода:
+  // SetCompressionMem        :t:i и BlockSize
+  // SetMinCompressionMem     BlockSize
+  // SetDecompressionMem      :t:i
+  // SetMinDecompressionMem   BlockSize
+
+  // Посчитаем количество тредов и буферов, которое мы можем себе позволить
+  if (mem >= t*tmem+i*imem) {
+    // Памяти достаточно - "расширим" алгоритм сжатия
+    //::SetDeCompressionMem (Method, mem/GetNumBuffers(), Method);
+
+  } else if (mem >= t*tmem && !MINMEM) {
+    // Памяти достаточно для всех тредов сжатия, уменьшаем число дополнительных буферов
+    NumExtraBuffers = (mem-t*tmem)/imem;
+
+  } else if (mem >= tmem && !MINMEM) {
+    // Памяти достаточно хотя бы для одного треда сжатия - уменьшаем число тредов сжатия и при необходимости число дополнительных буферов
+    NumThreads = t = mem/tmem;
+    int new_i = (mem-t*tmem)/imem;
+    if (new_i<i)  NumExtraBuffers = new_i;
+
+  } else {
+    // Памяти не хватило даже для одного треда сжатия - оставим только один и ещё подожмём его
+
+    // Урезаем число тредов в Set(De)CompressionMem
+    if (!MINMEM) {
+      NumThreads      = 1;
+      NumExtraBuffers = 0;
+    }
+    // Урезаем BlockSize в любой операции, кроме SetDecompressionMem
+    if (direction==COMPRESS || MINMEM) {
+      BlockSize       = MemSize (mymin (mymax(double(mem)-1*mb,1*mb)/koeff, GRZ_MaxBlockSize));
+      HashSizeLog     = 15;
+    }
+  }
+  return 0;
+}
+
+
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_GRZIP)
 void GRZIP_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
-  char LZP_Str[100], BlockSizeStr[100];
+  char LZP_Str[100], BlockSizeStr[100], ThreadsStr[100], ExtraBuffersStr[100];
   sprintf (LZP_Str, "l%d:h%d", MinMatchLen, HashSizeLog);
   showMem (BlockSize, BlockSizeStr);
-  sprintf (buf, "grzip:%s:m%d:%s%s%s%s", BlockSizeStr,
-                                         Method,
-                                         EnableLZP?          LZP_Str : "l",
-                                         AlternativeBWTSort? ":s" : "",
-                                         AdaptiveBlockSize?  ":a" : "",
-                                         DeltaFilter?        ":d" : "");
+  sprintf (ThreadsStr,      ":t%d", NumThreads);
+  sprintf (ExtraBuffersStr, ":i%d", NumExtraBuffers);
+  sprintf (buf, "grzip:%s:m%d:%s%s%s%s%s%s", BlockSizeStr,
+                                             Method,
+                                             EnableLZP?          LZP_Str : "l",
+                                             AlternativeBWTSort? ":s" : "",
+                                             AdaptiveBlockSize?  ":a" : "",
+                                             DeltaFilter?        ":d" : "",
+                                             !purify && NumThreads>0?        ThreadsStr     :"",
+                                             !purify && NumExtraBuffers>=0?  ExtraBuffersStr:"");
 }
-
-#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
 
 // Конструирует объект типа GRZIP_METHOD с заданными параметрами упаковки
 // или возвращает NULL, если это другой метод сжатия или допущена ошибка при задании параметров
@@ -674,10 +746,12 @@ COMPRESSION_METHOD* parse_GRZIP (char** parameters)
         case 'p':  p->AdaptiveBlockSize=0; p->EnableLZP=0; p->DeltaFilter=1; continue;
       }
       else switch (*param) {                    // Параметры, содержащие значения
-        case 'm':  p->Method      = parseInt (param+1, &error); continue;
-        case 'b':  p->BlockSize   = parseMem (param+1, &error); continue;
-        case 'l':  p->MinMatchLen = parseInt (param+1, &error); continue;
-        case 'h':  p->HashSizeLog = parseInt (param+1, &error); continue;
+        case 'm':  p->Method           =  parseInt (param+1, &error); continue;
+        case 'b':  p->BlockSize        =  parseMem (param+1, &error); continue;
+        case 'l':  p->MinMatchLen      =  parseInt (param+1, &error); continue;
+        case 'h':  p->HashSizeLog      =  parseInt (param+1, &error); continue;
+        case 't':  p->NumThreads       =  parseInt (param+1, &error); continue;
+        case 'i':  p->NumExtraBuffers  =  parseInt (param+1, &error); continue;
       }
       // Сюда мы попадаем, если в параметре не указано его название
       // Если этот параметр удастся разобрать как целое число (т.е. в нём - только цифры),

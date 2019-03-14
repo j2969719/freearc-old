@@ -106,7 +106,7 @@ TABI_FUNCTION* methodsTable[MAX_COMPRESSION_METHODS];
 // Compression method registration
 int CELS_Register (TABI_FUNCTION *method)
 {
-  CHECK (methodsCount < elements(methodsTable), (s,"INTERNAL ERROR: Overflow of compression methods table"));
+  CHECK (FREEARC_ERRCODE_INTERNAL,  methodsCount < elements(methodsTable),  (s,"INTERNAL ERROR: Overflow of compression methods table"));
   int result = (*method)(TABI_DYNAMAP("service","register"));
   if (result==FREEARC_OK)
     methodsTable[methodsCount++] = method;
@@ -129,7 +129,7 @@ int CELS_Call (TABI_ELEMENT* params)
   if (start_with (service, "Limit") && isupper(service[5]))                 return p._return(p._str("method"));   // to do: get & set
 /*
   {
-    char new_service[MAX_METHOD_STRLEN];
+    char new_service[MAX_COMPRESSOR_STRLEN];
     sprintf(new_service, "Get%s", service+5);
     MemSize mem = TABI_callret(CELS_Call, TABI_DYNAMAP(p) ("service", new_service));
     if (mem <= p._longlong("mem"))         // if method already uses less memory than specified limit
@@ -164,7 +164,7 @@ int CELS_Call (TABI_ELEMENT* params)
 extern "C" {
 void tabi_dump(TABI_ELEMENT *params, int n=0)
 {
-	TABI_MAP(params).dump(n);
+	TABI_MAP(params).dump("tabi_dump",n);
 }
 }
 

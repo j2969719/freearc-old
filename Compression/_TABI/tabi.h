@@ -1,8 +1,10 @@
+#include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <wchar.h>
 
 // Constants representing various types that may hold TABI_VALUE
-enum {TABI_INTEGER=1, TABI_FLOATING=2, TABI_STRING=3, TABI_PTR=4, TABI_FUNCPTR=5, TABI_BOOL=6};
+enum {TABI_INTEGER=1, TABI_FLOATING=2, TABI_STRING=3, TABI_PTR=4, TABI_FUNCPTR=5, TABI_BOOL=6, TABI_WIDE_STRING=7};
 
 // Generic function pointer type
 typedef void (*VOID_FUNC)();
@@ -14,6 +16,7 @@ typedef union _TABI_VALUE
 	long long     int_number;
 	double        float_number;
 	char*         str;
+	wchar_t*      wstr;
 	void*         ptr;
 	VOID_FUNC     funcptr;
 	long          bool_value;
@@ -32,6 +35,10 @@ typedef int TABI_RESULT_TYPE;
 
 // TABI-style function that accepts variable number of typed tagged parameters
 typedef TABI_RESULT_TYPE TABI_FUNCTION(TABI_ELEMENT*);
+
+#ifndef TABI_DUMPFILE
+#define dumpfile stdout
+#endif
 
 
 #ifdef __cplusplus
@@ -57,69 +64,73 @@ class TABI_MAP
        			}                                                            \
 		}
 
-		TABI_GETTER( int,                 long long,           _int,        TABI_INTEGER,   int_number);
-		TABI_GETTER( unsigned,            long long,           _unsigned,   TABI_INTEGER,   int_number);
-		TABI_GETTER( long,                long long,           _long,       TABI_INTEGER,   int_number);
-		TABI_GETTER( unsigned long,       long long,           _ulong,      TABI_INTEGER,   int_number);
-		TABI_GETTER( long long,           long long,           _longlong,   TABI_INTEGER,   int_number);
-		TABI_GETTER( unsigned long long,  long long,           _ulonglong,  TABI_INTEGER,   int_number);
-		TABI_GETTER( double,              double,              _double,     TABI_FLOATING,  float_number);
-		TABI_GETTER( char*,               char*,               _str,        TABI_STRING,    str);
-		TABI_GETTER( const char*,         char*,               _cstr,       TABI_STRING,    str);
-		TABI_GETTER( void*,               void*,               _ptr,        TABI_PTR,       ptr);
-		TABI_GETTER( TABI_FUNCTION*,      VOID_FUNC,           _callback,   TABI_FUNCPTR,   funcptr);
-		TABI_GETTER( bool,                long,                _bool,       TABI_BOOL,      bool_value);
+		TABI_GETTER( int,                 long long,           _int,        TABI_INTEGER,      int_number);
+		TABI_GETTER( unsigned,            long long,           _unsigned,   TABI_INTEGER,      int_number);
+		TABI_GETTER( long,                long long,           _long,       TABI_INTEGER,      int_number);
+		TABI_GETTER( unsigned long,       long long,           _ulong,      TABI_INTEGER,      int_number);
+		TABI_GETTER( long long,           long long,           _longlong,   TABI_INTEGER,      int_number);
+		TABI_GETTER( unsigned long long,  long long,           _ulonglong,  TABI_INTEGER,      int_number);
+		TABI_GETTER( double,              double,              _double,     TABI_FLOATING,     float_number);
+		TABI_GETTER( char*,               char*,               _str,        TABI_STRING,       str);
+		TABI_GETTER( const char*,         char*,               _cstr,       TABI_STRING,       str);
+		TABI_GETTER( wchar_t*,            wchar_t*,            _wstr,       TABI_WIDE_STRING,  wstr);
+		TABI_GETTER( const wchar_t*,      wchar_t*,            _cwstr,      TABI_WIDE_STRING,  wstr);
+		TABI_GETTER( void*,               void*,               _ptr,        TABI_PTR,          ptr);
+		TABI_GETTER( TABI_FUNCTION*,      VOID_FUNC,           _callback,   TABI_FUNCPTR,      funcptr);
+		TABI_GETTER( bool,                long,                _bool,       TABI_BOOL,         bool_value);
 
                 // Return value using "return" callback
 		template<class T> TABI_RESULT_TYPE _return(T v);
 
                 // Dump first n elements (for debugging purposes)
-		void dump(int n=0)
+		void dump(char *title=NULL, int n=0)
 		{
-			printf("  TABI_MAP: ");
+			fprintf(dumpfile, title? "  %s: " : "  TABI_MAP: ", title);
 			for (int i=0; i<n?n:100; i++)
 			{
 				if (p[i].name == NULL)
 					break;
-				if (i>0)  printf(", ");
-				printf("%s: ", p[i].name);
+				if (i>0)  fprintf(dumpfile, ", ");
+				fprintf(dumpfile, "%s: ", p[i].name);
 				switch (p[i].type)
 				{
-					case TABI_STRING:	if (p[i].value.str)   printf("\"%s\"", p[i].value.str); break;
-					case TABI_INTEGER:	printf("%lld",     p[i].value.int_number); break;
-					case TABI_FLOATING:	printf("%g",       p[i].value.float_number); break;
-					case TABI_PTR:	        printf("<%p>",     p[i].value.ptr); break;
-					case TABI_FUNCPTR:	printf("func<%p>", p[i].value.funcptr); break;
-					case TABI_BOOL:	        printf("%s",       p[i].value.bool_value? "TRUE":"FALSE"); break;
+					case TABI_STRING:	if (p[i].value.str)   fprintf(dumpfile, "\"%s\"", p[i].value.str); break;
+					case TABI_WIDE_STRING:	if (p[i].value.wstr)  fwprintf(dumpfile, L"L\"%s\"", p[i].value.wstr); break;
+					case TABI_INTEGER:	fprintf(dumpfile, "%lld",     p[i].value.int_number); break;
+					case TABI_FLOATING:	fprintf(dumpfile, "%g",       p[i].value.float_number); break;
+					case TABI_PTR:	        fprintf(dumpfile, "<%p>",     p[i].value.ptr); break;
+					case TABI_FUNCPTR:	fprintf(dumpfile, "func<%p>", p[i].value.funcptr); break;
+					case TABI_BOOL:	        fprintf(dumpfile, "%s",       p[i].value.bool_value? "TRUE":"FALSE"); break;
 				}
 			}
-			printf("\n");
+			fprintf(dumpfile, "\n");
 		}
 
                 // Memory dump first n elements (for debugging purposes)
 		void memory_dump(int n=0)
 		{
-			printf("dumping TABI_MAP:\n");
+			fprintf(dumpfile, "dumping TABI_MAP:\n");
 			for (int i=0; i<n?n:100; i++)
 			{
-				for (int j= 0; j< 4; j++)   printf("%02x ", *((unsigned char*)(p+i)+j)); printf("  ");
-				for (int j= 4; j< 8; j++)   printf("%02x ", *((unsigned char*)(p+i)+j)); printf("  ");
-				for (int j= 8; j<24; j++)   printf("%02x ", *((unsigned char*)(p+i)+j)); printf("  ");
+				for (int j= 0; j< 4; j++)   fprintf(dumpfile, "%02x ", *((unsigned char*)(p+i)+j)); fprintf(dumpfile, "  ");
+				for (int j= 4; j< 8; j++)   fprintf(dumpfile, "%02x ", *((unsigned char*)(p+i)+j)); fprintf(dumpfile, "  ");
+				for (int j= 8; j<24; j++)   fprintf(dumpfile, "%02x ", *((unsigned char*)(p+i)+j)); fprintf(dumpfile, "  ");
 				if (p[i].name == NULL)
 					break;
-				printf("%10s: ", p[i].name);
+				fprintf(dumpfile, "%10s: ", p[i].name);
 				switch (p[i].type)
 				{
-					case TABI_STRING:	if (p[i].value.str)   printf("\"%s\"", p[i].value.str); break;
-					case TABI_INTEGER:	printf("%lld",     p[i].value.int_number); break;
-					case TABI_FLOATING:	printf("%g",       p[i].value.float_number); break;
-					case TABI_PTR:	        printf("<%p>",     p[i].value.ptr); break;
-					case TABI_FUNCPTR:	printf("func<%p>", p[i].value.funcptr); break;
-					case TABI_BOOL:	        printf("%s",       p[i].value.bool_value? "TRUE":"FALSE"); break;
+					case TABI_STRING:	if (p[i].value.str)   fprintf(dumpfile, "\"%s\"", p[i].value.str); break;
+					case TABI_WIDE_STRING:	if (p[i].value.wstr)  fwprintf(dumpfile, L"\"%s\"", p[i].value.wstr); break;
+					case TABI_INTEGER:	fprintf(dumpfile, "%lld",     p[i].value.int_number); break;
+					case TABI_FLOATING:	fprintf(dumpfile, "%g",       p[i].value.float_number); break;
+					case TABI_PTR:	        fprintf(dumpfile, "<%p>",     p[i].value.ptr); break;
+					case TABI_FUNCPTR:	fprintf(dumpfile, "func<%p>", p[i].value.funcptr); break;
+					case TABI_BOOL:	        fprintf(dumpfile, "%s",       p[i].value.bool_value? "TRUE":"FALSE"); break;
 				}
-				printf("\n");
+				fprintf(dumpfile, "\n");
 			}
-			printf("\n");
+			fprintf(dumpfile, "\n");
 		}
 
 	protected:
@@ -166,6 +177,8 @@ class TABI_DYNAMAP : public TABI_MAP
 		TABI_SETTER( double,              double,              _double,     TABI_FLOATING,  float_number);
 		TABI_SETTER( char*,               char*,               _str,        TABI_STRING,    str);
 		TABI_SETTER( const char*,         char*,               _cstr,       TABI_STRING,    str);
+		TABI_SETTER( wchar_t*,            wchar_t*,            _wstr,       TABI_WIDE_STRING,  wstr);
+		TABI_SETTER( const wchar_t*,      wchar_t*,            _cwstr,      TABI_WIDE_STRING,  wstr);
 		TABI_SETTER( void*,               void*,               _ptr,        TABI_PTR,       ptr);
 		TABI_SETTER( TABI_FUNCTION*,      VOID_FUNC,           _callback,   TABI_FUNCPTR,   funcptr);
 		TABI_SETTER( bool,                long,                _bool,       TABI_BOOL,      bool_value);

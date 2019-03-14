@@ -18,6 +18,7 @@ import qualified Data.HashTable
 import Data.IORef
 import Data.List
 import Data.Maybe
+import Data.Ratio
 import Data.Word
 import Debug.Trace
 import Foreign.Marshal.Utils
@@ -37,13 +38,20 @@ import CompressionLib (MemSize,b,kb,mb,gb,tb)
 #error "You must define byte order!"
 #endif
 
-#if 1
+#ifndef HAMSTER
 aFreeArc = "FreeArc"
+aFreeArcExt = aFreeArcInternalExt
+aFreeArcExtensions = [aFreeArcExt]
 #else
-aFreeArc = "Hamster"
+aFreeArc = "Hamster Free Archiver"
+aFreeArcExt = aZipExt
+aFreeArcExtensions = [] :: [String]
 #endif
 
-aFreeArcExt = "arc"
+aFreeArcInternalExt = "arc"
+aZipExt             = "zip"
+aRarExt             = "rar"
+a7zExt              = "7z"
 
 
 ---------------------------------------------------------------------------------------------------
@@ -62,18 +70,29 @@ make4byte b0 b1 b2 b3 = b3+256*(b2+256*(b1+256*b0)) :: Word32
 -- Результат возвращается в виде пары, второй элемент в которой - `b`, если результат выражен в байтах,
 -- или другой символ, записанный после числа, или переданный как `default_specifier`.
 parseNumber num default_specifier =
-  case (span isDigit$ strLower$ num++[default_specifier]) of
-    (digits, 'b':_)  ->  (readI digits     , 'b')
-    (digits, 'k':_)  ->  (readI digits * kb, 'b')
-    (digits, 'm':_)  ->  (readI digits * mb, 'b')
-    (digits, 'g':_)  ->  (readI digits * gb, 'b')
-    (digits, 't':_)  ->  (readI digits * tb, 'b')
-    (digits, '^':_)  ->  (2 ^ readI digits , 'b')
-    (digits,  c :_)  ->  (readI digits     ,  c )
+  case (spanRational$ strLower$ num++[default_specifier]) of
+    (digits, 'b':_)  ->  (truncate$ readR digits      , 'b')
+    (digits, 'k':_)  ->  (truncate$ readR digits * kb , 'b')
+    (digits, 'm':_)  ->  (truncate$ readR digits * mb , 'b')
+    (digits, 'g':_)  ->  (truncate$ readR digits * gb , 'b')
+    (digits, 't':_)  ->  (truncate$ readR digits * tb , 'b')
+    (digits, '^':_)  ->  (2 ^ (truncate$ readR digits), 'b')
+    (digits,  c :_)  ->  (truncate$ readR digits      ,  c )
+
+-- |Разбивает строку на рациональное число (ddd[.ddd]) и остаток
+spanRational s  =  splitAt (length s - length(go False s)) s
+  where go b (x:xs) | isDigit x = go b xs
+        go False ('.':xs)       = go True xs
+        go _ xs                 = xs
+
+-- |Чтение рационального числа
+readR s  =  case (span isDigit s) of
+    (digits, '.':more_digits)  ->  readI digits + readI more_digits % 10^length more_digits
+    (digits, "")               ->  readI digits
 
 -- |Расшифровать запись размера, по умолчанию - в байтах
-parseSize memstr =
-    case (parseNumber memstr 'b') of
+parseSize default_specifier memstr =
+    case (parseNumber memstr default_specifier) of
         (bytes, 'b')  ->  bytes
         _             ->  error$ memstr++" - unrecognized size specifier"
 
@@ -209,6 +228,12 @@ foreach = flip mapM
 
 -- |Выполнить для каждого элемента из списка
 for = flip mapM_
+
+-- |Аналог `foreach` со списком, возвращаемым выполняемой процедурой
+foreachM list action  =  list >>= mapM action
+
+-- |Аналог `for` со списком, возвращаемым выполняемой процедурой
+for' list action  =  list >>= mapM_ action
 
 -- |Удобный способ записать сначала то, что должно обязательно быть выполнено в конце :)
 doFinally = flip finally
@@ -542,7 +567,7 @@ tryToSkipAtEnd substr str = reverse (tryToSkip (reverse substr) (reverse str))
 substr str substr  =  any (substr `isPrefixOf`) (tails str)
 
 -- |Список позиций подстроки в строке
-strPositions haystack needle  =  elemIndices True$ map (needle `isPrefixOf`) (tails haystack)
+strPositions str substr  =  elemIndices True$ map (substr `isPrefixOf`) (tails str)
 
 -- |Заменить в строке `s` все вхождения `from` на `to`
 replaceAll from to = repl
@@ -634,6 +659,9 @@ mapInit f xs      =  map f (init xs) ++ [last xs]
 mapLast f []      =  []
 mapLast f xs      =  init xs ++ [f (last xs)]
 
+processTail f []      = []
+processTail f (x:xs)  =  x : f xs
+
 {-# NOINLINE replaceAll #-}
 {-# NOINLINE replaceAtEnd #-}
 
@@ -658,7 +686,7 @@ sort_and_groupOn' f  =  groupOn f . sortOn' f
 
 -- |Сгруппировать все элементы (a.b) с одинаковым значением 'a'
 groupFst :: (Ord a) =>  [(a,b)] -> [(a,[b])]
-groupFst = map (\xs -> (fst (head xs), map snd xs)) . sort_and_groupOn fst
+groupFst = map (\xs -> (fst (head xs), map snd xs)) . sort_and_groupOn' fst
 
 -- |Удаляет дубликаты из списка
 removeDups = removeDupsOn id
@@ -829,6 +857,12 @@ snd3 (_,a,_)    =  a
 thd3 (_,_,a)    =  a
 map3 (f,g,h) a  =  (f a, g a, h a)
 
+-- Операции над tuple/4
+fst4 (a,_,_,_)    =  a
+snd4 (_,a,_,_)    =  a
+thd4 (_,_,a,_)    =  a
+fth4 (_,_,_,a)    =  a
+
 
 ---------------------------------------------------------------------------------------------------
 ---- Pure hash tables -----------------------------------------------------------------------------
@@ -861,7 +895,13 @@ htCreateHash hash list  =  htCreateHash' (length list) hash list
 htCreate' size list  =  htCreateHash' size stdHashFunc list
 htCreate       list  =  htCreateHash       stdHashFunc list
 
-htLookup a (HT hash arr) = lookup a (arr!hash a)
+htLookup (HT hash arr) a  =  lookup a (arr!hash a)
+
+
+-- Fast set implementation
+htCreateSet list   =  htCreate$ map (\a -> (a,True)) list
+htLookupSet set a  =  isJust$ htLookup set a
+
 
 
 ---------------------------------------------------------------------------------------------------
@@ -913,6 +953,9 @@ a<<=b     = a .= (\(AccList x) -> AccList$ b:x)
 pushList  = (<<=)
 listVal a = val a >>== (\(AccList x) -> reverse x)
 withList  =  with' newList listVal
+onList   a b  =  listVal a >>= b
+forL     a b  =  listVal a >>= mapM_ b
+foreachL a b  =  listVal a >>= mapM b
 
 
 -- |Добавить значение в список, хранимый по ссылке IORef

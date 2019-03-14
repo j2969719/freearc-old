@@ -3,6 +3,15 @@
 // Максимальный размер ключа/iv/хеша в байтах
 #define MAXKEYSIZE 64
 
+// Быстрая ad-hoc проверка того, что алгоритм включает методы шифрования
+bool compressorIsEncrypted_Guess (char *compressor)
+{
+  char c[MAX_COMPRESSOR_STRLEN] = "+";
+  strcpy(c+1, compressor);
+  return (strstr (c, "+aes-")!=NULL || strstr (c, "+serpent-")!=NULL || strstr (c, "+blowfish-")!=NULL || strstr (c, "+twofish-")!=NULL);
+}
+
+
 enum TEncrypt {ENCRYPT, DECRYPT};
 int docrypt (enum TEncrypt DoEncryption, int cipher, int mode, BYTE *key, int keysize, int rounds, BYTE *iv,
              CALLBACK_FUNC *callback, void *auxdata);
@@ -25,6 +34,7 @@ public:
   int  rounds;                   // Количество шагов при шифровании, чем больше - тем медленней, но надёжней. 0 - использовать знаечние по умолчанию, рекомендованное создателями алгоритма
   int  keySize;                  // Длина ключа в байтах (0 - использовать максимальную доступную)
   int  ivSize;                   // Длина IV в байтах (=размеру блока алгоритма шифрования)
+  bool fixed;                    // Шифрование выполнено с корректным decode16
 
   // Конструктор, присваивающий параметрам метода шифрования значения по умолчанию
   ENCRYPTION_METHOD();
@@ -36,19 +46,15 @@ public:
 #ifndef FREEARC_DECOMPRESS_ONLY
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
+  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
+  virtual MemSize GetCompressionMem        (void)               {return LARGE_BUFFER_SIZE;}
+  virtual void    SetCompressionMem        (MemSize mem)        {}
+  virtual void    SetMinDecompressionMem   (MemSize)            {}
+#endif
+  virtual MemSize GetDecompressionMem      (void)               {return LARGE_BUFFER_SIZE;}
+
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_ENCRYPTION)
   virtual void ShowCompressionMethod (char *buf, bool purify);
-
-  // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
-  virtual MemSize GetCompressionMem     (void)         {return 0;}
-  virtual MemSize GetDictionary         (void)         {return 0;}
-  virtual MemSize GetBlockSize          (void)         {return 0;}
-  virtual void    SetCompressionMem     (MemSize mem)  {}
-  virtual void    SetDecompressionMem   (MemSize mem)  {}
-  virtual void    SetDictionary         (MemSize dict) {}
-  virtual void    SetBlockSize          (MemSize bs)   {}
-#endif
-  virtual MemSize GetDecompressionMem   (void)         {return 0;}
 };
 
 // Разборщик строки метода шифрования
