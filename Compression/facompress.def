@@ -1,9 +1,12 @@
 EXPORTS
   SetCompressionThreads
+  Set_compress_all_at_once
+  UpdateCRC
+  CalcCRC
   lzma_compress
   lzma_decompress
-  ppmd_compress
-  ppmd_decompress
+  ppmd_compress2
+  ppmd_decompress2
   grzip_compress
   grzip_decompress
   lzp_compress

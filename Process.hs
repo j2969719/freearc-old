@@ -47,7 +47,7 @@ module Process where
 
 import Prelude hiding (catch)
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.IORef
 
@@ -91,9 +91,14 @@ runAsyncP p = do
   parent_id    <- myThreadId
   p_finished   <- newEmptyMVar
   p_id         <- forkOS (p (Pipe Nothing Nothing income income_back outcome outcome_back)
-                            `catch` (\e -> do killThread parent_id; throwIO e)
+--                          `catch` (\e -> do killThread parent_id; throwIO e)
                             `finally` putMVar p_finished ())
   return (Pipe (Just p_id) (Just p_finished) outcome outcome_back income income_back)
+
+-- Создадим тред и гарантируем его корректное завершение посылкой спец. значения
+bracketedRunAsyncP process value =
+  bracket (runAsyncP process)
+          (\pipe -> do sendP pipe value; joinP pipe)
 
 
 -- |Канал обмена с соседними процессами, который получает в своё распоряжение каждый процесс.

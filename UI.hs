@@ -14,6 +14,7 @@ import Prelude hiding (catch)
 import Control.Monad
 import Control.Concurrent
 import Data.IORef
+import Data.Ratio
 import Numeric           (showFFloat)
 import System.CPUTime    (getCPUTime)
 import System.IO
@@ -36,14 +37,18 @@ uiStartProgram = do
 
 -- |Отметить начало выполнения команды
 uiStartCommand command = do
+  pauseAction =: guiPauseAtEnd
   ref_command =: command
-  display_option' =: opt_display command
+  pause_before_exit =: opt_pause_before_exit command
+  perform_shutdown  =: opt_shutdown command
+  display_option'   =: opt_display command
   refStartArchiveTime =:: getClockTime
   -- Открыть логфайл и вывести в него выполняемую команду. Длинные комментарии/списки файлов/имена файлов
   -- не должны попадать в лог-файл, так что мы обрезаем список и все строки в нём до 100 элементов
   openLogFile (opt_logfile command)
   curdir <- getCurrentDirectory
-  printLog (curdir++">arc "++unwords(map (takeSome 100 "...")$ hidePasswords$ takeSome 100 ["..."]$ cmd_args command)++"\n")
+  exe <- getExeName
+  printLog (curdir++">"++takeBaseName exe++" "++unwords(map (takeSome 100 "...")$ hidePasswords$ takeSome 100 ["..."]$ cmd_args command)++"\n")
   -- Выведем версию архиватора и используемые дополнительные опции
   let addArgs = cmd_additional_args command
   once putHeader$ condPrintLine "h" aARC_HEADER
@@ -57,16 +62,13 @@ uiStartSubCommand command subCommand = do
   display_option' =: opt_display subCommand
 
 -- |Отметить начало обработки очередного архива
-uiStartArchive command @ Command {
-                 opt_data_compressor = compressor
-               , opt_cache           = cache
-               }
-               method = do
+uiStartArchive command method = do
   -- Запомнить время начала обработки архива и выполняемую команду
   refStartArchiveTime =:: getClockTime
   ref_command =: command
   display_option' =: opt_display command
-  uiMessage =: ""
+  uiMessage =: ("", "")
+  guiStartArchive
 
   -- Остаток процедуры не нужно выполнять, если это под-команда (например, тестирование после архивации)
   if cmd_subcommand command
@@ -78,14 +80,19 @@ uiStartArchive command @ Command {
       arcname = cmd_arcname command
   uiArcname =: arcname
   exist <- fileExist arcname
+  msg <- i18n (msgStartGUI cmd exist)
+  condPrintLine "G"  $ (format msg arcname)
   condPrintLine "a"  $ (msgStart cmd exist) ++ arcname
   condPrintLine "c"  $ (method &&& " using "++encode_method method)
   condPrintLine "ac" $ "\n"
   when (cmdType cmd == ADD_CMD) $ do
       condPrintLineLn "m" $
-          "Memory for compression "++showMem (getCompressionMem   method)
-          ++", decompression "     ++showMem (getDecompressionMem method)
-          ++", cache "             ++showMem cache
+          "Memory for compression "++showMem (getCompressionMem     method)
+          ++", decompression "     ++showMem (getDecompressionMem   method)
+          ++", cache "             ++showMem (opt_compression_cache command)
+  -- Сохранить информацию для последующего использования
+  ref_w0 =:: val warnings
+  ref_arcExist =: exist
 
 -- |Отметить начало упаковки или распаковки данных
 uiStartProcessing filelist archive_total_bytes archive_total_compressed = do
@@ -116,8 +123,8 @@ uiStartProcessing filelist archive_total_bytes archive_total_compressed = do
         , rnum_bytes      = error "internal CUI error: rnum_bytes not initialized"
         }
   ref_ui_state =: ui_state
-  printLine$ msgDo cmd ++ show_files3 total_files' ++ ", "
-                       ++ show_bytes3 total_bytes'
+  msg <- i18n (msgDo cmd)
+  printLine$ format msg (show_files3 total_files' ++ ", " ++ show_bytes3 total_bytes')
   -- Вывод этого "разделителя" позволит затереть на экране строчку с текущей статистикой
   printLineNeedSeparator $ "\r"++replicate 75 ' '++"\r"
   when (opt_indicator command == "1") $ do
@@ -135,7 +142,7 @@ uiStartProcessing filelist archive_total_bytes archive_total_compressed = do
 -- |Отметить стадию выполнения процесса
 uiStage msg = do
   syncUI $ do
-  uiMessage =:: i18n msg
+  uiMessage =: (msg, "")
 
 -- |Сбросить счётчик просканированных файлов
 uiStartScanning = do
@@ -179,13 +186,18 @@ uiStartControlData = do
              , algorithmsCount = 0 }
 
 -- |Отметить начало упаковки/распаковки файла
-uiStartFile fileinfo = do
+uiStartFile msg fi = do
   syncUI $ do
-    uiMessage =: (fpFullname.fiStoredName) fileinfo  ++  (fiIsDir fileinfo &&& "/")
+    let (filename, is_folder) = case fi of
+                                  Left  x        -> x
+                                  Right fileinfo -> ((fpFullname.fiStoredName) fileinfo,  fiIsDir fileinfo)
+    uiMessage  =:  (msg,  filename ++ (is_folder &&& [pathSeparator]))
     modifyIORef ref_ui_state $ \ui_state ->
       ui_state { datatype   = File
-               , uiFileinfo = Just fileinfo
-               , files      = files ui_state + 1}
+               , files      = files ui_state + 1
+               , uiFileinfo = case fi of
+                                Left  filename -> Nothing
+                                Right fileinfo -> Just fileinfo}
   guiStartFile
 
 -- |Откорректировать total_bytes в ui_state
@@ -199,11 +211,12 @@ uiCorrectTotal files bytes = do
 -- |Отметить имитацию обработки файлов согласно прилагаемому списку
 uiFakeFiles filelist compsize = do
   let origsize  =  sum (map fiSize filelist)
+      filecnt   =  i (length filelist)
   syncUI $ do
     modifyIORef ref_ui_state $ \ui_state ->
       ui_state { datatype    = File
-               , files       = (files       ui_state) + (i$ length filelist)
-               , fake_files  = (fake_files  ui_state) + (i$ length filelist)
+               , files       = (files       ui_state) + filecnt
+               , fake_files  = (fake_files  ui_state) + filecnt
                , fake_bytes  = (fake_bytes  ui_state) + origsize
                , fake_cbytes = (fake_cbytes ui_state) + compsize
                }
@@ -274,7 +287,8 @@ uiDoneArchive = do
                       , fake_bytes    = fake_bytes
                       , fake_cbytes   = fake_cbytes }  <-  val ref_ui_state
   let cmd = cmd_name command
-  uiMessage =: ""
+  uiMessage =: ("", "")
+  updateAllIndicators
   uiDoneProgressIndicator
   when (opt_indicator command=="2" && files-fake_files>0) $ do
     myPutStrLn ""
@@ -292,8 +306,8 @@ uiDoneArchive = do
   -- Информация о времени работы и скорости упаковки/распаковки
   secs <- val refArchiveProcessingTime   -- время, затраченное непосредственно на упаковку/распаковку
   real_secs <- return_real_secs          -- полное время выполнения команды над текущим архивом
-  condPrintLine                     "t" $ msgStat cmd ++ "time: "++(secs>0 &&& "cpu " ++ showTime secs ++ ", ")
-  condPrintLine                     "t" $ "real " ++ showTime real_secs
+  condPrintLine                          "t" $ msgStat cmd ++ "time: "++(secs>0 &&& "cpu " ++ showTime secs ++ ", ")
+  condPrintLine                          "t" $ "real " ++ showTime real_secs
   when (real_secs>=0.01) $ condPrintLine "t" $ ". Speed " ++ showSpeed (bytes-fake_bytes) real_secs
 
   condPrintLineNeedSeparator "rdt" "\n"
@@ -304,6 +318,15 @@ uiDoneArchive = do
 -- |Вызывается после всех вспомогательных операций (добавление recovery info, тестирование)
 uiDoneArchive2 = do
   command <- val ref_command
+  let cmd     = cmd_name    command
+      arcname = cmd_arcname command
+  w0 <- val ref_w0
+  w1 <- val warnings
+  let w = w1-w0  -- number of warnings while processing this archive
+  unlessM (val operationTerminated) $ do
+    arcExist <- val ref_arcExist
+    msg <- i18n (msgFinishGUI cmd arcExist w)
+    condPrintLine "G" (formatn msg [arcname, show w])
   unless (cmd_subcommand command) $ do
     condPrintLineNeedSeparator "" "\n\n"
 
@@ -327,6 +350,7 @@ uiDoneCommand Command{cmd_name=cmd} totals = do
 -- |Завершить выполнение программы
 uiDoneProgram = do
   condPrintLineNeedSeparator "" "\n"
+  guiDoneProgram
 
 
 {-# NOINLINE uiStartProgram #-}
@@ -365,19 +389,21 @@ uiQuasiWriteData num bytes = do
 uiWriteData num bytes = do
   UI_State {algorithmsCount=count, datatype=datatype} <- val ref_ui_state
   when (datatype == File) $ do
-  -- Сохранить в список операций в/в операцию чтения
+  -- Сохранить в список операций в/в операцию записи
   when (num>=1 && num<count) $ do
     syncUI $ do
     ui_state @ UI_State {rw_ops=rw_ops0}  <-  val ref_ui_state
     let rw_ops = updateAt num (add_Write bytes) rw_ops0
     return $! length (take 4 (rw_ops!!num))   -- strictify operations list!
     ref_ui_state =: ui_state {rw_ops=rw_ops}
+  when (num>=1 && num==count) $ do
+    uiCompressedBytes bytes
 
 -- |Алгоритм номер num в цепочке прочитал bytes байт
 uiReadData num bytes = do
   UI_State {algorithmsCount=count, datatype=datatype} <- val ref_ui_state
   when (datatype == File) $ do
-  -- Сохранить в список операций в/в операцию записи
+  -- Сохранить в список операций в/в операцию чтения
   when (num>=1 && num<count) $ do
     syncUI $ do
     modifyIORef ref_ui_state $ \ui_state @ UI_State {rw_ops=rw_ops} ->
@@ -399,9 +425,10 @@ uiReadData num bytes = do
       --print (rnum_bytes0, bytes, r_bytes0, r_bytes-r_bytes0)
       -- Возвращаем количество байт на входе первого алгоритма относительно предыдущего значения этой величины
       return (r_bytes-r_bytes0)
-    uiUpdateProgressIndicator ((unpBytes*9) `div` 10)
+    uiUpdateProgressIndicator (toRational unpBytes*9/10)
   when (num==1) $ do  -- 90% на последний алгоритм в цепочке и 10% на первый (чтобы сгладить вывод для external compression and so on)
-    uiUpdateProgressIndicator (bytes `div` 10)
+    uiUpdateProgressIndicator (toRational bytes/10)
+    uiUnpackedBytes bytes
 
  where
   -- Рекурсивно пересчитать bytes байт на входе алгоритма num в количество байт на входе алгоритма 1
@@ -440,9 +467,10 @@ uiStartProgressIndicator indType command bytes' total' = do
   bytes <- bytes' 0;  total <- total'
   arcname <- val uiArcname
   let cmd        =  cmd_name command
-      direction  =  if (cmdType cmd == ADD_CMD)  then " => "  else " <= "
       indicator  =  select_indicator command total
-  aProgressIndicatorState =: (indicator, indType, arcname, direction, 0, bytes', total')
+  exist <- val ref_arcExist
+  winTitleMsg <- i18n (msgStartGUI cmd exist)
+  aProgressIndicatorState =: (indicator, indType, arcname, winTitleMsg, 0 :: Rational, bytes', total')
   indicator_start_real_secs =:: return_real_secs
   uiResumeProgressIndicator
 
@@ -454,8 +482,8 @@ uiUpdateProgressIndicator add_b =
     -- рапортуем об этом. Новые же данные только добавляются к счётчику, но не влияют
     -- на выводимую СЕЙЧАС статистику. Вот такие вот приколы в нашем городке :)
     syncUI $ do
-    (indicator, indType, arcname, direction, b, bytes', total') <- val aProgressIndicatorState
-    aProgressIndicatorState =: (indicator, indType, arcname, direction, b+add_b, bytes', total')
+    (indicator, indType, arcname, winTitleMsg, b, bytes', total') <- val aProgressIndicatorState
+    aProgressIndicatorState =: (indicator, indType, arcname, winTitleMsg, b+toRational(add_b), bytes', total')
 
 -- |Завершить вывод индикатора прогресса
 uiDoneProgressIndicator = do

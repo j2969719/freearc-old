@@ -14,7 +14,7 @@ enum { UP_FREQ=5, INT_BITS=7, PERIOD_BITS=7, TOT_BITS=INT_BITS+PERIOD_BITS,
     INTERVAL=1 << INT_BITS, BIN_SCALE=1 << TOT_BITS, MAX_FREQ=124, O_BOUND=9 };
 
 #pragma pack(1)
-static struct SEE2_CONTEXT { // SEE-contexts for PPM-contexts with masked symbols
+static _THREAD1 struct SEE2_CONTEXT { // SEE-contexts for PPM-contexts with masked symbols
     WORD Summ;
     BYTE Shift, Count;
     void init(UINT InitVal) { Summ=InitVal << (Shift=PERIOD_BITS-4); Count=7; }
@@ -27,8 +27,8 @@ static struct SEE2_CONTEXT { // SEE-contexts for PPM-contexts with masked symbol
             Summ += Summ;                   Count=3 << Shift++;
         }
     }
-} _PACK_ATTR SEE2Cont[24][32], DummySEE2Cont;
-static struct PPM_CONTEXT {                 // Notes:
+} _THREAD _PACK_ATTR SEE2Cont[24][32], DummySEE2Cont;
+static _THREAD1 struct PPM_CONTEXT {        // Notes:
     BYTE NumStats, Flags;                   // 1. NumStats & NumMasked contain
     WORD SummFreq;                          //  number of symbols minus 1
     struct STATE {                          // 2. sizeof(WORD) > sizeof(BYTE)
@@ -50,15 +50,15 @@ static struct PPM_CONTEXT {                 // Notes:
     PPM_CONTEXT*          cutOff(int Order);
     PPM_CONTEXT*  removeBinConts(int Order);
     STATE& oneState() const { return (STATE&) SummFreq; }
-} _PACK_ATTR* MaxContext;
+} _THREAD _PACK_ATTR* MaxContext;
 #pragma pack()
 
 static BYTE NS2BSIndx[256], QTable[260];    // constants
-static PPM_CONTEXT::STATE* FoundState;      // found next state transition
-static int  InitEsc, OrderFall, RunLength, InitRL, MaxOrder;
-static BYTE CharMask[256], NumMasked, PrevSuccess, EscCount, PrintCount;
-static WORD BinSumm[25][64];                // binary SEE-contexts
-static MR_METHOD MRMethod;
+static _THREAD1 PPM_CONTEXT::STATE* _THREAD FoundState;      // found next state transition
+static _THREAD1 int  _THREAD InitEsc, _THREAD OrderFall, _THREAD RunLength, _THREAD InitRL, _THREAD MaxOrder;
+static _THREAD1 BYTE _THREAD CharMask[256], _THREAD NumMasked, _THREAD PrevSuccess, _THREAD EscCount, _THREAD PrintCount;
+static _THREAD1 WORD _THREAD BinSumm[25][64];                // binary SEE-contexts
+static _THREAD1 MR_METHOD _THREAD MRMethod;
 
 inline void SWAP(PPM_CONTEXT::STATE& s1,PPM_CONTEXT::STATE& s2)
 {

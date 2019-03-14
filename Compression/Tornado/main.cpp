@@ -35,11 +35,11 @@ static char *name (PackMethod method)
     return namebuf;
 }
 
-enum MODE {AUTO, COMPRESS, DECOMPRESS, BENCHMARK, HELP};
+enum OPMODE {AUTO, COMPRESS, DECOMPRESS, BENCHMARK, HELP};
 
 // Structure for recording compression statistics and zero record of this type
 struct Results {
-  MODE mode;                   // Operation mode
+  OPMODE mode;                 // Operation mode
   PackMethod method;           // Compression method used
   char method_name[100];       // Short name of compression method
   char *filename;              // Names of input/output files
@@ -62,6 +62,22 @@ struct Results {
 #else
 #define GetSomeTime() (r.use_cpu_time? GetThreadCPUTime() : GetGlobalTime())
 #endif
+
+
+// Temporary :)
+int compress_all_at_once = 0;
+#define EnvSetConsoleTitle
+#define delete_file(name)  (remove(name))
+#define file_exists(name)  (access(name,0) == 0)
+#define dir_exists(name)   (dir_exists0(name))
+static inline int dir_exists0 (const char *name)
+{
+  struct _stat st;
+  _stat(name,&st);
+  return (st.st_mode & S_IFDIR) != 0;
+}
+//
+
 
 // Callback function called by compression routine to read/write data.
 // Also it's called by the driver to init/shutdown its processing
@@ -95,7 +111,7 @@ int ReadWriteCallback (const char *what, void *buf, int size, void *r_)
       if (r.fout)
       {
           if (size != file_write (r.fout, buf, size))
-              return FREEARC_ERRCODE_IO;
+              return FREEARC_ERRCODE_WRITE;
       }
       r.outsize += size;
     } else {
@@ -176,7 +192,7 @@ int ReadWriteCallback (const char *what, void *buf, int size, void *r_)
 int main (int argc, char **argv)
 {
     // Operation mode
-    MODE global_mode=AUTO;
+    OPMODE global_mode=AUTO;
 
     // Record that stores all the info required for ReadWriteCallback
     static Results r;
@@ -430,8 +446,11 @@ add_remove_ext: // Remove COMPRESS_EXT on the end of name or add DECOMPRESS_EXT 
             case FREEARC_ERRCODE_NOT_ENOUGH_MEMORY:
                 fprintf (stderr, "\nNot enough memory for (de)compression!");
                 break;
-            case FREEARC_ERRCODE_IO:
-                fprintf (stderr, "\nI/O error!");
+            case FREEARC_ERRCODE_READ:
+                fprintf (stderr, "\nRead error! Bad media?");
+                break;
+            case FREEARC_ERRCODE_WRITE:
+                fprintf (stderr, "\nWrite error! Disk full?");
                 break;
             case FREEARC_ERRCODE_BAD_COMPRESSED_DATA:
                 fprintf (stderr, "\nData can't be decompressed!");

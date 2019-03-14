@@ -56,9 +56,9 @@ void tta_error (long error, const char *name)
 {
     switch (error) {
     case COMMAND_ERROR:
-        fprintf (stderr, "Error:   unknown command '%s'\n%s\n", name, LINE); break;
+        fprintf (stderr, "Error:   unknown command '%s'\n%s\n", name, LINE); exit(1);
     case FORMAT_ERROR:
-        fprintf (stderr, "Error:   not compatible file format\n%s\n", LINE); break;
+        fprintf (stderr, "Error:   not compatible file format\n%s\n", LINE); exit(1);
     case FIND_ERROR:
         fprintf (stderr, "Error:   file(s) not found '%s'\n%s\n\n", name, LINE); exit(1);
     case CREATE_ERROR:
@@ -66,7 +66,7 @@ void tta_error (long error, const char *name)
     case OPEN_ERROR:
         fprintf (stderr, "Error:   can't open file '%s'\n%s\n\n", name, LINE); exit(1);
     case FILE_ERROR:
-        fprintf (stderr, "\nError:   file is corrupted\n%s\n", LINE); break;
+        fprintf (stderr, "\nError:   file is corrupted\n%s\n", LINE); exit(1);
     case WRITE_ERROR:
         fprintf (stderr, "\nError:   can't write to output file\n%s\n\n", LINE); exit(1);
     case READ_ERROR:
@@ -78,11 +78,8 @@ void tta_error (long error, const char *name)
 
 void *malloc1d (size_t num, size_t size)
 {
-    void    *array;
-
-    if ((array = calloc (num, size)) == NULL)
-        tta_error (MEMORY_ERROR, NULL);
-
+    void *array = BigAlloc (num*size);
+    if (array == NULL)   tta_error (MEMORY_ERROR, NULL);
     return (array);
 }
 
@@ -90,8 +87,8 @@ long **malloc2d (long num, unsigned long len)
 {
     long    i, **array, *tmp;
 
-    array = (long **) calloc (num, sizeof(long *) + len * sizeof(long));
-    if (array == NULL) tta_error (MEMORY_ERROR, NULL);
+    array = (long **) BigAlloc (num * (sizeof(long *) + len * sizeof(long)));
+    if (array == NULL)   tta_error (MEMORY_ERROR, NULL);
 
     for(i = 0, tmp = (long *) array + num; i < num; i++)
         array[i] = tmp + i * len;
@@ -186,7 +183,7 @@ static long write_wave (long **data, long byte_size, long num_chan, unsigned lon
     }
 
     res = callback ("write", buffer, byte_size * len * num_chan, auxdata);
-    free (buffer);
+    BigFreeAndNil (buffer);
     return res;
 }
 
@@ -339,7 +336,7 @@ storing:
         bytes_read = read_wave (data, rest, &origdata, prevptr, prevsize, byte_size, num_chan, frame_size, callback, auxdata);
         frame_len = bytes_read/(num_chan*byte_size);
         if (bytes_read>=prevsize) {
-            FreeAndNil(prevbuf); prevsize=0;  // Now prevbuf (data read for autodetection) is fully consumed
+            BigFreeAndNil(prevbuf); prevsize=0;  // Now prevbuf (data read for autodetection) is fully consumed
         } else {
             prevptr+=bytes_read; prevsize-=bytes_read;  // There are still (prevptr,prevsize) data to read in prevbuf
         }
@@ -353,7 +350,7 @@ storing:
         else            split_int   (data, frame_len, num_chan, buffer);
         //printf ("Data split\n");
 
-        init_bit_array_write ();
+        init_bit_array_write (num_chan*byte_size*(frame_size+100));  // it should be larger than any bytes_read
 
         // compress block
         for (i = 0; i < (num_chan << is_float); i++) {
@@ -387,17 +384,17 @@ storing:
         }
         WRITE (rest, bytes_read%(num_chan*byte_size));
 skip_writing_rest:
-        FreeAndNil (bit_array_write);
-        FreeAndNil (origdata);
+        BigFreeAndNil (bit_array_write);
+        BigFreeAndNil (origdata);
     }
 
 finished:
-    FreeAndNil (bit_array_write);
-    FreeAndNil (origdata);
-    FreeAndNil (buffer);
-    FreeAndNil (rest);
-    FreeAndNil (data);
-    FreeAndNil (prevbuf);
+    BigFreeAndNil (bit_array_write);
+    BigFreeAndNil (origdata);
+    BigFreeAndNil (buffer);
+    BigFreeAndNil (rest);
+    BigFreeAndNil (data);
+    BigFreeAndNil (prevbuf);
 
     return errcode;
 }
@@ -407,7 +404,6 @@ int tta_decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
     long    **buffer=NULL;
     void    *rest=NULL;
-    void    *buf1=NULL;
     void    *prevbuf=NULL;
     unsigned long   i, level, raw_data, num_chan, word_size, byte_size, bytes_read, offset;
     unsigned long   is_float, frame_len, bit_array_size;
@@ -440,12 +436,15 @@ int tta_decompress (CALLBACK_FUNC *callback, void *auxdata)
         }
     }
 
-    // Copy header of original data that isn't compressed
+    // Copy uncompressed header of original data
     READ4 (offset);
-    buf1 = malloc(offset);
-    READ (buf1, offset);
-    WRITE(buf1, offset);
-    FreeAndNil (buf1);
+    if (offset)
+    {
+        void *buf1 = malloc1d(1,offset);
+        READ (buf1, offset);
+        WRITE(buf1, offset);
+        BigFreeAndNil (buf1);
+    }
 
     rest = malloc1d (num_chan, byte_size);
 
@@ -466,7 +465,7 @@ int tta_decompress (CALLBACK_FUNC *callback, void *auxdata)
                 prevbuf = malloc1d (bytes_read, 1);  //   copy bytes_read bytes
                 READ  (prevbuf, bytes_read);         //     from input stream
                 WRITE (prevbuf, bytes_read);         //     to output stream
-                FreeAndNil (prevbuf);                //
+                BigFreeAndNil (prevbuf);             //
                 continue;                            //   and go to next block
             }
             init_bit_array_read (bit_array_size);
@@ -488,23 +487,22 @@ int tta_decompress (CALLBACK_FUNC *callback, void *auxdata)
         if (is_float)   combine_float (frame_len, num_chan, buffer);
         else            combine_int   (frame_len, num_chan, buffer);
 
-        FreeAndNil (bit_array_read);
+        BigFreeAndNil (bit_array_read);
         if (frame_len) {
             errcode = write_wave (buffer, byte_size, num_chan, frame_len, callback, auxdata);
             if (errcode<0)  goto finished;
         }
-        FreeAndNil (buffer);
+        BigFreeAndNil (buffer);
 
-        // Copy bytes at end of file
+        // Copy bytes at end of block
         READ  (rest, bytes_read%(num_chan*byte_size));
         WRITE (rest, bytes_read%(num_chan*byte_size));
     }
 finished:
-    FreeAndNil (prevbuf);
-    FreeAndNil (buf1);
-    FreeAndNil (bit_array_read);
-    FreeAndNil (buffer);
-    FreeAndNil (rest);
+    BigFreeAndNil (prevbuf);
+    BigFreeAndNil (bit_array_read);
+    BigFreeAndNil (buffer);
+    BigFreeAndNil (rest);
     return errcode;
 }
 

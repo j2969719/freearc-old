@@ -53,7 +53,7 @@ int CLS_METHOD::compress (CALLBACK_FUNC *_callback, void *_auxdata)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_CLS)
-void CLS_METHOD::ShowCompressionMethod (char *buf)
+void CLS_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     if (strequ(params,""))
       then strcpy (buf, name);

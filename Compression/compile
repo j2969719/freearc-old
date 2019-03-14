@@ -11,6 +11,9 @@ cd ..
 cd Delta
 make
 cd ..
+cd DisPack
+make
+cd ..
 cd MM
 make
 cd ..
@@ -26,7 +29,10 @@ cd ..
 cd GRZip
 make
 cd ..
-cd LZMA
+cd LZMA2
+make
+cd ..
+cd 4x4
 make
 cd ..
 cd _Encryption

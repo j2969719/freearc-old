@@ -1,7 +1,5 @@
 // Обработка архивов, созданных FreeArc:
 //   чтение и декодирование Footer блока и блоков оглавления
-
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -11,7 +9,9 @@
 
 #include "../Environment.h"
 #include "../Compression/Compression.h"
+#include "../Compression/MultiThreading.cpp"    // required for inclusion of multi-threading primitives used in MultiDecompress()
 
+#define FREEARC_FILE_EXTENSION             "arc"
 #define aSIGNATURE make4byte(65,114,67,1)  /* Сигнатура архивов FreeArc: ArC */
 #define MAX_FOOTER_DESCRIPTOR_SIZE 4096    /* Максимальный размер дескриптора блока архива */
 
@@ -33,102 +33,6 @@ public:
   ~ARRAY()                          {resize(0);}
   T& operator[] (int i)             {return data[i];}
   T& operator() (int i)             {return data[i];}
-};
-#endif  // __cplusplus
-
-
-/******************************************************************************
-** Класс, абстрагирующий работу с файлами *************************************
-******************************************************************************/
-#ifdef __cplusplus
-
-enum MODE {READ_MODE, WRITE_MODE}; // режим открытия файла
-class MYFILE
-{
-public:
-  int handle;
-  TCHAR *filename;
-  char *utf8name, *utf8lastname, *oemname;
-
-  void SetBaseDir (char *utf8dir)    // Set base dir
-  {
-    strcpy (utf8name, utf8dir);
-    if (utf8name[0] != '\0')  strcat (utf8name, STR_PATH_DELIMITER);
-    utf8lastname = strchr(utf8name, 0);
-  }
-
-#ifdef FREEARC_WIN
-#  ifdef FREEARC_GUI                 // Win32 GUI *****************************************
-  void setname (FILENAME _filename)  {strcpy (utf8lastname, _filename);
-                                      utf8_to_utf16 (utf8name, filename);}
-  CFILENAME displayname (void)       {return filename;}
-
-#  else                              // Win32 console *************************************
-  void setname (FILENAME _filename)  {strcpy (utf8lastname, _filename);
-                                      utf8_to_utf16 (utf8name, filename);
-                                      CharToOemW (filename, oemname);}
-  FILENAME displayname (void)        {return oemname;}
-#  endif
-
-#else                                // Linux *********************************************
-  void setname (FILENAME _filename)  {strcpy (utf8lastname, _filename);  filename = utf8name;}
-  FILENAME displayname (void)        {return utf8name;}
-
-#endif                               // END ***********************************************
-
-  void init()                             {handle=-1;
-#ifdef FREEARC_WIN
-                                           filename = (TCHAR*) malloc (MY_FILENAME_MAX*4);
-#  endif
-                                           oemname  = (char*)  malloc (MY_FILENAME_MAX);
-                                           utf8name = (char*)  malloc (MY_FILENAME_MAX*4);
-                                           *utf8name=0; utf8lastname=utf8name;}
-
-  MYFILE ()                               {init();}
-  MYFILE (FILENAME filename)              {init(); setname (filename);}
-  MYFILE (FILENAME filename, MODE mode)   {init(); open (filename, mode);}
-  ~MYFILE()                               {if (isopen()) close();
-                                           if ((char*)filename!=utf8name)  free(filename);
-                                           free(oemname); free(utf8name);}
-  bool   exists (void)                    {return file_exists(filename);}
-
-  MYFILE& open (FILENAME _filename, MODE mode)    // Открывает файл для чтения или записи
-  {
-    setname (_filename);
-    return open (mode);
-  }
-  MYFILE& open (MODE mode)    // Открывает файл для чтения или записи
-  {
-    if (mode==WRITE_MODE)  BuildPathTo (filename);
-#ifdef FREEARC_WIN
-    handle = ::_wopen (filename, mode==READ_MODE? O_RDONLY|O_BINARY : O_WRONLY|O_BINARY|O_CREAT|O_TRUNC, S_IREAD|S_IWRITE);
-#else
-    handle =   ::open (filename, mode==READ_MODE? O_RDONLY : O_WRONLY|O_CREAT|O_TRUNC, S_IREAD|S_IWRITE);
-#endif
-    CHECK (handle>=0, (s,"ERROR: can't open file %s", utf8name));
-    return *this;
-  }
-  void SetFileDateTime (time_t mtime)   {::SetFileDateTime (filename, mtime);}   // Устанавливает mtime файла
-  void close()    // Закрывает файл
-  {
-    CHECK (::close(handle)==0, (s,"ERROR: can't close file %s", utf8name));
-    handle = -1;
-  }
-  bool isopen()  {return handle>=0;}
-
-#ifdef FREEARC_WIN
-  FILESIZE size    ()                {return _filelengthi64 (handle);}            // Возвращает размер файла
-  FILESIZE curpos  ()                {return _lseeki64 (handle, 0,   SEEK_CUR);}  // Текущая позиция в файле
-  void     seek    (FILESIZE pos)    {CHECK( _lseeki64 (handle, pos, SEEK_SET) == pos, (s,"ERROR: file seek operation failed"));}       // Переходит на заданную позицию в файле
-#else
-  FILESIZE size    ()                {return myfilelength (handle);}
-  FILESIZE curpos  ()                {return lseek (handle, 0,   SEEK_CUR);}
-  void     seek    (FILESIZE pos)    {CHECK( lseek (handle, pos, SEEK_SET) == pos, (s,"ERROR: file seek operation failed"));}
-#endif
-
-  FILESIZE tryRead (void *buf, FILESIZE size)   {int result = ::read (handle, buf, size); CHECK(result>=0, (s,"ERROR: file read operation failed")); return result;}           // Возвращает кол-во прочитанных байт, которое может быть меньше запрошенного
-  void     read    (void *buf, FILESIZE size)   {CHECK (tryRead (buf, size) == size, (s,"ERROR: can't read %lu bytes", (unsigned long)size));}         // Возбуждает исключение, если не удалось прочесть указанное число байт
-  void     write   (void *buf, FILESIZE size)   {CHECK (::write (handle, buf, size) == size, (s,"ERROR: file write operation failed"));}
 };
 
 #endif  // __cplusplus
@@ -357,6 +261,7 @@ public:
   ARRAY <char>             arcComment; // Комментарий к архиву. Может содержать нулевые символы
   FILESIZE                 SFXSize;    // Размер SFX-модуля перед архивом
 
+  ARCHIVE () {}
   ARCHIVE (FILENAME arcname) : arcfile (arcname, READ_MODE) {}   // Открывает файл архива
   void read_structure();               // Считывает описания служебных блоков
 };

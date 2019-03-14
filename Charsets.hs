@@ -19,7 +19,7 @@ module Charsets where
 import Prelude hiding (catch)
 import Control.Concurrent
 import Control.Concurrent.MVar
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Array
 import Data.Char
@@ -154,7 +154,17 @@ linesCRLF = recursive oneline  -- oneline "abc\n..." = ("abc","...")
 -- Будем считать, что все GUI конфиг-файлы хранятся в UTF-8
 readConfigFile          = parseFile   '8'
 saveConfigFile   file   = unParseFile '8' file . joinWith "\n"
-modifyConfigFile file f = handle (\e->return []) (readConfigFile file) >>== f >>= saveConfigFile file
+modifyConfigFile file f = readConfigFileManyTries file >>== f >>= saveConfigFile file
+-- Под Windows дополнительно добавляем BOM и используем CR/LF
+saveWindowsConfigFile file = unParseFile '8' file . (chr 0xFEFF:) . joinWith "\r\n"
+
+-- Прочитать конфиг-файл, повторяя попытки если он пуст/недоступен
+readConfigFileManyTries file = go 1 where
+  go attempt = do xs <- readConfigFile file `catch` (\e->return [])
+                  if xs==[] && attempt<100
+                   then do sleepSeconds 0.01
+                           go (attempt+1)
+                   else return xs
 
 
 ---------------------------------------------------------------------------------------------------
@@ -286,7 +296,7 @@ foreign import stdcall unsafe "winuser.h CharToOemBuffA"
 
 
 ---------------------------------------------------------------------------------------------------
----- UTF-8, UTF-16 codecs -------------------------------------------------------------------------
+---- UTF-8, UTF-16 codecs; URL encoding -----------------------------------------------------------
 ---------------------------------------------------------------------------------------------------
 
 -- |Translate string from UTF-16 encoding to Unicode
@@ -359,6 +369,19 @@ unicode2utf8 s =
                                         chr (0x80 .|. ( ord x .&. 0x3F)) :
                                         go xs
 
+-- |Закодировать символы, запрещённые в URL
+urlEncode = concatMap (\c -> if isReservedChar c then '%':encode16 [c] else [c]) . unicode2utf8
+  where
+        isReservedChar x
+            | x >= 'a' && x <= 'z' = False
+            | x >= 'A' && x <= 'Z' = False
+            | x >= '0' && x <= '9' = False
+            | x <= chr 0x20 || x >= chr 0x7F = True
+            | otherwise = x `elem` [';','/','?',':','@','&'
+                                   ,'=','+',',','$','{','}'
+                                   ,'|','\\','^','[',']','`'
+                                   ,'<','>','#','%', chr 34]
+
 
 ---------------------------------------------------------------------------------------------------
 ---- Internalization ------------------------------------------------------------------------------
@@ -380,6 +403,10 @@ setLocale localeFile = do
 i18ns = mapM i18n
 i18n  = i18n' .>>== fst
 i18n' = i18n_general (val locale)
+i18no = drop 5    -- убрать номер из строки, не переводя её на местный язык
+
+-- |Проверка что это строка вида "dddd ...."
+is_i18 str = all isDigit (take 4 str) && (take 1 (drop 4 str) == " ")
 
 {-# NOINLINE i18fmt #-}
 -- |Отформатировать список строк, используя первую как требущий локализации шаблон,

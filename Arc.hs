@@ -29,7 +29,7 @@ module Main where
 
 import Prelude hiding (catch)
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.List
 import System.Mem
@@ -65,11 +65,10 @@ doMain args  = do
   setUncaughtExceptionHandler handler
   setCtrlBreakHandler $ do          -- Организуем обработку ^Break
   ensureCtrlBreak "resetConsoleTitle" (resetConsoleTitle) $ do
+  args <- processCmdfile args       -- Заменить @cmdfile в командной строке на его содержимое
   luaLevel "Program" [("command", args)] $ do
 #ifdef FREEARC_GUI
-  if length args < 2                -- При вызове программы без аргументов или с одним аргументом (именем каталога/архива)
-    then myGUI run args             --   запускаем полноценный Archive Manager
-    else do                         --   а иначе - просто отрабатываем команды (де)архивации
+  parseGUIcommands run args $ \args -> do  -- Обработка GUI-специфичных вариаций командной строки
 #endif
   uiStartProgram                    -- Открыть UI
   commands <- parseCmdline args     -- Превратить командную строку в список команд на выполнение
@@ -77,16 +76,18 @@ doMain args  = do
   uiDoneProgram                     -- Закрыть UI
 
  where
-  handler ex  =
+  handler ex  = do
 #ifdef FREEARC_GUI
-    mapM_ doNothing $
+    doNothing0
 #else
+    whenM (val programFinished) $ do
+      foreverM$ sleepSeconds 1      -- Если программа находится в shutdown, позволим ему завершить программу
     registerError$ GENERAL_ERROR$
-#endif
       case ex of
         Deadlock    -> ["0011 No threads to run: infinite loop or deadlock?"]
         ErrorCall s -> [s]
         other       -> [show ex]
+#endif
 
 
 -- |Диспетчеризует команду и организует её повторение для каждого подходящего архива

@@ -180,8 +180,8 @@ BOOL WINAPI _export GetFormatName(int Type,char *FormatName,char *DefaultExt)
 {
   if (Type==0)
   {
-    strcpy(FormatName,"FreeArc");
-    strcpy(DefaultExt,"arc");
+    strcpy(FormatName, "FreeArc");
+    strcpy(DefaultExt, FREEARC_FILE_EXTENSION);
     return(TRUE);
   }
   return(FALSE);

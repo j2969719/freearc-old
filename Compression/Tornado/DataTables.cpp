@@ -127,6 +127,7 @@ struct DataTableEntry {int table_type; BYTE *table_start; int table_len;};
 // The things become especially interesting for tables divided between two write chunks :D
 struct DataTables
 {
+   int ENTRIES;     // Number of entries in the list. When list overflows, data in outbuf are processed and written to outstream (unless we are in compress_all_at_once mode)
    DataTableEntry   *tables, *curtable, *tables_end;   // Pointers to the start, cuurent entry and end of allocated DataTableEntries table
 
    int               base_data_bytes;
@@ -134,7 +135,7 @@ struct DataTables
    byte              original[MAX_TABLE_ROW_AT_DECOMPRESSION];
 
    DataTables();
-   ~DataTables()   {free(tables);}
+   ~DataTables()   {MidFree(tables);}
 
    // Add description of one more datatable to the list
    void add (int _table_type, BYTE *_table_start, int _table_len);
@@ -163,8 +164,8 @@ struct DataTables
 
 DataTables::DataTables()
 {
-    const int ENTRIES = 10000;   // Number of entries in the list. When list overflows, data in outbuf are processed and written to outstream
-    tables     = (DataTableEntry *) malloc (sizeof(DataTableEntry) * ENTRIES);
+    ENTRIES    = 10000;
+    tables     = (DataTableEntry *) MidAlloc (sizeof(DataTableEntry) * ENTRIES);
     curtable   = tables;
     tables_end = tables + ENTRIES;
 }
@@ -172,7 +173,15 @@ DataTables::DataTables()
 // Add description of one more datatable to the list
 void DataTables::add (int _table_type, BYTE *_table_start, int _table_len)
 {
-    CHECK (curtable<tables_end,                          (s,"Fatal error: DataTables::add() called without prior filled() check"));
+    if (curtable >= tables_end) {
+        ENTRIES *= 2;
+        DataTableEntry *newtables  =  (DataTableEntry *) MidAlloc (sizeof(DataTableEntry) * ENTRIES);
+        memcpy (newtables, tables, (char*)curtable - (char*)tables);
+        MidFree(tables);
+        curtable   = newtables + (curtable - tables);
+        tables     = newtables;
+        tables_end = newtables + ENTRIES;
+    }
     CHECK (_table_type<=MAX_TABLE_ROW_AT_DECOMPRESSION,  (s,"Fatal error: DataTables::add() called with _table_type=%d that is larger than maximum allowed %d", _table_type, MAX_TABLE_ROW_AT_DECOMPRESSION));
     curtable->table_type  = _table_type;
     curtable->table_start = _table_start;

@@ -14,18 +14,52 @@
 ***    1185 Protection:=Appends recovery information to archive            ***
 ******************************************************************************
 
-Language name in english and mother tongue
-0000 Language=Dutch (Nederlands)
-0159 Copyright=Vertaald door (Translated by):\nPatrick Noyens (aka Pat357)\nFerry Heibrink \n1 april 2009
+Metainformation (not translations!)
+0000 Language name in english and mother tongue=Dutch (Nederlands)
+0159 Translated by=Vertaald door (Translated by):\nPatrick Noyens (aka Pat357)\nFerry Heibrink \n6 May 2010
+0462 Short language code=nl
 
-Language-specific URLs relative to http://freearc.org/ and helpfiles
+Language-specific helpfiles (not translations!)
 Filled only for languages providing their own translations
-0254 Homepage (URL, not translation!)=??
-0255 News page (URL, not translation!)=??
-0371 Forum page (URL, not translation!)=??
-0372 Wiki page (URL, not translation!)=??
-0256 Helpfile (URL, not translation!)=??
-0257 Command-line help (URL, not translation!)=??
+0256 Helpfile=??
+0257 Command-line help=??
+
+
+=== Explorer context menu =======================================================
+0391 Add to "%s"=Toevoegen aan "%s"
+0392 Compress the selected files using FreeArc=Geselecteerde bestanden inpakken met FreeArc
+0393 Add to SFX "%s"=Toevoegen aan SFX-archief
+0394 Compress the selected files into SFX using FreeArc=Geselecteerde bestanden inpakken naar SFX-archief met FreeArc
+0395 Add to archive...=Toevoegen aan archief...
+0396 Compress the selected files using FreeArc via dialog=Geselecteerde bestanden inpakken via FreeArc dialoog
+--
+0397 Open with FreeArc=Openen met FreeArc
+0398 Open the selected archive(s) with FreeArc=Geselecteerde archieven openen met FreeArc
+0399 Extract to "%s"=Uitpakken naar "%s"
+0400 Extract the selected archive(s) to new folder=Geselecteerde archieven uitpakken in nieuwe map
+0401 Extract here=Hier uitpakken
+0402 Extract the selected archive(s) to the same folder=Geselecteerde archieven uitpakken naar dezelfde map
+0403 Extract...=Uitpakken...
+0404 Extract the selected archive(s) via dialog=Geselecteerde archieven uitpakken via dialoog
+0405 Test=Test
+0406 Test the selected archive(s)=Geselecteerde archieven testen
+--
+0407 Convert to SFX=Converteer naar SFX
+0408 Convert the selected archive(s) to SFX=Geselecteerde archieven converteren naar SFX (EXE archieven
+0409 Convert from SFX=Converteer van SFX
+0410 Convert the selected SFX(es) to normal archive(s)=Geselecteerde archieven van SFX naar normale .ARC archieven converteren
+--
+0411 Modify...=Wijzigen
+0412 Modify the selected archives via dialog=Geselecteerde archieven wijzigen via dialoog
+0413 Join...=Samenvoegen...
+0414 Join the selected archives via dialog=Geselecteerde archieven samenvoegen via dialoog
+--
+0415 Convert to .arc=Converteer naar .ARC
+0416 Convert the selected archive(s) to FreeArc format=Geselecteerde archieven converteren naar FreeArc archieven
+0417 Convert to .arc SFX=Converteer naar FreeArc .SFX
+0418 Convert the selected archive(s) to FreeArc SFX=Geselecteerde archieven converteren naar FreeArc .SFX's (EXE archieven)
+0419 Convert to .arc...=Naar .ARC converteren
+0420 Convert the selected archive(s) to FreeArc format via dialog=Geselecteerde archieven converteren naar FreeArc archieven via dialoog
 
 
 === Menu ========================================================================
@@ -67,13 +101,15 @@ Commands menu/toolbar
 
 Tools menu/toolbar
 0266 Lock=Vergrendelen
-0267 Lock archive from further changes=Archief vergrendelen zodat niet meer kan worden gewijzigd
+0267 Lock archive from further changes=Archief vergrendelen (kan niet meer worden gewijzigd)
 0268 Comment=Commentaar
 0269 Edit archive comment=Toevoegen/wijzigen van commentaar
 0293 Recompress=Opnieuw inpakken
 0294 Recompress files in archive=Archief inhoud opniew inpakken
 0270 Convert to SFX=Maak SFX
 0271 Convert archive to SFX=Maak archief SFX
+0426 Convert to FreeArc=Converteer naar FreeArc archieven
+0427 Convert foreign archive to FreeArc format=Extern archief converteren naar FreeArc archief
 0272 Encrypt=Beveiligen met paswoord
 0273 Encrypt archive contents=Archief beveiligen met paswoord
 0274 Protect=Herstelinformatie
@@ -88,10 +124,10 @@ Tools menu/toolbar
 Options menu/toolbar
 0064 Settings=Instellingen
 0065 Edit program settings=Programma-Instellingen
-0276 View log=Logfile bekijken
-0277 View logfile=Logfile bekijken
-0278 Clear log=Logfile wissen
-0279 Clear logfile=Logfile wissen
+0276 View log=Logbestand bekijken
+0277 View logfile=Logbestand bekijken
+0278 Clear log=Logbestand wissen
+0279 Clear logfile=Logbestand wissen
 
 Help menu/toolbar
 0280 Main help=Help
@@ -133,7 +169,7 @@ Messages
 0071 %1: no such file or directory!=%1: bestand of map bestaat niet
 0133 You can't compress files directly from archive!=Je kunt geen bestanden rechtstreeks vanuit het archief inpakken!
 0145 You can't join archives directly from archive!=Je kunt geen bestanden rechtstreeks vanuit het archief samenvoegen!
-0251 Abort operation?=Afbreken
+0251 Abort operation?=Afbreken?
 
 
 === Dialogs =======================================================================
@@ -156,6 +192,8 @@ Add dialog
 0149 Join all archives=Voeg alle archieven samen
 0150 Join %1 with another archive=Voeg %1 samen met een ander archief
 0151 Join %2 archives=Samenvoegen %2 archieven
+0428 Convert %1 to FreeArc format=%1 converteren naar FreeArc archief
+0429 Convert %2 archives to FreeArc format=%2 archieven converteren naar FreeArc archieven (FreeArc-formaat)
 ---------
 0182 Main=Hoofd
 0131 Output archive:=Doelbestand &Archief:
@@ -224,6 +262,7 @@ Delete dialog
 0161 Delete %1?=Weet u zeker dat u '%1' wilt verwijderen?
 0019 Delete %2 file(s) from archive?=Weet u zeker dat u deze %2 items wilt verwijderen?
 0020 Delete %2 file(s)?=Weet u zeker dat u deze %2 items wilt verwijderen?
+0484 Delete directory %1?=Map %1 verwijderen?
 
 
 Extract dialog
@@ -247,12 +286,16 @@ Extract dialog
 0004 Output directory:=Uitpakken naar map:
 0021 Select output directory=Selecteer doelmap
 0014 Append archive name to the output directory=Voeg naam van archief toe aan doelmap
+0468 Open output directory in Explorer=Verkenner openen in folder met resultaat
 --Other
+0425 Keep broken extracted files=Uitgepakte bestanden die defect zijn behouden
+0479 Shutdown computer when operation completed=Computer afsluiten als FreeArc klaar is ?
 0072 Additional options:=Overige opties:
 
 
 Archive information dialog
 0085 All about %1=Alles over %1
+0465 Archive type:=Archief type:
 0173 Directories:=Mappen:
 0088 Files:=Bestanden:
 0089 Total bytes:=Totale grootte:
@@ -260,6 +303,8 @@ Archive information dialog
 0091 Ratio:=Compressieverhouding:
 --
 0104 Directory blocks:=Mapblokken
+0463 Directory, bytes:=Map, bytes:
+0464 Directory, compressed:=Map, ingepakt:
 0092 Solid blocks:=Solide blokken
 0093 Avg. blocksize:=Gemm. grootte
 --
@@ -274,6 +319,13 @@ Archive information dialog
 --
 0097 Encryption algorithms:=Encr&yptiemethode:
 0098 Archive comment:=&Opmerking:
+---
+0449 Solid blocks=Solide blokken
+0450 Position=Positie
+0451 Size=Grootte
+0452 Compressed=Ingepakt
+0453 Files=Bestanden
+0454 Method=Methode
 
 
 Settings dialog
@@ -285,16 +337,29 @@ Settings dialog
 0170 Full name:=Volledige naam
 0171 Copyright:=Auteursrecht:
 0166 Logfile:=Logbestand:
-0292 View=Beeld
+0292 View=Bekijken
 0167 Select logfile=Selecteer logbestand
+0447 Temporary directory:=Tijdelijke map
+0448 Select directory for temporary files=Kies map voor tijdelijke bestanden
 0172 Associate FreeArc with .arc files=Koppel .arc bestanden aan FreeArc
-0361 Add captions to toolbar buttons=Zet opdrachtnamen bij de knoppen in het menu
+0471 Associate FreeArc with other archives=FreeArc koppelen met andere archieven?
 0370 Watch for new versions via Internet=Automatisch controleren voor nieuwere versies via internet
 0168 You should restart FreeArc in order for a language settings to take effect.=U dient FreeArc te herstarten alvorens de taalinstellingen geactiveerd worden.
 0169 Passwords need to be entered again after restart.=Wachtwoorden dienen na herstarten opnieuw ingevoerd te worden.
 --
+0466 Interface=Interface
+0361 Add captions to toolbar buttons=Zet opdrachtnamen bij de knoppen in het menu
+0469 Show "Test archive" dialog=Dialoog tonen voor "test archief"
+0485 Open .tar.gz-like archives in single step=.tar.gz archieven in 1 stap openen?
+0467 Unpack whole archive when running:=Archief volledig uitpakken (alle bestanden)
+--
+0421 Explorer integration=Intergratie in verkenner
+0422 Enable context menu in Explorer=gebruik context-menu in verkenner
+0423 Make it cascaded=1 hoofdmenu met verschillende submenu's gebruiken (cascaded menu)
+0424 Enable individual commands:=Aparte comando's aanzetten
+--
 0388 Info=Informatie
-0389 Largest contiguous free memblock:=Grootste aaneensluitend vrij geheugenblok:
+0461 Largest address space block:=Grootste adres ruimte blok (in geheugenruimte)
 
 
 Logfiles
@@ -306,6 +371,10 @@ Checking for updates
 0296 Cannot open %1. Do you want to check the page with browser?=Kan %1 niet openen. Deze pagina openen met browser?
 0297 Nothing new at %1=Geen updates bescikbaar op %1
 0298 Found new information at %1! Open the page with browser?=Nieuwe informatie gevonden op %1! Deze pagina openen met browser?
+
+About dialog
+0459 High-performance archiver=Zeer performante archiver
+0460 Free as well for commercial as for non-commercial use=Gratis voor commercieel en niet-commercieel (persoonlijk) gebruik
 
 
 === Profile settings ============================================================
@@ -357,12 +426,9 @@ Many dialogs
 0081 &Cancel=&Annuleren
 0363 &Select=&Selecteer
 0364 &Close=A&fsluiten
+0432 &Detach=Ont&koppel
 
 Progress indicator
---Buttons
-0052 &Background=&Achtergrond
-0053 &Pause=&Pauze
-0054 &Continue=&Hervatten
 --Labels
 0056 Files=Bestanden:
 0057 Total files=Totaal aantal bestanden
@@ -383,6 +449,13 @@ Progress indicator
 0385 Scanning archive for damages=Archief controleren op beschadigingen
 0386 Protecting archive from damages=Hersteldata aan archief toevoegen
 0387 Recovering archive=Archief herstellen
+--Extra options
+0446 Keep window on top=Window op de voorgrond houden
+--Buttons
+0052 &Background=&Achtergrond
+0053 &Pause=&Pauze
+0054 &Continue=&Hervatten
+0470 &Close=A&fsluiten
 
 File overwrite dialog
 0078 Confirm File Replace=Bevestigen overschijven bestand
@@ -405,19 +478,23 @@ Archive comment dialog
 
 
 === Infoline messages ====================================================
-0228 Deleting from %1=Bezig met verwijderen uit %1
+0439 Listing archive %1=Oplijsten inhoud archive %1
+0445 SUCCESFULLY LISTED %1=ARCHIVE %1 SUCCESVOL OPGELIJST
+0442 %2 WARNINGS WHILE LISTING %1=%2 WAARSCHUWINGEN BIJ OPLIJSTEN VAN %1
+
+0435 Deleting files from archive %1=Bestanden verwijderen van archief %1
 0229 FILES SUCCESFULLY DELETED FROM %1=BESTANDEN VANUIT %1 SUCCESVOL VERWIJDERD
 0230 %2 WARNINGS WHILE DELETING FROM %1=%2 WAARSCHIJWINGEN TIJDENS VERWIJDEREN
 
-0231 Testing %1=TESTEN VAN %1
+0440 Testing archive %1=Testen archief %1
 0232 SUCCESFULLY TESTED %1=%1 SUCCESVOL GETEST
 0233 %2 WARNINGS WHILE TESTING %1=%2 WAARSCHUWINGEN TIJDENS TESTEN
 
-0234 Extracting files from %1=UITPAKKEN BESTANDEN VANUIT %1
+0441 Extracting files from archive %1=Uitpakken van bestanden van archief %1
 0235 FILES SUCCESFULLY EXTRACTED FROM %1=BESTANDEN SUCCESVOL UITGEPAKT VANUIT %1
 0236 %2 WARNINGS WHILE EXTRACTING FILES FROM %1=%2 WAARSCHUWINGEN TIJDENS UITPAKKEN BESTANDEN VANUIT %1
 
-0237 Modifying %1=Bezig met wijzigen %1
+0433 Modifying archive %1=Wijzigen archief %1
 0238 SUCCESFULLY MODIFIED %1=%1 SUCCESVOL GEWIJZIGD
 0239 %2 WARNINGS WHILE MODIFYING %1=%2 WAARSCHUWINGEN TIJDENS WIJZIGEN %1
 
@@ -425,11 +502,15 @@ Archive comment dialog
 0241 SUCCESFULLY JOINED ARCHIVES TO %1=SUCCESVOL ARCHIEVEN NAAR %1 SAMENGEVOEGD
 0242 %2 WARNINGS WHILE JOINING ARCHIVES TO %1=%2 WAARSCHUWINGEN TIJDENS SAMENVOEGEN ARCHIEVEN NAAR %2
 
-0243 Adding to %1=Toevoegen naar %1
-0244 FILES SUCCESFULLY ADDED TO %1=BESTANDEN SUCCESVOEG TOEGEVOEGD AAN %1
-0245 %2 WARNINGS WHILE ADDING TO %1=%2 WAARSCHUWINGEN TIJDENS TOEVOEGEN AAN %1
+0437 Creating archive %1=Maken archief %1
+0443 SUCCESFULLY CREATED %1=ARCHIEF %1 SUCCESVOL GEMAAKT
+0434 %2 WARNINGS WHILE CREATING %1=%2 WAARSCHUWINGEN TIJDENS MAKEN VAN ARCHIEF %1
 
-0299 Lock archive(s)?=Archief vergrendelen/verzegelen
+0438 Updating archive %1=Bijwerken archief %1
+0444 SUCCESFULLY UPDATED %1=ARCHIEF %1 SUCCESVOL BIJGEWERKT
+0436 %2 WARNINGS WHILE UPDATING %1=%2 WAARSCHUWINGEN TIJDENS BIJWERKEN VAN ARCHIEF %1
+
+0299 Lock archive(s)?=Archief vergrendelen/verzegelen?
 0300 Locking archive %1=Vergrendelen archief %1
 0301 SUCCESFULLY LOCKED ARCHIVE %1= ARCHIEF %1 SUCCESVOL VERGRENDELD
 0302 %2 WARNINGS WHILE LOCKING ARCHIVE %1=%2 WAARSCHUWINGEN TIJDENS VERGRENDELEN ARCHIEF %1
@@ -438,6 +519,13 @@ Archive comment dialog
 0382 Repairing archive %1=Herstel archief %1
 0383 SUCCESFULLY REPAIRED ARCHIVE %1=Archief % succesvol hersteld
 0384 %2 WARNINGS WHILE REPAIRING ARCHIVE %1=%Er waren 2 waarschuwingen tijdens herstellen van archief %1
+
+
+=== Console messages ====================================================
+0480 Compressing %1=Inpakken van %1
+0481 Testing %1=Testen van %1
+0482 Extracting %1=Uitpakken van %1
+0483 Skipping %1=%1 overslaan
 
 
 === Error messages =======================================================
@@ -462,10 +550,9 @@ Archive comment dialog
 0330 can't read directory "%1"=kan map niet lezen "%1"
 0331 can't get info about file "%1"=kan geen informatie bekomen van bestand "%1"
 0332 can't open file "%1"=kan bestand niet openen "%1"
-0333 CRC error in file "%1"=CRC fout in bestand "%1"
 0334 bad section %1 in %2=ongeldige sectie %1 in %2
-0335 operation terminated!=bewerking afgebroken!
-0336 program terminated!=programma afgebroken!
+0455 Operation terminated by user!=Bewerking afgebroken door gebruiker!
+0456 Program terminated by user!=Programma afgebroken door gebruiker!
 0337 no files, erasing empty archive=geen bestanden, leeg archief wissen?
 0338 skipped %1 fake files= aantal fake bestanden overgeslagen %1
 0339 bad password for archive %1=ongeldig paswoord voor archief %1
@@ -492,19 +579,30 @@ Archive comment dialog
 0358 last block of archive is not footer block=Laatste blok van archive is geen correct 'footer-block'
 0377 command "%1" shouldn't have additional arguments=opdracht "%1" mag geen opties hebben
 0378 bad name or parameters in encryption algorithm %1=ongeldige naam of optie(s) in encryptie-algoritme
+0472 Unsupported compression method for "%1".=Niet ondersteunde compressiemethode voor "%1".
+0473 Data error in "%1". File is broken.=Gegevensfout in "%1". Bestand is beschadigd.
+0474 Data error in encrypted file "%1". Wrong password?=Gegevensfout in het gecodeerde bestand "%1". Verkeerd wachtwoord?
+0475 CRC failed in "%1". File is broken.=CRC fout in "%1". Bestand is beschadigd.
+0476 CRC failed in encrypted file "%1". Wrong password?=CRC fout in het gecodeerde bestand "%1". Verkeerd wachtwoord?
+0477 Unknown error=Onbekende fout
+0478 can't modify non-FreeArc archive=kan een niet FreeArc archief niet wijzigen
 
 Errors returned by compression methods
 0365 general (de)compression error in %1=algemene fout bij inpakken of uitpakken in %1
 0366 invalid compression method or parameters in %1=ongeldige compressie methode of parameters in %1
 0367 can't allocate memory required for (de)compression in %1=kan nodig geheugen voor in- of uitpakken niet vrijmaken voor %1 - onvoldoende vrij geheugen
-0368 I/O error in compression algorithm %1=I/O fout in compressie-algoritme %1
 0369 bad compressed data in %1=ongeldige ingepakte gegevens in %1
+0430 read error (bad media?) in compression algorithm %1=Leesfout (slecht medium?)in inpak-algoritme %1
+0431 write error (disk full?) in compression algorithm %1=schrijffout (disk vol?)in inpak/uitpak-algoritme %1
 
 
 === Standard profiles ====================================================
 Compression
 0771 Maximum=Maximaal
 0772 Maximum with fast decompression=Maximaal met snelle decompressie
+0773 Ultra (require 2 gb RAM for decompression)=Ultra (2 GB RAM nodig voor uitpakken)
+0774 Maximum (require 1 gb RAM for decompression)=Maximum (1 GB RAM nodig voor uitpakken)
+0775 Best asymmetric (with fast decompression)=Best asymmetric (snel uitpakken)
 0752 No compression=geen compressie
 
 Encryption
@@ -587,21 +685,25 @@ Add dialog
 1207 Delete previous archive contents=Opgelet! Als je deze optie activeert zal de inhoud van het archief eerst worden gewist alvorens er nieuwe files/folders worden toegevoegd! \nDEZE BEWERKING KAN NIET ONGEDAAN WORDEN GEMAAKT!
 1208 Order of files in archive=Door deze optie te activeren kan de compressie-verhouding worden verhoogd, afhankelijk van de sorteermethode.\n (ook afhankelijk van het type bestanden die gearchiveerd worden)
 --
-1222 Include only files=Deze optie kan je activeren als je het type/types files specifieert die je wil archiveren. Bijvoorbeeld alle .txt files.
-1223 Exclude files=Activeer deze optie als je bepaalde files niet wil archiveren. Bijvoorbeeld alle .BAK bestanden niet mee archiveren
+1222 Include only files=Deze optie kan je activeren als je het type/types bestanden specifieert die je wil archiveren. Bijvoorbeeld alle .txt bestanden.
+1223 Exclude files=Activeer deze optie als je bepaalde bestanden niet wil archiveren. Bijvoorbeeld alle .BAK bestanden niet mee archiveren
+
+--Settings dialog
+1467 Unpack whole archive when running:=Archief volledig uitpakken (alle bestanden)
+1469 Show "Test archive" dialog=Toon dialoog "Test archief"
 
 --Compression settings
 1113 Fast, low-memory decompression=Uitschakelen van algoritmes die traag zijn of veel geheugen verbruiken tijdens uitpakken. Een bij-effect hiervan is wel dat het uitpakken trager word en tevens een groter archief opleverd.
 1176 Filetype auto-detection=Als deze is ingeschakeld, analyzeerd FreeArc de inhoud van elk bestand en selecteerd hier een optimale compressiemethode voor. Als deze uitgeschakeld is zal FreeArc compressiemethoden toepassen zoals beschreven in 'arc.groups'.
 1138 Bytes, no more than:=Specifieer de grootte van de solide blokken : niet meer dan n MB per block.\nGrote waardes resulteren doorgaans in betere compressie maar tragere uitpak-snelheid, terwijl kleine waardes aangewezen zijn voor hogere uitpak-snelheid. 
-1139 Files, no more than:=Specifieer het maximum aantal files in solid block : niet meer dan n files per block\nGrote waardes resulteren doorgaans in betere compressie maar tragere uitpak-snelheid, terwijl kleine waardes aangewezen zijn voor hogere uitpak-snelheid.
-1140 Split by extension=opslitsen van solide blokken per bestand-extensie, zodat elk blok alle bestanden bevat met 1 bepaalde extensie. \nBijvoorbeeld 1 blok voor .EXE files, 1 block voor .TXT files).\nDeze optie verhoogt meestal de compressie, maar het uitpakken kan trager worden.
+1139 Files, no more than:=Specifieer het maximum aantal files in solid block : niet meer dan n bestanden per block\nGrote waardes resulteren doorgaans in betere compressie maar tragere uitpak-snelheid, terwijl kleine waardes aangewezen zijn voor hogere uitpak-snelheid.
+1140 Split by extension=opslitsen van solide blokken per bestand-extensie, zodat elk blok alle bestanden bevat met 1 bepaalde extensie. \nBijvoorbeeld 1 blok voor .EXE bestanden, 1 block voor .TXT bestanden).\nDeze optie verhoogt meestal de compressie, maar het uitpakken kan trager worden.
 
 --Encryption settings
 1120 Encrypt archive directory=Past encryptie toe op archief meta-informatie (bestandsnamen, groottes en CRC informatie). Om het bestand in te zien dient u eerst het wachtwoord in te geven. Het word sterk aangeraden deze optie te gebruiken om goede beveiliging van de gegevens te waarborgen.
 1123 Keyfile:=Een sleutelbestand is een standaard bestand waarvan de inhoud aan het wachtwoord word toegevoegd. Zonder sleutelbestand en wachtwoord is het onmogelijk het archief te openen. Gebruik van een sleutelbestand versterkt de beveiliging van een bestand enorm bij gebruik van AES en vergelijkbare encryptiesystemen
 1125 Generate new keyfile=Genereer een nieuw sleutelbestand met zelfgekozen naam welke 1KB aan cryptografisch gegenereerde willekeurige data bevat
-1181 Use password=Gebruik deze optie om archieven te beveiligen met een paswoord (encryptie). \n Bewaar dit paswoord op een veilige plaats. \n(Je kan ook een paswoord EN en key-file tesamen gebruiken om de beveiliging nog te verhogen)
+1181 Use password=Gebruik deze optie om archieven te beveiligen met een paswoord (encryptie). \n Bewaar dit paswoord op een veilige plaats. \n(Je kan ook een paswoord EN en sleutel-bestand tesamen gebruiken om de beveiliging nog te verhogen)
 
 
 === Everything else ====================================================

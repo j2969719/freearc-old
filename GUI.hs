@@ -6,8 +6,9 @@ module GUI where
 
 import Prelude    hiding (catch)
 import Control.Monad
+import Control.Monad.Fix
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Data.Char  hiding (Control)
 import Data.IORef
 import Data.List
@@ -20,6 +21,7 @@ import System.IO
 import System.Time
 
 import Graphics.UI.Gtk
+import Graphics.UI.Gtk.Gdk.Events
 import Graphics.UI.Gtk.ModelView as New
 
 import Utils
@@ -30,66 +32,90 @@ import FileInfo
 import Options
 import UIBase
 
--- |Файл настроек программы
-aINI_FILE = "freearc.ini"
-
 -- |Файл с описанием меню и тулбара
 aMENU_FILE = "freearc.menu"
 
 -- Теги в INI-файле
 aINITAG_LANGUAGE = "language"
-aINITAG_PROGRESS = "ProgressWindowSize"
 
 -- |Каталог локализаций
 aLANG_DIR = "arc.languages"
 
--- |Имя конфиг-файла где хранятся душераздирающие истории открытых архивов
-aHISTORY_FILE = "freearc.history"
-
 -- |Имя файла с иконкой программы
-aICON_FILE = "FreeArc.ico"
+aICON_FILE = aFreeArc++".ico"
 
 -- |Фильтры для выбора архива
-aARCFILE_FILTER = ["0307 FreeArc archives (*.arc)", "0308 Archives and SFXes (*.arc;*.exe)"]
+aARCFILE_FILTER = ["0307 "++aFreeArc++" archives (*.arc)", "0308 Archives and SFXes (*.arc;*.exe)"]
+
+shutdown_msg = "0479 Shutdown computer when operation completed"
+
+-- |Фильтр для выбора любого файла
+aANYFILE_FILTER = []
+
+-- |Локализация
+loadTranslation = do
+  langDir  <- findDir libraryFilePlaces aLANG_DIR
+  settings <- readIniFile
+  setLocale$ langDir </> (settings.$lookup aINITAG_LANGUAGE `defaultVal` aLANG_FILE)
+
+-- |Прочитать настройки программы из ini-файла
+readIniFile = do
+  inifile  <- findFile configFilePlaces aINI_FILE
+  inifile  &&&  readConfigFile inifile >>== map (split2 '=')
 
 
 ----------------------------------------------------------------------------------------------------
 ---- Отображение индикатора прогресса --------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
--- |Инициализирует Gtk и создаёт начальное окно программы
-startGUI action = runInBoundThread $ do
-  unsafeInitGUIForThreadedRTS
-  guiThread =:: getOsThreadId
-  action >>= widgetShowAll
-  mainGUI
-
 -- |Переменная, хранящая номер GUI-треда
 guiThread  =  unsafePerformIO$ newIORef$ error "undefined GUI::guiThread"
 
--- |Инициализация GUI-части программы
-guiStartProgram = forkIO$ startGUI (fmap fst runIndicators)
+-- |Инициализация Gtk для интерактивной работы (режим FileManager)
+runGUI action = do
+  runInBoundThread $ do
+  unsafeInitGUIForThreadedRTS
+  guiThread =:: getOsThreadId
+  runLanguageDialog
+  action
+  mainGUI
+
+-- |Инициализация Gtk для выполнения cmdline
+startGUI = do
+  x <- newEmptyMVar
+  forkIO$ do
+    runGUI$ putMVar x ()
+  takeMVar x
+
+-- |Инициализация GUI-части программы (индикатора прогресса) для выполнения cmdline
+guiStartProgram = gui $ do
+  (windowProgress, msgbActions) <- runIndicators
+  widgetShowAll windowProgress
+
+-- |Задержать завершение программы
+guiPauseAtEnd = do
+  uiMessage =: ("", "")
+  updateAllIndicators
+  val progressFinished >>= gui
+  foreverM $ do
+    sleepSeconds 1
+
+-- |Завершить выполнение программы
+guiDoneProgram = do
+  return ()
+
 
 {-# NOINLINE runIndicators #-}
 -- |Создаёт окно индикатора прогресса и запускает тред для его периодического обновления.
 runIndicators = do
-  -- INI-файл
-  inifile  <- findFile configFilePlaces aINI_FILE
-  settings <- inifile  &&&  readConfigFile inifile >>== map (split2 '=')
-  -- Локализация.
-  langDir  <- findDir libraryFilePlaces aLANG_DIR
-  setLocale$ langDir </> (settings.$lookup aINITAG_LANGUAGE `defaultVal` aLANG_FILE)
+  hf' <- openHistoryFile
 
   -- Собственно окно индикатора прогресса
   window <- windowNew
-  vbox   <- vBoxNew False 10
+  vbox   <- vBoxNew False 0
   set window [windowWindowPosition := WinPosCenter,
               containerBorderWidth := 10, containerChild := vbox]
-
-  -- Размер окна индикатора прогресса
-  let sz = settings.$lookup aINITAG_PROGRESS `defaultVal` "350 200"
-  let (w,h) = sz.$ split2 ' '
-  windowResize window (readInt w) (readInt h)
+  hfRestoreSizePos hf' window "ProgressWindow" "-10000 -10000 350 200"
 
   -- Разделим окно по вертикали
   (statsBox, updateStats, clearStats) <- createStats
@@ -99,15 +125,27 @@ runIndicators = do
   widgetSetSizeRequest curFileLabel 30 (-1)
   progressBar  <- progressBarNew
   buttonBox    <- hBoxNew True 10
+  (expanderBox, insideExpander)  <- expander ""
+  (messageBox, msgbActions) <- makeBoxForMessages
   boxPackStart vbox statsBox     PackNatural 0
-  boxPackStart vbox curFileBox   PackNatural 0
+  boxPackStart vbox curFileBox   PackNatural 10
   boxPackStart vbox progressBar  PackNatural 0
-  boxPackEnd   vbox buttonBox    PackNatural 0
-  miscSetAlignment curFileLabel 0 0    -- выровняем влево имя текущего файла
+  boxPackStart vbox (widget expanderBox)  PackNatural 0
+  boxPackStart vbox messageBox   PackGrow    0
+  boxPackStart vbox buttonBox    PackNatural 0
+  miscSetAlignment curFileLabel 0 0    -- выравняем влево имя текущего файла
   progressBarSetText progressBar " "   -- нужен непустой текст чтобы установить правильную высоту progressBar
 
+  expanderBox =:: hfGetHistoryBool hf' "ProgressWindow.Expanded" False
+  setOnUpdate expanderBox $   do hfReplaceHistoryBool hf' "ProgressWindow.Expanded" =<< val expanderBox
+
+  onTop <- checkBox "0446 Keep window on top";  boxPackStart insideExpander (widget onTop) PackNatural 1
+  setOnUpdate onTop $   do windowSetKeepAbove window =<< val onTop
+  onTop =:: hfGetHistoryBool hf' "ProgressWindow.KeepOnTop" False
+
+  --shutdown <- checkBox shutdown_msg;               boxPackStart insideExpander (widget shutdown) PackNatural 1
+
   -- Заполним кнопками нижнюю часть окна
-  --buttonNew window stockClose ResponseClose
   backgroundButton <- buttonNewWithMnemonic       =<< i18n"0052   _Background  "
   pauseButton      <- toggleButtonNewWithMnemonic =<< i18n"0053   _Pause  "
   cancelButton     <- buttonNewWithMnemonic       =<< i18n"0081   _Cancel  "
@@ -117,14 +155,24 @@ runIndicators = do
 
   -- Обработчики событий (закрытие окна/нажатие кнопок)
   let askProgramClose = do
-        active <- val pauseButton
-        terminationRequested <-
-            (if active then id else syncUI) $ do
-               pauseTiming $ do
-                 askYesNo window "0251 Abort operation?"
+        terminationRequested <- do
+          -- Allow to close window immediately if program already finished
+          finished <- val programFinished
+          if finished  then return True  else do
+          -- Otherwise - ask user's permission
+          active <- val pauseButton
+          (if active then id else syncUI) $ do
+             pauseEverything$
+               askYesNo window "0251 Abort operation?"
         when terminationRequested $ do
           pauseButton =: False
           ignoreErrors$ terminateOperation
+
+  -- Обработка нажатия клавиш
+  window `onKeyPress` \event -> do
+    case (eventKey event) of
+      "Escape" -> do askProgramClose; return True
+      _        -> return False
 
   window `onDelete` \e -> do
     askProgramClose
@@ -145,33 +193,49 @@ runIndicators = do
   backgroundButton `onClicked` do
     windowIconify window
 
+  finishUpdating <- ref False    -- устанавливается в True в конце работы когда надо перестать обновлять индикатор прогресса
+
   -- Обновляем заголовок окна, статистику и надпись индикатора прогресса раз в 0.5 секунды
   i' <- ref 0   -- а сам индикатор прогресса раз в 0.1 секунды
-  indicatorThread 0.1 $ \indicator indType title b bytes total processed p -> postGUIAsync$ do
-    i <- val i'; i' += 1; let once_a_halfsecond = (i `mod` 5 == 0)
+  indicatorThread 0.1 $ \updateMode indicator indType title b bytes total processed p -> postGUIAsync$ do
+    unlessM (val finishUpdating) $ do
+    i <- val i'; i' += 1; let once_a_halfsecond  =  (updateMode==ForceUpdate)  ||  (i `mod` 5 == 0)
     -- Заголовок окна
-    set window [windowTitle := title]                              `on` once_a_halfsecond
+    set window [windowTitle := title]                              `on_` once_a_halfsecond
     -- Статистика
-    updateStats indType b total processed                          `on` once_a_halfsecond
+    updateStats indType b total processed                          `on_` once_a_halfsecond
     -- Прогресс-бар и надпись на нём
-    progressBarSetFraction progressBar processed                   `on` True
-    progressBarSetText     progressBar p                           `on` once_a_halfsecond
-  backgroundThread 0.5 $ postGUIAsync$ do
-    -- Имя текущего файла или стадия выполнения команды
-    uiMessage' <- val uiMessage
-    labelSetText curFileLabel uiMessage'
+    progressBarSetFraction progressBar processed                   `on_` True
+    progressBarSetText     progressBar p                           `on_` once_a_halfsecond
+    widgetGrabFocus cancelButton                                   `on_` (updateMode==ForceUpdate)  -- make Cancel button default after operation was finished
 
-  -- Очищает все поля с информацией о текущем архиве
-  let clearAll = do
-        set window [windowTitle := " "]
-        clearStats
-        labelSetText curFileLabel ""
-        progressBarSetFraction progressBar 0
-        progressBarSetText     progressBar " "
+  backgroundThread 0.5 $ \updateMode -> postGUIAsync$ do
+    unlessM (val finishUpdating) $ do
+    -- Имя текущего файла или стадия выполнения команды (вывод пустой строки недопустим, поскольку это меняет высоту виджета)
+    (msg,filename)  <- val uiMessage;   imsg <- i18n msg
+    labelSetText curFileLabel (if imsg>""   then format imsg filename   else (filename|||" "))
+
+  -- Операция, очищающая все поля с информацией о текущем архиве
+  clearProgressWindow =: do
+    set window [windowTitle := " "]
+    clearStats
+    labelSetText curFileLabel " "
+    progressBarSetFraction progressBar 0
+    progressBarSetText     progressBar " "
+
+  -- Выполняется по завершении всех операций
+  progressFinished =: do
+    widgetSetSensitivity backgroundButton False
+    widgetSetSensitivity pauseButton      False
+    buttonSetLabel cancelButton =<< i18n"0470   _Close  "
+    finishUpdating =: True
+
+  progressWindow =: window
+  progressOnTop  =: onTop
 
   -- Поехали!
   widgetGrabFocus pauseButton
-  return (window, clearAll)
+  return (window, msgbActions)
 
 
 -- |Создание полей для вывода статистики
@@ -222,31 +286,92 @@ createStats = do
         secs <- return_real_secs
         sec0 <- val indicator_start_real_secs
 
-        -- Для команд добавления выводится строка с Compressed/Total compressed, для остальных она скрывается
+        -- Если операция завершена - показываем точные результаты
+        if b==total_bytes
+          then do (labelSetMarkup filesLabel$           ""                           )
+                  (labelSetMarkup bytesLabel$           ""                           )
+                  (labelSetMarkup compressedLabel$      ""                           )
+                  (labelSetMarkup timesLabel$           ""                           )
+                  (labelSetMarkup totalFilesLabel$      bold$ show3 total_files      )                      `on_` indType==INDICATOR_FULL
+                  (labelSetMarkup totalBytesLabel$      bold$ show3 total_bytes      )
+                  (labelSetMarkup totalCompressedLabel$ bold$ show3 (cbytes)         )                      `on_` indType==INDICATOR_FULL
+                  (labelSetMarkup totalTimesLabel$      bold$ showHMS (secs)         )
+                  when (b>0) $ do                      -- Поля скорости/коэф. сжатия бессмысленно показывать пока не накоплена хоть какая-то статистика
+                    (labelSetMarkup ratioLabel$         bold$ ratio2 cbytes b++"%"   )                      `on_` indType==INDICATOR_FULL
+                  when (secs-sec0>0.001) $ do
+                    (labelSetMarkup speedLabel$         bold$ showSpeed b (secs-sec0))
+
+          else do
+
+        -- Определение Total compressed (точное только при распаковке архива целиком, иначе - оценка)
         cmd <- val ref_command >>== cmd_name
         let total_compressed
-              | cmdType cmd == ADD_CMD              =  "~"++show3 (total_bytes*cbytes `div` b)
+              | cmdType cmd == ADD_CMD              =  if b==total_bytes then show3 (cbytes)
+                                                                         else "~"++show3 (total_bytes*cbytes `div` b)
               | archive_total_bytes == total_bytes  =       show3 (archive_total_compressed)
               | archive_total_bytes == 0            =       show3 (0)
-              | otherwise                           =  "~"++show3 (archive_total_compressed*total_bytes `div` archive_total_bytes)
+              | otherwise                           =  "~"++show3 (toInteger archive_total_compressed*total_bytes `div` archive_total_bytes)
 
-        labelSetMarkup filesLabel$           bold$ show3 files                                  `on` indType==INDICATOR_FULL
-        labelSetMarkup bytesLabel$           bold$ show3 b
-        labelSetMarkup compressedLabel$      bold$ show3 cbytes                                 `on` indType==INDICATOR_FULL
-        labelSetMarkup totalFilesLabel$      bold$ show3 total_files                            `on` indType==INDICATOR_FULL
-        labelSetMarkup totalBytesLabel$      bold$ show3 total_bytes
-        labelSetMarkup timesLabel$           bold$ showHMS secs
-        when (processed>0.001 && b>0 && secs-sec0>0.001) $ do
-        labelSetMarkup totalCompressedLabel$ bold$ total_compressed                             `on` indType==INDICATOR_FULL
-        labelSetMarkup ratioLabel$           bold$ ratio2 cbytes b++"%"                         `on` indType==INDICATOR_FULL
-        labelSetMarkup totalTimesLabel$      bold$ "~"++showHMS (sec0 + (secs-sec0)/processed)
-        labelSetMarkup speedLabel$           bold$ showSpeed b (secs-sec0)
+        (labelSetMarkup filesLabel$           bold$ show3 files                                )  `on_` indType==INDICATOR_FULL
+        (labelSetMarkup bytesLabel$           bold$ show3 b                                    )
+        (labelSetMarkup compressedLabel$      bold$ show3 cbytes                               )  `on_` indType==INDICATOR_FULL
+        (labelSetMarkup timesLabel$           bold$ showHMS secs                               )
+        (labelSetMarkup totalFilesLabel$      bold$ show3 total_files                          )  `on_` indType==INDICATOR_FULL
+        (labelSetMarkup totalBytesLabel$      bold$ show3 total_bytes                          )
+        when (b>0 && secs-sec0>0.001) $ do   -- Поля скорости/коэф. сжатия бессмысленно показывать пока не накоплена хоть какая-то статистика
+        (labelSetMarkup ratioLabel$           bold$ ratio2 cbytes b++"%"                       )  `on_` indType==INDICATOR_FULL
+        (labelSetMarkup speedLabel$           bold$ showSpeed b (secs-sec0)                    )
+        when (processed>0.001) $ do          -- Поля оценки времени/результата сжатия показываются только после сжатия 0.1% всей информации
+        (labelSetMarkup totalCompressedLabel$ bold$ total_compressed                           )  `on_` indType==INDICATOR_FULL
+        (labelSetMarkup totalTimesLabel$      bold$ "~"++showHMS (sec0 + (secs-sec0)/processed))
 
   -- Процедура, очищающая текущую статистику
   let clearStats  =  val labels' >>= mapM_ (`labelSetMarkup` "     ")
   --
   return (textBox, updateStats, clearStats)
 
+
+-- |Создадим подокно для сообщений об ошибках
+makeBoxForMessages = do
+  comment <- scrollableTextView "" []
+  widgetSetSizeRequest (widget comment) 0 0
+  saved <- ref ""
+  -- Выводить errors/warnings в этот TextView
+  let log msg = postGUIAsync$ do
+                  fm <- val fileManagerMode
+                  if fm
+                    then do saved ++= (msg++"\n")
+                    else do widgetSetSizeRequest (widget comment) (-1) (-1)
+                            comment ++= (msg++"\n")
+  -- После закрытия FM перенести все сообщения в этот widget
+  let afterFMClose = postGUIAsync$ do
+                       msg <- val saved
+                       saved =: ""
+                       when (msg>"") $ do
+                         widgetSetSizeRequest (widget comment) (-1) (-1)
+                         comment ++= (msg++"\n")
+  errorHandlers   ++= [log]
+  warningHandlers ++= [log]
+  return (widget comment, (saved =: "", afterFMClose))
+
+
+{-# NOINLINE progressWindow #-}
+progressWindow = unsafePerformIO$ newIORef$ error "Progress windows isn't yet created" :: IORef Window
+
+{-# NOINLINE progressOnTop #-}
+progressOnTop = unsafePerformIO$ newIORef$ error "Progress windows isn't yet created" :: IORef (GtkWidget HBox Bool)
+
+{-# NOINLINE clearProgressWindow #-}
+-- |Операция, очищающая окно индикатора прогресса
+clearProgressWindow = unsafePerformIO$ newIORef doNothing0 :: IORef (IO ())
+
+{-# NOINLINE progressFinished #-}
+-- |Операция, переводящая диалог прогресса в состояние ожидания закрытия
+progressFinished = unsafePerformIO$ newIORef doNothing0 :: IORef (IO ())
+
+
+-- |Вызывается в начале обработки архива
+guiStartArchive = gui$ val clearProgressWindow >>= id
 
 -- |Вызывается в начале обработки файла
 guiStartFile = doNothing0
@@ -261,17 +386,89 @@ uiResumeProgressIndicator = do
 
 -- |Приостановить индикатор (если он запущен) на время выполнения операции
 uiPauseProgressIndicator action =
-  bracket (do x <- val aProgressIndicatorEnabled
-              aProgressIndicatorEnabled =: False
-              return x)
-          (\x -> aProgressIndicatorEnabled =: x)
+  bracket (aProgressIndicatorEnabled <=> False)
+          (aProgressIndicatorEnabled =: )
           (\x -> action)
 
 -- |Reset console title
 resetConsoleTitle = return ()
 
+-- |Приостановить показ окна прогресса поверх всех остальных
+pauseOnTop action = do
+  window <- val progressWindow
+  onTop  <- val progressOnTop
+  inside (windowSetKeepAbove window False)
+         (windowSetKeepAbove window =<< val onTop)
+         action
+
 -- |Pause progress indicator & timing while dialog runs
-myDialogRun dialog  =  uiPauseProgressIndicator$ pauseTiming$ dialogRun dialog
+pauseEverything  =  uiPauseProgressIndicator . pauseTiming . pauseOnTop
+
+
+----------------------------------------------------------------------------------------------------
+---- GUI-специфичные операции с файлом истории -----------------------------------------------------
+----------------------------------------------------------------------------------------------------
+
+-- |Сохранить размеры и положение окна в истории
+hfSaveSizePos hf' window name = do
+    (x,y) <- windowGetPosition window
+    (w,h) <- widgetGetSize     window
+    hfReplaceHistory hf' (name++"Coord") (unwords$ map show [x,y,w,h])
+
+-- |Запомним, было ли окно максимизировано
+hfSaveMaximized hf' name = hfReplaceHistoryBool hf' (name++"Maximized")
+
+-- |Восстановить размеры и положение окна из истории
+hfRestoreSizePos hf' window name deflt = do
+    coord <- hfGetHistory1 hf' (name++"Coord") deflt
+    let a  = coord.$split ' '
+    when (length(a)==4  &&  all isSignedInt a) $ do  -- проверим что a состоит ровно из 4 чисел
+      let [x,y,w,h] = map readSignedInt a
+      windowMove   window x y  `on_` x/= -10000
+      windowResize window w h  `on_` w/= -10000
+    whenM (hfGetHistoryBool hf' (name++"Maximized") False) $ do
+      windowMaximize window
+
+
+----------------------------------------------------------------------------------------------------
+---- Выбор языка при первом запуске GUI ------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+
+-- |Выбор языка при первом запуске GUI
+runLanguageDialog = do
+  hf'      <- openHistoryFile
+  langFile <- hfGetHistory1 hf' aINITAG_LANGUAGE ""
+  when (langFile=="") $ do
+    -- Создадим диалог со стандартными кнопками OK/Cancel
+    let question = "Please select your language (you may change language later in Settings dialog)"
+    bracketCtrlBreak "LanguageDialog" (messageDialogNew Nothing [] MessageOther ButtonsOkCancel question) widgetDestroy $ \dialog -> do
+    set dialog [windowTitle          := aFreeArc++": select your language",
+                windowWindowPosition := WinPosCenter]
+
+    -- Заполнить список языков именами файлов в каталоге arc.languages и выбрать English по умолчанию
+    langDir   <- findDir libraryFilePlaces aLANG_DIR
+    langFiles <- langDir &&& (dir_list langDir >>== map baseName >>== sort >>== filter (match "arc.*.txt"))
+    langComboBox <- New.comboBoxNewText
+    for langFiles (New.comboBoxAppendText langComboBox . mapHead toUpper . replace '_' ' ' . dropEnd 4 . drop 4)
+    whenJust (langFiles.$ findIndex ((=="arc.english.txt").map toLower)) (New.comboBoxSetActive langComboBox)
+
+    upbox <- dialogGetUpper dialog
+    boxPackStart  upbox langComboBox PackGrow 0
+    widgetShowAll upbox
+
+    -- Определить файл локализации, соответствующий выбранному в комбобоксе языку
+    let getCurrentLangFile = do
+          lang <- New.comboBoxGetActive langComboBox
+          case lang of
+            -1   -> return ""
+            lang -> myCanonicalizePath (langDir </> (langFiles !! lang))
+
+    choice <- dialogRun dialog
+    when (choice==ResponseOk) $ do
+      langFile <- getCurrentLangFile
+      hfReplaceHistory hf' aINITAG_LANGUAGE (takeFileName langFile)
+      loadTranslation
+      writeShellExtScript hf'
 
 
 ----------------------------------------------------------------------------------------------------
@@ -341,7 +538,7 @@ ask_user title question  =  gui $ do
   widgetShowAll hbox
 
   -- Получить ответ в виде буквы: y/n/a/...
-  (ResponseUser id) <- myDialogRun dialog
+  (ResponseUser id) <- pauseEverything$ dialogRun dialog
   let answer = (split '/' valid_answers) !! (id-1)
   when (answer=="q") $ do
     terminateOperation
@@ -362,7 +559,7 @@ buttons       = ["0079 _Yes/0080 _No/0081 _Cancel"
 -- При шифровании пароль надо ввести дважды - для защиты от ошибок при вводе
 ask_passwords = ( ask_password_dialog "0076 Enter encryption password" 2
                 , ask_password_dialog "0077 Enter decryption password" 1
-                , doNothing0   -- вызывается при неправильном пароле
+                , doNothing0 :: IO ()  -- вызывается при неправильном пароле
                 )
 
 -- |Диалог запроса пароля.
@@ -376,15 +573,14 @@ ask_password_dialog title' amount opt_parseData = gui $ do
   addStdButton dialog ResponseCancel
 
   -- Создаёт таблицу с полями для ввода одного или двух паролей
-  (pwdTable, [pwd1,pwd2]) <- pwdBox amount
-  for [pwd1,pwd2] (`onEntryActivate` buttonClicked okButton)
-
-  -- Кнопка OK срабатывает только если оба введённых пароля одинаковы
-  onClicked okButton $ do
-    p1 <- val pwd1
-    p2 <- val pwd2
-    when (p1>"" && p1==p2) $ do
-      dialogResponse dialog ResponseOk
+  (pwdTable, pwds@[pwd1,pwd2]) <- pwdBox amount
+  -- Процедура прверки правильности введённых паролей
+  let validate = do [pwd1', pwd2'] <- mapM val pwds
+                    return (pwd1'>"" && pwd1'==pwd2')
+  for pwds (`onEntryActivate` whenM validate (buttonClicked okButton))
+  for pwds $ \pwd -> do
+    pwd `onEditableChanged` (validate >>= widgetSetSensitivity okButton)
+  okButton `widgetSetSensitivity` False
 
   -- Добавим пробелы вокруг таблицы и кинем её на форму
   set pwdTable [containerBorderWidth := 10]
@@ -392,9 +588,11 @@ ask_password_dialog title' amount opt_parseData = gui $ do
   boxPackStart  upbox pwdTable PackGrow 0
   widgetShowAll upbox
 
-  choice <- myDialogRun dialog
+  fix $ \reenter -> do
+  choice <- pauseEverything$ dialogRun dialog
   if choice==ResponseOk
-    then val pwd1
+    then do ok <- validate
+            if ok  then val pwd1  else reenter
     else terminateOperation >> return ""
 
 
@@ -440,7 +638,7 @@ uiInputArcComment old_comment = gui$ do
   boxPackStart upbox commentTextView PackGrow 10
   widgetShowAll upbox
 
-  choice <- myDialogRun dialog
+  choice <- pauseEverything$ dialogRun dialog
   if choice==ResponseOk
     then textViewGetText commentTextView
     else terminateOperation >> return ""
@@ -468,16 +666,16 @@ tooltip w s = do s <- i18n s; t <- val tooltips; tooltipsSetTip t w s ""
 i18t title create = do
   (label, t) <- i18n' title
   control <- create label
-  tooltip control t  `on`  t/=""
+  tooltip control t  `on_`  t/=""
   return control
 
--- |This instance allows to get/set checkbox state using standard =:/val interface
+-- |This instance allows to get/set radio button state using standard =:/val interface
 instance Variable RadioButton Bool where
   new  = undefined
   val  = toggleButtonGetActive
   (=:) = toggleButtonSetActive
 
--- |This instance allows to get/set checkbox state using standard =:/val interface
+-- |This instance allows to get/set toggle button state using standard =:/val interface
 instance Variable ToggleButton Bool where
   new  = undefined
   val  = toggleButtonGetActive
@@ -579,17 +777,25 @@ eventKey (Key {eventKeyName = name, eventModifier = modifier}) =
 -- |Добавить к диалогу стандартную кнопку со стандартной иконкой
 addStdButton dialog responseId = do
   let (emsg,item) = case responseId of
-                      ResponseYes    -> ("0079 _Yes",    stockYes         )
-                      ResponseNo     -> ("0080 _No",     stockNo          )
-                      ResponseOk     -> ("0362 _OK",     stockOk          )
-                      ResponseCancel -> ("0081 _Cancel", stockCancel      )
-                      ResponseClose  -> ("0364 _Close",  stockClose       )
-                      _              -> ("???",          stockMissingImage)
+                      ResponseYes            -> ("0079 _Yes",    stockYes         )
+                      ResponseNo             -> ("0080 _No",     stockNo          )
+                      ResponseOk             -> ("0362 _OK",     stockOk          )
+                      ResponseCancel         -> ("0081 _Cancel", stockCancel      )
+                      ResponseClose          -> ("0364 _Close",  stockClose       )
+                      x | x==aResponseDetach -> ("0432 _Detach", stockMissingImage)
+                      _                      -> ("???",          stockMissingImage)
   msg <- i18n emsg
   button <- dialogAddButton dialog msg responseId
-  image  <- imageNewFromStock item iconSizeButton
+#if defined(FREEARC_UNIX)
+  hbox <- dialogGetActionArea dialog
+  boxReorderChild hbox button 0        -- according to HIG, on Linux dialogs should have reverse button order compared to Windows
+#endif
+  image  <- imageNewFromStock item IconSizeButton
   buttonSetImage button image
   return button
+
+-- |Кнопка фонового выполнения команды
+aResponseDetach = ResponseUser 1
 
 
 {-# NOINLINE debugMsg #-}
@@ -684,6 +890,20 @@ checkBox title = do
                    }
 
 
+{-# NOINLINE expander #-}
+-- |Экспандер
+expander title = do
+  (hbox, control) <- boxed expanderNewWithMnemonic title
+  innerBox <- vBoxNew False 0
+  containerAdd control innerBox
+  return (gtkWidget { gwWidget      = hbox
+                    , gwGetValue    = val control
+                    , gwSetValue    = (control=:)
+                    , gwSetOnUpdate = \action -> onSizeAllocate control (\size -> action)  >> return ()
+                    }
+         ,innerBox)
+
+
 {-# NOINLINE comboBox #-}
 -- |Создаёт комбобокс, содержащий заданный набор альтернатив
 comboBox title labels = do
@@ -692,9 +912,10 @@ comboBox title labels = do
   combo <- New.comboBoxNewText
   for labels (\l -> New.comboBoxAppendText combo =<< i18n l)
   boxPackStart  hbox  label  PackNatural 5
-  boxPackStart  hbox  combo  PackNatural 5
+  boxPackStart  hbox  combo  PackGrow    5
+  widgetSetSizeRequest combo 10 (-1)           -- уменьшим размер кобо-бокса, посольку иначе диалог сжатия становится слишком широк
   return gtkWidget { gwWidget      = hbox
-                   , gwGetValue    = New.comboBoxGetActive combo >>== fromMaybe 0
+                   , gwGetValue    = New.comboBoxGetActive combo
                    , gwSetValue    = New.comboBoxSetActive combo
                    }
 
@@ -817,7 +1038,7 @@ textViewGetText textView = do
 -- |Выбор файла через диалог
 chooseFile parentWindow dialogType dialogTitle filters getFilename setFilename = do
   title <- i18n dialogTitle
-  filename <- getFilename >>== windosifyPath
+  filename <- getFilename
   -- Строка фильтров состоит из пар (название,шаблоны), разделённых NULL char, плюс дополнительный NULL char в конце
   filterStr <- prepareFilters filters >>== map (join2 "\0") >>== joinWith "\0" >>== (++"\0")
   withCFilePath title            $ \c_prompt   -> do

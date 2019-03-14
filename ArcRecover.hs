@@ -10,7 +10,7 @@
 module ArcRecover where
 
 import Prelude hiding (catch)
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Char
 import Data.List
@@ -28,6 +28,7 @@ import Compression
 import Options
 import UI
 import ArhiveStructure
+import Arhive7zLib
 import ArhiveDirectory
 import ArcvProcessRead   (writeControlBlock)
 import ArcCreate         (testArchive, writeSFX)
@@ -152,7 +153,7 @@ writeRecoveryBlocks archive oldarc init_pos command params bufOps = do
   archiveSeek archive init_pos
   uiWithProgressIndicator command arcsize $ do
     doChunks arcsize sector_size $ \bytes -> do
-      uiUpdateProgressIndicator (i bytes)
+      uiUpdateProgressIndicator bytes
       failOnTerminated
       len <- archiveReadBuf archive buf bytes
       crc <- calcCRC buf bytes
@@ -208,19 +209,21 @@ readControlInfo crc_stream crcs_block = do
 -- и аварийный выход, если архив содержит сбои
 pretestArchive command archive footer = do
   when (opt_pretest command>0) $ do
-    result <- withPool$ scanArchive command archive footer False
+    result <- case archive of
+                Just archive -> withPool$ scanArchive command archive footer False
+                Nothing      -> return Nothing   -- архив поддерживаемый через 7z.dll: поиск сбойных секторов невозможен
     case result of
       Just (_, sector_size, bad_crcs)  |  bad_sectors <- genericLength bad_crcs, bad_sectors>0
-              -> registerError$ BROKEN_ARCHIVE (archiveName archive) ["0352 found %1 errors (%2)", show3 bad_sectors, showMemory (bad_sectors*sector_size)]
+              -> registerError$ BROKEN_ARCHIVE (archiveName$ fromJust archive) ["0352 found %1 errors (%2)", show3 bad_sectors, showMemory (bad_sectors*sector_size)]
       Just _  -> condPrintLineLn "r" "Archive integrity OK"
       _       -> return ()
-    -- ѕолное тестирование архива только при -pt3 или при -pt2 и отсутствии recovery информации в архиве
+    -- ѕолное тестирование архива только при -tp3 или при -tp2 и отсутствии recovery информации в архиве
     when (opt_pretest command==3 || (opt_pretest command==2 && isNothing result)) $ do
       w <- count_warnings $ do
                testArchive command (cmd_arcname command) doNothing3
       -- ѕродолжать работу только при отсутствии warning'ов
       when (w>0) $ do
-        registerError$ BROKEN_ARCHIVE (archiveName archive) ["0353 there were %1 warnings due archive testing", show w]
+        registerError$ BROKEN_ARCHIVE (cmd_arcname command) ["0353 there were %1 warnings due archive testing", show w]
 
 
 -- |ѕросканировать архив и возвратить список сбойных секторов
@@ -242,7 +245,7 @@ scanArchive command archive footer recovery pool = do
   -- ѕрочитаем заголовок crc_stream, содержащий все необходимые данные об этой recovery информации
   info <- readControlInfo crc_stream crcs_block
   case info of
-    Left version -> do registerWarning$ GENERAL_ERROR ["0345 you need FreeArc %1 or above to process this recovery info", version]
+    Left version -> do registerWarning$ GENERAL_ERROR ["0345 you need "++aFreeArc++" %1 or above to process this recovery info", version]
                        return Nothing
     Right (init_pos, arcsize, sector_size, rec_sectors) -> do
       -- ќт-xor-рить секторы архива с соответствующими секторами RECOVERY блока.
@@ -260,7 +263,7 @@ scanArchive command archive footer recovery pool = do
         -- ÷икл по секторам архива с отображением индикатора прогресса
         uiWithProgressIndicator command arcsize $ do
           doChunks arcsize sector_size $ \bytes -> do
-            uiUpdateProgressIndicator (i bytes)
+            uiUpdateProgressIndicator bytes
             failOnTerminated
             len <- archiveReadBuf archive buf bytes
             -- Xor'им сектора, соответствующие одному recovery сектору, чтобы получить данные дл€ восстановлени€ сбойного сектора
@@ -343,7 +346,7 @@ runArchiveRecovery command@Command{ cmd_filespecs       = filespecs
     handleCtrlBreak  "fileRemove arcname_fixed" (ignoreErrors$ fileRemove arcname_fixed) $ do
     bracketCtrlBreak "archiveClose2:ArcRecover" (archiveCreateRW arcname_fixed) (archiveClose) $ \new_archive -> do
     withJIT (fileOpen =<< originalURL originalName arcname) fileClose $ \original' -> do   -- Ћениво откроем файл, откуда можно загрузить корректные данные
-    writeSFX (opt_sfx command) new_archive (dirlessArchive archive footer)   -- ЌачнЄм создание архива с записи SFX-модул€
+    writeSFX (opt_sfx command) new_archive (dirlessArchive (Just archive) footer)   -- ЌачнЄм создание архива с записи SFX-модул€
     archiveSeek archive init_pos
     -- –азмер защищЄнной части архива в секторах
     let arc_sectors = i$ arcsize `divRoundUp` sector_size
@@ -354,7 +357,7 @@ runArchiveRecovery command@Command{ cmd_filespecs       = filespecs
     -- ÷икл по секторам восстанавливаемого архива с отображением индикатора прогресса
     uiWithProgressIndicator command arcsize $ do
       doChunks arcsize sector_size $ \bytes -> do
-        uiUpdateProgressIndicator (i bytes)
+        uiUpdateProgressIndicator bytes
         failOnTerminated
         i <- val i';  when (rec_sectors>0) $  do i `seq` (i' =: (i+1) `mod` rec_sectors)
         n <- val n';  n' =: n+1

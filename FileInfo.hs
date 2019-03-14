@@ -5,8 +5,9 @@
 module FileInfo where
 
 import Prelude hiding (catch)
-import Control.Exception
+import Control.OldException
 import Control.Monad
+import Data.Bits
 import Data.Char
 import Data.HashTable as Hash
 import Data.Int
@@ -148,6 +149,8 @@ type FileCount = Int              -- количества файлов
 type FileSize  = Integer          -- размера файла или позиции чтения/записи в нём
 aFILESIZE_MIN  = -(2^63)          -- очень маленькое значение типа FileSize
 type FileTime  = CTime            -- времени создания/модификации/чтения файла
+aMINIMUM_POSSIBLE_FILETIME = 0 :: FileTime  -- ^Минимальное datetime, которое только может быть у файла. Соответствует 1 января 1970 г.
+aMAXIMUM_POSSIBLE_FILETIME = (i (maxBound :: Int32)) :: FileTime
 type FileAttr  = FileAttributes   -- досовских атрибутов файла
 type FileGroup = Int              -- номера группы в arc.groups
 
@@ -177,13 +180,24 @@ fiSpecialFile = fiIsDir
 -- |Номер группы, проставляемый там, где он не используется.
 fiUndefinedGroup = -1
 
+-- |Заменить код ошибки в определении DateTime максимально возможным значением DateTime (поскольку эта ошибка обычно возникает когда время позже 2038-го года)
+fiTimeCorrect t | t<aMINIMUM_POSSIBLE_FILETIME  =  aMAXIMUM_POSSIBLE_FILETIME
+                | otherwise                     =  t
+
+-- |При выходе даты за поддерживаемые диапазон (до 2038 г.) возвращать последнее значение из этого диапазона
+stat_mtime p_stat  =  raw_stat_mtime p_stat  >>==  fiTimeCorrect
+
+-- |Строка атрибутов файла, используемая при выводе листинга архива
+fiAttrStr fi = '.' : (if fiIsDir fi then 'D' else '.') : zipWith check [0x01,0x02,0x04,0x20,0] "RHSA."
+  where check n c  =  if fiAttr fi .&. n > 0  then c  else '.'
+
 -- |Создать структуру FileInfo для каталога с заданным именем
 createParentDirFileInfo fiFilteredName fiDiskName fiStoredName =
   FileInfo { fiFilteredName  =  packParentDirPath fiFilteredName
            , fiDiskName      =  packParentDirPath fiDiskName
            , fiStoredName    =  packParentDirPath fiStoredName
            , fiSize          =  0
-           , fiTime          =  aMINIMAL_POSSIBLE_DATETIME
+           , fiTime          =  aMINIMUM_POSSIBLE_FILETIME
            , fiAttr          =  0
            , fiIsDir         =  True
            , fiGroup         =  fiUndefinedGroup
@@ -207,6 +221,10 @@ getFileInfo fiFilteredName fiDiskName fiStoredName  =
   `catch`
     \e -> do registerWarning$ CANT_GET_FILEINFO filename
              return Nothing  -- В случае ошибки при выполнении stat возвращаем Nothing
+
+
+-- |Get file's date/time
+getFileDateTime filename  =  fileWithStatus "getFileInfo" filename stat_mtime
 
 -- |Restore date/time/attrs saved in FileInfo structure
 setFileDateTimeAttr filename fileinfo  =  setFileDateTime filename (fiTime fileinfo)
@@ -263,7 +281,7 @@ getDirectoryContents_FileInfo ff parent{-родительская структура FileInfo-} = do
         when (exclude_special_names name) $ do
           fiAttr  <- w_find_attrib     find
           fiSize  <- w_find_size       find
-          fiTime  <- w_find_time_write find
+          fiTime  <- w_find_time_write find  >>==  fiTimeCorrect
           fiIsDir <- w_find_isDir      find
           (list <<=) $! make_names FileInfo name fiSize fiTime fiAttr fiIsDir fiUndefinedGroup
 #endif
@@ -363,16 +381,17 @@ find_filter_and_process_files filespecs ff@FileFind{ ff_ep=ep, ff_scan_subdirs=s
              else                     find (re || !-r-) f
 -}
        -- Заменить имена каталогов dir на две маски "dir dir/" чтобы охватить сам каталог и все файлы в нём
-       filespecs1 <- foreach filespecs $ \filespec -> do
-         isDir <- case hasTrailingPathSeparator filespec of
-                    True  -> return True
-                    False -> dirExist filespec
+       modified_filespecs <- foreach filespecs $ \filespec -> do
+         isDir <- if hasTrailingPathSeparator filespec
+                    then return True
+                    else dirExist (disk_basedir </> filespec)
          when isDir $ do
            find_files_in_one_dir curdir True [dropTrailingPathSeparator filespec]
          return$ (isDir &&& addTrailingPathSeparator) filespec
        --
-       mapM_ (find_files_in_one_dir curdir False) $ sort_and_groupOn (filenameLower.takeDirectory) filespecs1 where
+       mapM_ (find_files_in_one_dir curdir False) $ sort_and_groupOn (filenameLower.takeDirectory) modified_filespecs
 
+  where
     -- Обработать группу масок, относящихся к одному каталогу
     find_files_in_one_dir curdir addDir filespecs = do
       findFiles_FileInfo root FindFiles{ff_process_f=process_f.map_group_f, ff_recursive=recursive, ff_disk_eq_filtered=disk_eq_filtered, ff_stored_eq_filtered=stored_eq_filtered, ff_parent_or_root=parent_or_root, ff_accept_f=accept_f}

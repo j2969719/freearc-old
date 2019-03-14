@@ -29,7 +29,6 @@
  */
 
 #include <stdlib.h>
-#include <malloc.h>
 #include "entropy.h"
 #include "ttaenc.h"
 
@@ -69,10 +68,10 @@ unsigned char *bit_array_write;
 unsigned long bit_array_write_size, bit_array_write_bits;
 
 void
-init_bit_array_write (void) {
-    bit_array_write = (unsigned char *) malloc1d (BASE_SIZE, sizeof(char));
+init_bit_array_write (unsigned long size) {
+    bit_array_write = (unsigned char *) malloc1d (size, sizeof(char));
     bit_array_write_bits = 0;
-    bit_array_write_size = BASE_SIZE;
+    bit_array_write_size = size;
 }
 
 void
@@ -94,8 +93,10 @@ put_binary (unsigned long value, unsigned long bits) {
     unsigned long pos = bit_array_write_bits >> 5;
 
     if ((pos << 2) + 8 > bit_array_write_size) {
-        bit_array_write = (unsigned char *) realloc (bit_array_write, bit_array_write_size += STEP_SIZE);
-        if (!bit_array_write) tta_error (MEMORY_ERROR, NULL);
+        //bit_array_write = (unsigned char *) realloc (bit_array_write, bit_array_write_size += STEP_SIZE);
+        //if (!bit_array_write) tta_error (MEMORY_ERROR, NULL);
+        bit_array_write_bits = UINT_MAX;  // Signal to use original (uncompressed) data instead
+        return;
     }
     unsigned long *s = ((unsigned long *)bit_array_write) + pos;
 
@@ -112,9 +113,11 @@ put_unary (unsigned long value) {
     unsigned long rbit = 32 - fbit;
     unsigned long pos = bit_array_write_bits >> 5;
 
-    if ((pos << 2) + value > bit_array_write_size) {
-        bit_array_write = (unsigned char *) realloc (bit_array_write, bit_array_write_size += mymax(STEP_SIZE,value/8+10));
-        if (!bit_array_write) tta_error (MEMORY_ERROR, NULL);
+    if ((pos << 2) + 8 + value/8 > bit_array_write_size) {
+        //bit_array_write = (unsigned char *) realloc (bit_array_write, bit_array_write_size += mymax(STEP_SIZE,value/8+8));
+        //if (!bit_array_write) tta_error (MEMORY_ERROR, NULL);
+        bit_array_write_bits = UINT_MAX;  // Signal to use original (uncompressed) data instead
+        return;
     }
     unsigned long *s = ((unsigned long *)bit_array_write) + pos;
 

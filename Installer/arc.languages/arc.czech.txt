@@ -14,18 +14,52 @@
 ***    1185 Protection:=Appends recovery information to archive            ***
 ******************************************************************************
 
-Language name in english and mother tongue
-0000 Language=Czech (Čeština)
-0159 Copyright=Radek "Black_Fox" Liška\nDodatky k překladu: Jan Ondruš, Milan Hrubý, Michal Molhanec
+Metainformation (not translations!)
+0000 Language name in english and mother tongue=Czech (Čeština)
+0159 Translated by=Radek "Black_Fox" Liška\nDodatky k překladu: Jan Ondruš, Milan Hrubý, Michal Molhanec
+0462 Short language code=cs
 
-Language-specific URLs relative to http://freearc.org/ and helpfiles
+Language-specific helpfiles (not translations!)
 Filled only for languages providing their own translations
-0254 Homepage (URL, not translation!)=??
-0255 News page (URL, not translation!)=??
-0371 Forum page (URL, not translation!)=??
-0372 Wiki page (URL, not translation!)=??
-0256 Helpfile (URL, not translation!)=??
-0257 Command-line help (URL, not translation!)=??
+0256 Helpfile=??
+0257 Command-line help=??
+
+
+=== Explorer context menu =======================================================
+0391 Add to "%s"=Přidat do "%s"
+0392 Compress the selected files using FreeArc=Zkomprimovat zvolené soubory ve FreeArcu
+0393 Add to SFX "%s"=Přidat do SFX "%s"
+0394 Compress the selected files into SFX using FreeArc=Zkomprimovat zvolené soubory do SFX ve FreeArcu
+0395 Add to archive...=Přidat do archivu...
+0396 Compress the selected files using FreeArc via dialog=Zkomprimovat zvolené soubory ve FreeArcu pomocí nabídky
+--
+0397 Open with FreeArc=Otevřít ve FreeArcu
+0398 Open the selected archive(s) with FreeArc=Otevřít zvolené archivy ve FreeArcu
+0399 Extract to "%s"=Rozbalit do "%s"
+0400 Extract the selected archive(s) to new folder=Rozbalit zvolené archivy do nové složky
+0401 Extract here=Rozbalit sem
+0402 Extract the selected archive(s) to the same folder=Rozbalit zvolené archivy do stejné složky
+0403 Extract...=Rozbalit...
+0404 Extract the selected archive(s) via dialog=Rozbalit zvolené archivy pomocí nabídky
+0405 Test=Otestovat
+0406 Test the selected archive(s)=Otestovat zvolené archivy
+--
+0407 Convert to SFX=Převést na SFX
+0408 Convert the selected archive(s) to SFX=Převést zvolené archivy na SFX
+0409 Convert from SFX=Převést z SFX
+0410 Convert the selected SFX(es) to normal archive(s)=Převést zvolené SFX na normální archivy
+--
+0411 Modify...=Upravit...
+0412 Modify the selected archives via dialog=Upravit zvolené archivy pomocí nabídky
+0413 Join...=Spojit...
+0414 Join the selected archives via dialog=Spojit zvolené archivy pomocí nabídky
+--
+0415 Convert to .arc=Převést na .arc
+0416 Convert the selected archive(s) to FreeArc format=Převést zvolené archivy na formát FreeArcu
+0417 Convert to .arc SFX=Převést na .arc SFX
+0418 Convert the selected archive(s) to FreeArc SFX=Převést zvolené archivy na FreeArc SFX
+0419 Convert to .arc...=Převést na .arc...
+0420 Convert the selected archive(s) to FreeArc format via dialog=Převést zvolené archivy na formát FreeArcu pomocí nabídky
 
 
 === Menu ========================================================================
@@ -74,6 +108,8 @@ Tools menu/toolbar
 0294 Recompress files in archive=Překomprimuje soubory v archivu
 0270 Convert to SFX=Převést na SFX
 0271 Convert archive to SFX=Převede archiv na samorozbalovací
+0426 Convert to FreeArc=Převést na FreeArc
+0427 Convert foreign archive to FreeArc format=Převede cizí archiv na formát FreeArcu
 0272 Encrypt=Zašifrovat
 0273 Encrypt archive contents=Zašifruje obsah archivu
 0274 Protect=Ochránit
@@ -156,6 +192,8 @@ Add dialog
 0149 Join all archives=Spojit všechny archivy
 0150 Join %1 with another archive=Spojit %1 s jiným archivem
 0151 Join %2 archives=Spojit vybrané archivy
+0428 Convert %1 to FreeArc format=Převést %1 na formát FreeArcu
+0429 Convert %2 archives to FreeArc format=Převést %2 archivů na formát FreeArcu
 ---------
 0182 Main=Hlavní
 0131 Output archive:=Uložit do archivu:
@@ -224,6 +262,7 @@ Delete dialog
 0161 Delete %1?=Určitě vymazat '%1'?
 0019 Delete %2 file(s) from archive?=Určitě vymazat tyto %2 položky?
 0020 Delete %2 file(s)?=Určitě vymazat tyto %2 položky?
+0484 Delete directory %1?=Určitě vymazat adresář %1?
 
 
 Extract dialog
@@ -247,12 +286,16 @@ Extract dialog
 0004 Output directory:=Rozbalit do:
 0021 Select output directory=Specifikujte umístění pro rozbalené soubory
 0014 Append archive name to the output directory=Připojit název archivu ke složce
+0468 Open output directory in Explorer=Otevřít cílovou složku v Průzkumníkovi
 --Other
+0425 Keep broken extracted files=Ponechat poškozené rozbalené soubory
+0479 Shutdown computer when operation completed=Vypnout počítač po dokončení operace
 0072 Additional options:=Další nastavení:
 
 
 Archive information dialog
 0085 All about %1=Informace o %1
+0465 Archive type:=Typ archivu:
 0173 Directories:=Adresářů:
 0088 Files:=Souborů:
 0089 Total bytes:=Velikost:
@@ -260,6 +303,8 @@ Archive information dialog
 0091 Ratio:=Kompresní poměr:
 --
 0104 Directory blocks:=Adresářových bloků:
+0463 Directory, bytes:=Adresář, bajtů:
+0464 Directory, compressed:=Adresář po zabalení:
 0092 Solid blocks:=Solid bloků:
 0093 Avg. blocksize:=Průměrná velikost:
 --
@@ -274,6 +319,13 @@ Archive information dialog
 --
 0097 Encryption algorithms:=Šifrovací algoritmus:
 0098 Archive comment:=Poznámka:
+---
+0449 Solid blocks=Solid bloky
+0450 Position=Pozice
+0451 Size=Velikost
+0452 Compressed=Zkomprimováno
+0453 Files=Souborů
+0454 Method=Metoda
 
 
 Settings dialog
@@ -287,14 +339,27 @@ Settings dialog
 0166 Logfile:=Soubor záznamu:
 0292 View=&Zobrazit
 0167 Select logfile=Vybrat záznam
+0447 Temporary directory:=Dočasný adresář
+0448 Select directory for temporary files=Vybrat adresář pro dočasné soubory
 0172 Associate FreeArc with .arc files=Asociovat FreeArc se soubory .arc
-0361 Add captions to toolbar buttons=Přidat popisy k tlačítkům na liště nástrojů
+0471 Associate FreeArc with other archives=Asociovat FreeArc s ostatními archivy
 0370 Watch for new versions via Internet=Sledovat nové verze na internetu
 0168 You should restart FreeArc in order for a language settings to take effect.=Aby se změna jazyka projevila, musí být FreeArc restartován.
 0169 Passwords need to be entered again after restart.=Hesla musí být po restartu znovu zadána.
 --
+0466 Interface=Rozhraní
+0361 Add captions to toolbar buttons=Zobrazit popisy tlačítek na liště nástrojů
+0469 Show "Test archive" dialog=Zobrazovat rozšířený dialog "Otestovat archiv"
+0485 Open .tar.gz-like archives in single step=Otevírat .tar.gz a podobné archivy v jednom kroku
+0467 Unpack whole archive when running:=Při spuštění rozbalit celý archiv
+--
+0421 Explorer integration=Integrace do Průzkumníka
+0422 Enable context menu in Explorer=Zapnout kontextové menu v Průzkumníkovi
+0423 Make it cascaded=Kaskádové menu
+0424 Enable individual commands:=Individuální nastavení příkazů:
+--
 0388 Info=Info
-0389 Largest contiguous free memblock:=Největší celistvé volné místo v paměti
+0461 Largest address space block:=Největší blok adresního prostoru
 
 
 Logfiles
@@ -306,6 +371,10 @@ Checking for updates
 0296 Cannot open %1. Do you want to check the page with browser?=Nelze otevřít %1. Zobrazit stránku v prohlížeči?
 0297 Nothing new at %1=Žádné dostupné aktualizace na %1
 0298 Found new information at %1! Open the page with browser?=Nalezena aktualizace na %1! Zobrazit stránku v prohlížeči?
+
+About dialog
+0459 High-performance archiver=Archivátor s vysokým výkonem
+0460 Free as well for commercial as for non-commercial use=Zdarma pro komerční i nekomerční využití
 
 
 === Profile settings ============================================================
@@ -357,12 +426,9 @@ Many dialogs
 0081 &Cancel=&Zrušit
 0363 &Select=&Vybrat
 0364 &Close=Zavří&t
+0432 &Detach=O&dpojit
 
 Progress indicator
---Buttons
-0052 &Background=&Na pozadí
-0053 &Pause=&Pozastavit
-0054 &Continue=Pok&račovat
 --Labels
 0056 Files=Souborů:
 0057 Total files=Celkem souborů:
@@ -383,6 +449,13 @@ Progress indicator
 0385 Scanning archive for damages=Zjišťuji chyby v archivu
 0386 Protecting archive from damages=Ochraňuji archiv před poškozením
 0387 Recovering archive=Obnovuji archiv
+--Extra options
+0446 Keep window on top=Zobrazovat nad ostatními okny
+--Buttons
+0052 &Background=&Na pozadí
+0053 &Pause=&Pozastavit
+0054 &Continue=Pok&račovat
+0470 &Close=Zavří&t
 
 File overwrite dialog
 0078 Confirm File Replace=Potvrzení nahrazení souboru
@@ -405,19 +478,23 @@ Archive comment dialog
 
 
 === Infoline messages ====================================================
-0228 Deleting from %1=Mažu z %1
+0439 Listing archive %1=Vypisuji obsah archivu %1
+0445 SUCCESFULLY LISTED %1=ÚSPĚŠNĚ VYPSÁN OBSAH Z %1
+0442 %2 WARNINGS WHILE LISTING %1=%2 VAROVÁNÍ BĚHEM ZOBRAZOVÁNÍ %1
+
+0435 Deleting files from archive %1=Mažu soubory z archivu %1
 0229 FILES SUCCESFULLY DELETED FROM %1=SOUBORY Z %1 BYLY ÚSPĚŠNĚ SMAZÁNY
 0230 %2 WARNINGS WHILE DELETING FROM %1=%2 VAROVÁNÍ BĚHEM MAZÁNÍ Z %1
 
-0231 Testing %1=Testuji %1
+0440 Testing archive %1=Testuji archiv %1
 0232 SUCCESFULLY TESTED %1=%1 ÚSPĚŠNĚ OTESTOVÁNO
 0233 %2 WARNINGS WHILE TESTING %1=%2 VAROVÁNÍ BĚHEM TESTOVÁNÍ %1
 
-0234 Extracting files from %1=Extrahuji soubory z %1
+0441 Extracting files from archive %1=Extrahuji soubory z archivu %1
 0235 FILES SUCCESFULLY EXTRACTED FROM %1=SOUBORY BYLY ÚSPĚŠNĚ EXTRAHOVÁNY Z %1
 0236 %2 WARNINGS WHILE EXTRACTING FILES FROM %1=%2 VAROVÁNÍ BĚHEM EXTRAHOVÁNÍ SOUBORŮ Z %1
 
-0237 Modifying %1=Upravuji %1
+0433 Modifying archive %1=Modifikuji archiv %1
 0238 SUCCESFULLY MODIFIED %1=%1 ÚSPĚŠNĚ UPRAVENO
 0239 %2 WARNINGS WHILE MODIFYING %1=%2 VAROVÁNÍ BĚHEM UPRAVOVÁNÍ %1
 
@@ -425,9 +502,13 @@ Archive comment dialog
 0241 SUCCESFULLY JOINED ARCHIVES TO %1=ARCHIVY BYLY ÚSPĚŠNĚ SPOJENY DO %1
 0242 %2 WARNINGS WHILE JOINING ARCHIVES TO %1=%2 VAROVÁNÍ BĚHEM SPOJOVÁNÍ ARCHIVŮ DO %1
 
-0243 Adding to %1=Přidávám do %1
-0244 FILES SUCCESFULLY ADDED TO %1=SOUBORY BYLY ÚSPĚŠNĚ PŘIDÁNY DO %1
-0245 %2 WARNINGS WHILE ADDING TO %1=%2 VAROVÁNÍ BĚHEM PŘIDÁVÁNÍ DO %1
+0437 Creating archive %1=Vytvářím archiv %1
+0443 SUCCESFULLY CREATED %1=%1 ÚSPĚŠNĚ VYTVOŘENO
+0434 %2 WARNINGS WHILE CREATING %1=%2 VAROVÁNÍ BĚHEM VYTVÁŘENÍ %1
+
+0438 Updating archive %1=Aktualizuji archiv %1
+0444 SUCCESFULLY UPDATED %1=%1 ÚSPĚŠNĚ ZAKTUALIZOVÁNO
+0436 %2 WARNINGS WHILE UPDATING %1=%2 VAROVÁNÍ BĚHEM AKTUALIZOVÁNÍ %1
 
 0299 Lock archive(s)?=Zamknout archiv(y)?
 0300 Locking archive %1=Zamykám archiv %1
@@ -438,6 +519,13 @@ Archive comment dialog
 0382 Repairing archive %1=Opravuji archiv %1
 0383 SUCCESFULLY REPAIRED ARCHIVE %1=ARCHIV %1 BYL ÚSPĚŠNĚ OPRAVEN
 0384 %2 WARNINGS WHILE REPAIRING ARCHIVE %1=%2 VAROVÁNÍ BĚHEM OPRAVOVÁNÍ ARCHIVU %1
+
+
+=== Console messages ====================================================
+0480 Compressing %1=Komprimuji %1
+0481 Testing %1=Testuji %1
+0482 Extracting %1=Extrahuji %1
+0483 Skipping %1=Přeskakuji %1
 
 
 === Error messages =======================================================
@@ -462,10 +550,9 @@ Archive comment dialog
 0330 can't read directory "%1"=nelze načíst adresář "%1"
 0331 can't get info about file "%1"=nelze načíst informace o souboru "%1"
 0332 can't open file "%1"=nelze otevřít soubor "%1"
-0333 CRC error in file "%1"=chyba CRC v souboru "%1"
 0334 bad section %1 in %2=špatná sekce %1 v %2
-0335 operation terminated!=operace byla ukončena!
-0336 program terminated!=program byl ukončen!
+0455 Operation terminated by user!=Operace přerušena uživatelem!
+0456 Program terminated by user!=Program ukončen uživatelem!
 0337 no files, erasing empty archive=žádné soubory, mažu prázdný archiv
 0338 skipped %1 fake files=přeskočeno %1 falešných souborů
 0339 bad password for archive %1=špatné heslo pro archiv %1
@@ -492,19 +579,30 @@ Archive comment dialog
 0358 last block of archive is not footer block=poslední blok archivu není ukončovací blok
 0377 command "%1" shouldn't have additional arguments=příkaz "%1" by neměl mít další parametry
 0378 bad name or parameters in encryption algorithm %1=špatné jméno nebo parametry šifrovacího algoritmu %1
+0472 Unsupported compression method for "%1".=Nepodporovaná komprimační metoda pro "%1".
+0473 Data error in "%1". File is broken.=Chyba dat v "%1". Soubor je poškozený.
+0474 Data error in encrypted file "%1". Wrong password?=Chyba dat v zakódovaném souboru "%1". Chybné heslo?
+0475 CRC failed in "%1". File is broken.=Chyba CRC v "%1". Soubor je poškozený.
+0476 CRC failed in encrypted file "%1". Wrong password?=Chyba CRC v zakódovaném souboru "%1". Chybné heslo?
+0477 Unknown error=Neznámá chyba
+0478 can't modify non-FreeArc archive=nelze upravovat jiný než FreeArc archiv
 
 Errors returned by compression methods
 0365 general (de)compression error in %1=obecná chyba (de)komprese v %1
 0366 invalid compression method or parameters in %1=neplatná kompresní metoda nebo parametry v %1
 0367 can't allocate memory required for (de)compression in %1=nelze alokovat paměť nutnou pro (de)kompresi v %1
-0368 I/O error in compression algorithm %1=I/O chyba v kompresním algoritmu %1
 0369 bad compressed data in %1=špatná komprimovaná data v %1
+0430 read error (bad media?) in compression algorithm %1=chyba čtení (špatné médium?) v kompresním algoritmu %1
+0431 write error (disk full?) in compression algorithm %1=chyba zápisu (zaplněný disk?) v kompresním algoritmu %1
 
 
 === Standard profiles ====================================================
 Compression
 0771 Maximum=Maximální
 0772 Maximum with fast decompression=Maximální s rychlou dekompresí
+0773 Ultra (require 2 gb RAM for decompression)=Ultra (vyžaduje 2 GB RAM pro dekompresi)
+0774 Maximum (require 1 gb RAM for decompression)=Maximální (vyžaduje 1 GB RAM pro dekompresi)
+0775 Best asymmetric (with fast decompression)=Nejlepší asymetrická (s rychlou dekompresí)
 0752 No compression=Žádná komprese
 
 Encryption
@@ -550,7 +648,7 @@ Archive name template
 0759 Weekday=Den v týdnu
 
 Exclude
-0753 Backup files=Zálohovat soubory
+0753 Backup files=Záložní soubory
 
 Additional compression options
 0760 Perform full backup=Provést plnou zálohu
@@ -589,6 +687,10 @@ Add dialog
 --
 1222 Include only files=Je-li tato položka zaškrtnuta, budou archivovány jen zadané typy souborů (např. *.txt)
 1223 Exclude files=Je-li tato položka zaškrtnuta, budou zadané typy souborů z archivace vynechány (např *.dll)
+
+--Settings dialog
+1467 Unpack whole archive when running:=FreeArc dokáže spouštět soubory zevnitř archivů, spousta spustitelných souborů ovšem závisí na dalších souborech. Pokud spustitelný soubor nefunguje správně, FreeArc lze tímto nastavit, aby rozbalil celý archiv u určitých typů souborů, pokud budou spuštěny přímo zevnitř archivu.
+1469 Show "Test archive" dialog=Při spuštění operace Test se zobrazí dialog, který umožní zadání hesla a dalších specifik operace
 
 --Compression settings
 1113 Fast, low-memory decompression=Nepoužijí se algoritmy s pomalou nebo paměťově náročnou dekompresí, nicméně tato volba může zpomalit a zhoršit kompresi

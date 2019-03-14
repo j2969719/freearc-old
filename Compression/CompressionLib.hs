@@ -1,12 +1,17 @@
-{-# OPTIONS_GHC -cpp -fno-monomorphism-restriction #-}
+{-# OPTIONS_GHC -cpp #-}
 ----------------------------------------------------------------------------------------------------
 ---- ”паковка и распаковка данных.                                                              ----
 ---- »нтерфейс с написанными на —и процедурами, выполн€ющими всю реальную работу.               ----
 ----------------------------------------------------------------------------------------------------
+#ifdef FREEARC_CELS
+module CompressionLib (module HsCELS) where
+import HsCELS
+#else
+
 module CompressionLib where
 
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Bits
 import Data.Char
@@ -57,7 +62,11 @@ decompressMemWithHeader a b c d = c_DecompressMemWithHeader a b c d
 
 -- |Return canonical representation of compression method
 canonizeCompressionMethod :: Method -> Method
-canonizeCompressionMethod = doWithMethod c_CanonizeCompressionMethod
+canonizeCompressionMethod = doWithMethod (\a b -> c_CanonizeCompressionMethod a b 0)
+
+-- |Return pure representation of compression method for saving in archive header (f.e. without :t:i for 4x4)
+purifyCompressionMethod :: Method -> Method
+purifyCompressionMethod = doWithMethod (\a b -> c_CanonizeCompressionMethod a b 1)
 
 -- |Returns memory used to compress/decompress, dictionary or block size of method given
 getCompressionMem, getDecompressionMem, getDictionary, getBlockSize :: Method -> MemSize
@@ -124,10 +133,11 @@ runWithMethod action method callback = do
 
 -- |Execute C (de)compression routine `action` using read/write callbacks `read_f` & `write_f`
 run action callback = do
+  -- Ignore auxdata since we can do better with closures
   let callback2 cwhat buf size auxdata = do what <- peekCString cwhat
-                                            callback what buf (ii size) auxdata >>=return.ii
+                                            callback what buf (ii size) >>=return.ii
   bracket (mkCALL_BACK callback2) (freeHaskellFunPtr)$ \c_callback -> do   -- convert Haskell routine to C-callable routine
-    action c_callback c_callback
+    action c_callback nullPtr
 
 withMethod action method inp insize outp outsize = do
   withCString method $ \c_method -> do
@@ -162,11 +172,12 @@ aFREEARC_ERRCODE_INVALID_COMPRESSOR    = -2
 aFREEARC_ERRCODE_ONLY_DECOMPRESS       = -3
 aFREEARC_ERRCODE_OUTBLOCK_TOO_SMALL    = -4
 aFREEARC_ERRCODE_NOT_ENOUGH_MEMORY     = -5
-aFREEARC_ERRCODE_IO                    = -6
+aFREEARC_ERRCODE_READ                  = -6
 aFREEARC_ERRCODE_BAD_COMPRESSED_DATA   = -7
 aFREEARC_ERRCODE_NOT_IMPLEMENTED       = -8
 aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED = -9
 aFREEARC_ERRCODE_OPERATION_TERMINATED  = -10
+aFREEARC_ERRCODE_WRITE                 = -11
 
 compressionErrorMessage x
   | x==aFREEARC_OK                            = "All OK"
@@ -175,11 +186,12 @@ compressionErrorMessage x
   | x==aFREEARC_ERRCODE_ONLY_DECOMPRESS       = "program build with FREEARC_DECOMPRESS_ONLY, so don't try to use compress"
   | x==aFREEARC_ERRCODE_OUTBLOCK_TOO_SMALL    = "output block size in (de)compressMem is not enough for all output data in %1"
   | x==aFREEARC_ERRCODE_NOT_ENOUGH_MEMORY     = "0367 can't allocate memory required for (de)compression in %1"
-  | x==aFREEARC_ERRCODE_IO                    = "0368 I/O error in compression algorithm %1"
+  | x==aFREEARC_ERRCODE_READ                  = "0430 read error (bad media?) in compression algorithm %1"
   | x==aFREEARC_ERRCODE_BAD_COMPRESSED_DATA   = "0369 bad compressed data in %1"
   | x==aFREEARC_ERRCODE_NOT_IMPLEMENTED       = "requested feature isn't supported in %1"
   | x==aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED = "required part of data was already decompressed"
   | x==aFREEARC_ERRCODE_OPERATION_TERMINATED  = "operation terminated by user"
+  | x==aFREEARC_ERRCODE_WRITE                 = "0431 write error (disk full?) in compression algorithm %1"
   | otherwise                                 = "unknown (de)compression error "++show x++" in %1"
 
 
@@ -189,19 +201,19 @@ compressionErrorMessage x
 
 -- |Compress using callbacks
 foreign import ccall threadsafe  "Compression.h Compress"
-   c_compress             :: CMethod -> FunPtr CALLBACK_FUNC -> FunPtr CALLBACK_FUNC -> IO Int
+   c_compress             :: CMethod -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |Decompress using callbacks
 foreign import ccall threadsafe  "Compression.h Decompress"
-   c_decompress           :: CMethod -> FunPtr CALLBACK_FUNC -> FunPtr CALLBACK_FUNC -> IO Int
+   c_decompress           :: CMethod -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |Compress using callbacks and save method name in compressed output
 foreign import ccall threadsafe  "Compression.h CompressWithHeader"
-   c_CompressWithHeader   :: CMethod -> FunPtr CALLBACK_FUNC -> FunPtr CALLBACK_FUNC -> IO Int
+   c_CompressWithHeader   :: CMethod -> FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 -- |Decompress data compressed with c_CompressWithHeader (method name is read from compressed stream)
 foreign import ccall threadsafe  "Compression.h DecompressWithHeader"
-   c_DecompressWithHeader ::            FunPtr CALLBACK_FUNC -> FunPtr CALLBACK_FUNC -> IO Int
+   c_DecompressWithHeader ::            FunPtr CALLBACK_FUNC -> VoidPtr -> IO Int
 
 
 ----------------------------------------------------------------------------------------------------
@@ -245,7 +257,7 @@ foreign import ccall unsafe  "External/C_External.h  AddExternalCompressor"
 
 -- |Returns canonical representation of compression method or error code
 foreign import ccall unsafe  "Compression.h  CanonizeCompressionMethod"
-   c_CanonizeCompressionMethod   :: CMethod -> CMethod -> IO Int
+   c_CanonizeCompressionMethod   :: CMethod -> CMethod -> Int -> IO Int
 
 foreign import ccall unsafe  "Compression.h CompressionService"
    c_CompressionService :: CMethod -> CString -> CInt -> VoidPtr -> FunPtr CALLBACK_FUNC -> IO CInt
@@ -339,7 +351,7 @@ type Parameter = String
 type MemSize = CUInt
 
 -- |Unlimited memory usage
-aUNLIMITED_MEMORY = maxBound::MemSize
+aUNLIMITED_MEMORY = 0::MemSize
 
 -- |Typeless pointer
 type VoidPtr = Ptr ()
@@ -347,3 +359,4 @@ type VoidPtr = Ptr ()
 -- |Universal integral types conversion routine
 ii x = fromIntegral x
 
+#endif

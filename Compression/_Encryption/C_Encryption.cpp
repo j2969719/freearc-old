@@ -6,10 +6,17 @@ extern "C" {
 #define     ENCRYPT_ONLY
 #define   LTC_TWOFISH
 #define   LTC_SERPENT
+#define LTC_NO_MODES
+#define   LTC_CFB_MODE
+#define   LTC_CTR_MODE
 #define LTC_NO_HASHES
 #define   LTC_SHA1
 #define   LTC_SHA512
+#define LTC_NO_MACS
+#define   LTC_HMAC
 #define LTC_NO_MATH
+#define LTC_NO_PK
+#define   LTC_MECC
 #define LTC_NO_TEST
 #include "ciphers/aes/aes.c"
 #include "ciphers/blowfish.c"
@@ -248,7 +255,7 @@ int ENCRYPTION_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_ENCRYPTION)
-void ENCRYPTION_METHOD::ShowCompressionMethod (char *buf)
+void ENCRYPTION_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     sprintf (buf, "%s-%d/%s:n%d:r%d%s%s%s%s%s%s%s%s"
                                         , cipher_descriptor[cipher].name, keySize*8

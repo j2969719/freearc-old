@@ -91,12 +91,13 @@ typedef unsigned __int8      uint8,  byte, BYTE;
 #endif
 
 typedef unsigned             MemSize;          // объём памяти
-typedef char*                FILENAME;         // имя файла
+#define MEMSIZE_MAX          UINT_MAX
 #ifdef FREEARC_WIN
 typedef int64                FILESIZE;         // размер файла
 #else
 typedef off_t                FILESIZE;
 #endif
+typedef char*                FILENAME;         // имя файла
 
 
 /******************************************************************************
@@ -124,7 +125,6 @@ typedef off_t                FILESIZE;
 #define nameequ(s1,s2)           (namecmp(s1,s2)==EQUAL)
 #define start_with(str,with)     (strncmp (str, with, strlen(with))==EQUAL)
 #define end_with(str,with)       (nameequ (str_end(str)-strlen(with), with))
-#define strdup_msg(s)            (strcpy (new char[strlen(s)+1], (s)))
 #define find_extension(str)      (find_extension_in_entry (drop_dirname(str)))
 #define mymax(a,b)               ((a)>(b)? (a) : (b))
 #define mymin(a,b)               ((a)<(b)? (a) : (b))
@@ -146,6 +146,14 @@ static inline char *drop_dirname (char *filename)
   return filename;
 }
 
+// Check that `subdir` is a sudirectory of `dir`
+static inline int is_subdir_of (char *subdir, char *dir)
+{
+  return subdir==NULL
+     ||  strequ(subdir,"")
+     || (start_with(dir,subdir)  &&  in_set0 (dir[strlen(subdir)], PATH_CHARS));
+}
+
 
 // ****************************************************************************
 // FILE OPERATIONS ************************************************************
@@ -159,9 +167,12 @@ static inline char *drop_dirname (char *filename)
 #include <fcntl.h>
 #include <tchar.h>
 typedef TCHAR* CFILENAME;
-static inline void delete_file (CFILENAME name) {_tremove(name);}
-static inline void create_dir  (CFILENAME name) {_tmkdir(name);}
-static inline int  file_exists (CFILENAME name) {return _taccess(name,0) == 0;}
+static inline int create_dir (CFILENAME name)   {return _tmkdir(name);}
+#ifdef FREEARC_64BIT
+#define file_seek(stream,pos)                   (_fseeki64(stream, (pos), SEEK_SET))
+#else
+#define file_seek(stream,pos)                   (fseeko64(stream, (pos), SEEK_SET))
+#endif
 #define set_flen(stream,new_size)               (chsize( file_no(stream), new_size ))
 #define get_flen(stream)                        (_filelengthi64(fileno(stream)))
 #define myeof(file)                             (feof(file))
@@ -186,6 +197,7 @@ static inline void WINAPI UnixTimeToFileTime( time_t time, FILETIME* ft )
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <utime.h>
 
 #define __cdecl
 #define SSIZE_T ssize_t
@@ -193,18 +205,23 @@ static inline void WINAPI UnixTimeToFileTime( time_t time, FILETIME* ft )
 typedef char* CFILENAME;
 typedef char  TCHAR;
 #define _T
+#define _tcscmp         strcmp
 #define _tcschr         strchr
+#define	_tcsrchr	strrchr
 #define _tcscpy         strcpy
 #define _stprintf       sprintf
 #define _tcslen         strlen
 #define _tstat          stat
 #define _stat           stat
+#define _trmdir         rmdir
+#define _trename        rename
+#define _tremove        remove
+#define _taccess        access
 
 typedef int (*FARPROC) (void);
 
-static inline void delete_file (char *name)     {remove(name);}
-static inline void create_dir  (char *name)     {mkdir(name,0777);}
-static inline int  file_exists (char *name)     {return access(name,0) == 0;}
+static inline int create_dir (CFILENAME name)   {return mkdir(name,0777);}
+#define file_seek(stream,pos)                   (fseek(stream, (pos), SEEK_SET))
 #define get_flen(stream)                        (myfilelength( fileno (stream)))
 #define set_binary_mode(file)
 #define myeof(file)                             (get_flen(file) == ftell(file))
@@ -218,10 +235,14 @@ static inline off_t myfilelength (int h)
 
 #endif // FREEARC_UNIX
 
-#define rename_file(oldname,newname)            rename(oldname,newname)
-#define delete_dir(name)                        rmdir(name)
 #define file_read(file, buf, size)              fread  (buf, 1, size, file)
 #define file_write(file, buf, size)             fwrite (buf, 1, size, file)
+
+static inline int remove_dir  (CFILENAME name)  {return _trmdir(name);}
+static inline int remove_file (CFILENAME name)  {return _tremove(name);}
+static inline int file_exists (CFILENAME name)  {return _taccess(name,0) == 0;}
+
+static inline int rename_file (CFILENAME oldname, CFILENAME newname)  {return _trename(oldname,newname);}
 
 static inline int dir_exists (const TCHAR *name)
 {
@@ -229,6 +250,16 @@ static inline int dir_exists (const TCHAR *name)
   _tstat(name,&st);
   return (st.st_mode & S_IFDIR) != 0;
 }
+
+void BuildPathTo(CFILENAME name);  // Создать каталоги на пути к name
+void SetFileDateTime (const CFILENAME Filename, time_t t); // Установить время/дату модификации файла
+void RunProgram (const CFILENAME filename, const CFILENAME curdir, int wait_finish);  // Execute program `filename` in the directory `curdir` optionally waiting until it finished
+int  RunCommand (const CFILENAME command,  const CFILENAME curdir, int wait_finish);  // Execute `command` in the directory `curdir` optionally waiting until it finished
+void RunFile    (const CFILENAME filename, const CFILENAME curdir, int wait_finish);  // Execute file `filename` in the directory `curdir` optionally waiting until it finished
+int  BeginCompressionThreadPriority (void);            // Установить приоритет треда какой полагается для тредов сжатия (распаковки, шифрования...)
+void EndCompressionThreadPriority (int old_priority);  // Восстановить приоритет треда таким, как мы его запомнили
+void SetTempDir (const CFILENAME dir);     // Set temporary files directory
+CFILENAME GetTempDir (void);               // Return last value set or GetTempPath (%TEMP)
 
 
 // ****************************************************************************
@@ -370,6 +401,60 @@ static inline void setvalue64 (void *p, uint64 x)
 
 #endif //FREEARC_MOTOROLA_BYTE_ORDER
 
+
+static inline uint16 value16b (void *p)
+{
+#if defined(FREEARC_INTEL_BYTE_ORDER) && defined(_MSC_VER)
+  return _byteswap_ushort(value16(p));
+#else
+  uint8 *m = (uint8 *)p;
+  return (m[0] << 8) + m[1];
+#endif
+}
+
+static inline uint32 value32b (void *p)
+{
+#if defined(FREEARC_INTEL_BYTE_ORDER) && defined(_MSC_VER)
+  return _byteswap_ulong(value32(p));
+#elif __GNUC__ == 4 && __GNUC_MINOR__ > 2 || __GNUC__ > 4
+  return __builtin_bswap32(value32(p));
+#else
+  uint8 *m = (uint8 *)p;
+  return (m[0] << 24) + (m[1] << 16) + (m[2] << 8) + m[3];
+#endif
+}
+
+static inline void setvalue16b (void *p, uint32 x)
+{
+#if defined(FREEARC_INTEL_BYTE_ORDER) && defined(_MSC_VER)
+  uint16 *m = (uint16 *)p;
+  *m = _byteswap_ushort(x);
+#else
+  uint8 *m = (uint8 *)p;
+  m[0] = x >> 8;
+  m[1] = x;
+#endif
+}
+
+static inline void setvalue32b (void *p, uint32 x)
+{
+#if defined(FREEARC_INTEL_BYTE_ORDER) && defined(_MSC_VER)
+  uint32 *m = (uint32 *)p;
+  *m = _byteswap_ulong(x);
+#elif __GNUC__ == 4 && __GNUC_MINOR__ > 2 || __GNUC__ > 4
+  uint32 *m = (uint32 *)p;
+  *m = __builtin_bswap32(x);
+#else
+  uint8 *m = (uint8 *)p;
+  m[0] = x >> 24;
+  m[1] = x >> 16;
+  m[2] = x >> 8;
+  m[3] = x;
+#endif
+}
+
+
+
 // Check for equality
 #define val16equ(p,q)             (*(uint16*)(p) == *(uint16*)(q))
 #define val24equ(p,q)             (   value24(p) ==    value24(q))
@@ -378,7 +463,8 @@ static inline void setvalue64 (void *p, uint64 x)
 
 // Free memory block and set pointer to NULL
 #ifndef FreeAndNil
-#define FreeAndNil(p)            ((p) && (free(p), (p)=NULL))
+#define FreeAndNil(p)            ((p) && (free(p),    (p)=NULL))
+#define BigFreeAndNil(p)         ((p) && (BigFree(p), (p)=NULL))
 #endif
 
 // Exit code used to indicate serious problems in FreeArc utilities
@@ -391,9 +477,9 @@ extern jmp_buf jumper;
 // Процедура сообщения о неожиданных ошибочных ситуациях
 #ifndef CHECK
 #  if defined(FREEARC_WIN) && defined(FREEARC_GUI)
-#    define CHECK(a,b)           {if (!(a))  {if (jmpready) longjmp(jumper,1);  char *s=(char*)malloc(MY_FILENAME_MAX*4);  WCHAR *utf16=(WCHAR*) malloc(MY_FILENAME_MAX*4);  sprintf b;  utf8_to_utf16(s,utf16);  MessageBoxW(NULL, utf16, L"Error encountered", MB_ICONERROR);  ON_CHECK_FAIL();  exit(FREEARC_EXIT_ERROR);}}
+#    define CHECK(a,b)           {if (!(a))  {if (jmpready) longjmp(jumper,1);  char *s=(char*)malloc_msg(MY_FILENAME_MAX*4);  WCHAR *utf16=(WCHAR*) malloc_msg(MY_FILENAME_MAX*4);  sprintf b;  utf8_to_utf16(s,utf16);  MessageBoxW(NULL, utf16, L"Error encountered", MB_ICONERROR);  ON_CHECK_FAIL();  exit(FREEARC_EXIT_ERROR);}}
 #  elif defined(FREEARC_WIN)
-#    define CHECK(a,b)           {if (!(a))  {if (jmpready) longjmp(jumper,1);  char *s=(char*)malloc(MY_FILENAME_MAX*4),  *oem=(char*)malloc(MY_FILENAME_MAX*4);  sprintf b;  utf8_to_oem(s,oem);  printf("\n%s",oem);  ON_CHECK_FAIL();  exit(FREEARC_EXIT_ERROR);}}
+#    define CHECK(a,b)           {if (!(a))  {if (jmpready) longjmp(jumper,1);  char *s=(char*)malloc_msg(MY_FILENAME_MAX*4),  *oem=(char*)malloc_msg(MY_FILENAME_MAX*4);  sprintf b;  utf8_to_oem(s,oem);  printf("\n%s",oem);  ON_CHECK_FAIL();  exit(FREEARC_EXIT_ERROR);}}
 #  else
 #    define CHECK(a,b)           {if (!(a))  {if (jmpready) longjmp(jumper,1);  char s[MY_FILENAME_MAX*4];  sprintf b;  printf("\n%s",s);  ON_CHECK_FAIL();  exit(FREEARC_EXIT_ERROR);}}
 #  endif
@@ -402,6 +488,15 @@ extern jmp_buf jumper;
 #ifndef ON_CHECK_FAIL
 #define ON_CHECK_FAIL()
 #endif
+
+// Устанавливает Jump Point с переходом на метку label
+#define SET_JMP_POINT_GOTO(label)                                                      \
+{                                                                                      \
+  if (!jmpready && setjmp(jumper) != 0)                                                \
+    /* Сюда мы попадём при возникновении ошибки в одной из вызываемых процедур */      \
+    {jmpready = FALSE; goto label;}                                                    \
+  jmpready = TRUE;                                                                     \
+}
 
 // Устанавливает Jump Point с кодом возврата retcode
 #define SET_JMP_POINT(retcode)                                                         \
@@ -450,7 +545,12 @@ extern jmp_buf jumper;
 #define throw()
 #endif
 
-#ifndef FREEARC_STANDALONE_TORNADO
+#ifdef FREEARC_STANDALONE_TORNADO
+#define MidAlloc(size) malloc(size)
+#define MidFree(address) free(address)
+#define BigAlloc(size) malloc(size)
+#define BigFree(address) free(address)
+#else
 void *MyAlloc(size_t size) throw();
 void MyFree(void *address) throw();
 #ifdef FREEARC_WIN
@@ -466,11 +566,13 @@ void BigFree(void *address) throw();
 #define BigFree(address) MyFree(address)
 #endif
 
+
 // ****************************************************************************
 // Функции парсинга и арифметики **********************************************
 // ****************************************************************************
 void strncopy (char *to, char *from, int len);   // Копирует строчку from в to, но не более len символов
 int  split (char *str, char splitter, char **result, int result_size);  // Разбить строку str на подстроки, разделённые символом splitter
+void join (char **src, char splitter, char *result, int result_size);   // Объединить NULL-terminated массив строк src в строку result, ставя между строками разделитель splitter
 char*subst (char *original, char *from, char *to);  // Заменяет в строке original все вхождения from на to
 char*trim_spaces (char *s);                      // Пропускает пробелы в начале строки и убирает их в конце, модифицируя строку
 char *str_replace_n (char *orig, char *from, int how_many, char *to);   // Replace from:how_many substring and put result in new allocated area
@@ -520,6 +622,8 @@ static inline MemSize lb (MemSize n)
 static inline MemSize roundup_to_power_of (MemSize n, MemSize base)
 {
     MemSize result = base;
+    if (!n)
+        return 0;
     if (!(--n))
         return 1;
     if (base == 2)
@@ -600,12 +704,202 @@ void EnvResetConsoleTitle (void);  // Восстановить заголовок, который был в нача
 // Timing execution
 double GetGlobalTime     (void);   // Returns number of wall-clock seconds since some moment
 double GetThreadCPUTime  (void);   // Returns number of seconds spent in this thread
-#endif
 
+// Time-based random number
+unsigned time_based_random(void);
+#endif
 
 #ifdef __cplusplus
+
+// Register/unregister temporary files that should be deleted on ^Break
+class MYFILE;
+void registerTemporaryFile   (MYFILE &file);
+void unregisterTemporaryFile (MYFILE &file);
+void removeTemporaryFiles    (void);
+
+// Checked malloc
+static inline void *malloc_msg (unsigned long size = MY_FILENAME_MAX * 4)
+{
+  void *ptr = malloc(size);
+  CHECK (ptr, (s,"ERROR: can't alloc %lu memory bytes", size));
+  return ptr;
+}
+
+// Checked strdup
+static inline char *strdup_msg (char *old)
+{
+  char *str = (char*) malloc_msg (strlen(old)+1);
+  strcpy (str, old);
+  return str;
+}
+
 }       // extern "C"
+
+
+/******************************************************************************
+** Класс, абстрагирующий работу с файлами *************************************
+******************************************************************************/
+
+enum MODE {READ_MODE, WRITE_MODE}; // режим открытия файла
+struct MYFILE
+{
+  // Mark file as temporary, removed automatically by destructor
+  bool is_temp;
+  void mark_as_temporary()           {registerTemporaryFile(*this); is_temp = TRUE;}
+
+  int handle;
+  TCHAR *filename;
+  char *utf8name, *utf8lastname, *oemname;
+
+  void SetBaseDir (char *utf8dir)    // Set base dir
+  {
+    if (utf8dir != utf8name)
+      strcpy (utf8name, utf8dir);
+    if (utf8name[0] != '\0' && !is_path_char (last_char(utf8name)))
+      strcat (utf8name, STR_PATH_DELIMITER);
+    utf8lastname = str_end(utf8name);
+  }
+
+#ifdef FREEARC_WIN
+#  ifdef FREEARC_GUI                 // Win32 GUI *****************************************
+  void setname (FILENAME _filename)  {strcpy (utf8lastname, _filename);
+                                      utf8_to_utf16 (utf8name, filename);}
+  CFILENAME displayname (void)       {return filename;}
+
+#  else                              // Win32 console *************************************
+  void setname (FILENAME _filename)  {strcpy (utf8lastname, _filename);
+                                      utf8_to_utf16 (utf8name, filename);
+                                      CharToOemW (filename, oemname);}
+  FILENAME displayname (void)        {return oemname;}
+#  endif
+
+#else                                // Linux *********************************************
+  void setname (FILENAME _filename)  {strcpy (utf8lastname, _filename);  filename = utf8name;}
+  FILENAME displayname (void)        {return utf8name;}
+
+#endif                               // END ***********************************************
+
+  void init()                             {handle   = -1;
+                                           is_temp  = FALSE;
+#ifdef FREEARC_WIN
+                                           filename = (TCHAR*) malloc_msg (MY_FILENAME_MAX*4);
 #endif
+                                           oemname  = (char*)  malloc_msg (MY_FILENAME_MAX);
+                                           utf8name = (char*)  malloc_msg (MY_FILENAME_MAX*4);
+                                           utf8lastname = utf8name;
+                                           setname("");}
+
+  void setname (MYFILE &base, FILENAME filename) {SetBaseDir (base.utf8name); setname (filename);}
+
+  void change_executable_ext (FILENAME ext) {  // Changes extension of executable file (i.e. on Linux it probably has no extension, on Windows, in most cases - .exe)
+#ifdef FREEARC_WIN
+                                           char *p = strrchr(utf8lastname, '.');
+                                           if (p)  *p='\0';
+#endif
+                                           strcat  (utf8lastname, ".");
+                                           strcat  (utf8lastname, ext);
+                                           setname (utf8lastname);}
+
+  MYFILE ()                               {init();}
+  MYFILE (FILENAME filename)              {init(); setname (filename);}
+  MYFILE (MYFILE &base, FILENAME filename){init(); setname (base, filename);}
+  MYFILE (FILENAME filename, MODE mode)   {init(); open (filename, mode);}
+  virtual void done()                     {tryClose();
+                                           if (is_temp)  remove(), unregisterTemporaryFile(*this), is_temp = FALSE;}
+  virtual ~MYFILE()                       {done();
+                                           if ((char*)filename!=utf8name)  free(filename);
+                                           free(oemname); free(utf8name);}
+  // File operations
+  virtual bool exists ()                  {return file_exists(filename);}
+  virtual bool rename (MYFILE &other)     {return rename_file(filename, other.filename);}
+  virtual int  remove ()                  {return remove_file(filename);}
+#ifdef FREEARC_WIN
+  virtual int  remove_readonly_attrib ()  {return SetFileAttributes (filename, GetFileAttributes(filename) & ~FILE_ATTRIBUTE_READONLY & ~FILE_ATTRIBUTE_SYSTEM);}
+#else
+  virtual int  remove_readonly_attrib ()  {/*struct stat buf; if (0==stat(filename, &buf))  chmod(filename, buf.st_mode & ~S_IWUSR & ~S_IWGRP & ~S_IWOTH);*/  return 0;}
+#endif
+
+  bool tryOpen (MODE mode)    // Пытается открыть файл для чтения или записи
+  {
+    if (mode==WRITE_MODE)  BuildPathTo (filename);
+#ifdef FREEARC_WIN
+    handle = ::_wopen (filename, mode==READ_MODE? O_RDONLY|O_BINARY : O_WRONLY|O_BINARY|O_CREAT|O_TRUNC, S_IREAD|S_IWRITE);
+#else
+    handle =   ::open (filename, mode==READ_MODE? O_RDONLY : O_WRONLY|O_CREAT|O_TRUNC, S_IREAD|S_IWRITE);
+#endif
+    return handle>=0;
+  }
+
+  MYFILE& open (MODE mode)    // Открывает файл для чтения или записи
+  {
+    bool success = tryOpen(mode);
+    CHECK (success, (s,"ERROR: can't open file %s", utf8name));
+    return *this;
+  }
+
+  MYFILE& open (FILENAME _filename, MODE mode)    // Открывает файл для чтения или записи
+  {
+    setname (_filename);
+    return open (mode);
+  }
+
+  void SetFileDateTime (time_t mtime)   {::SetFileDateTime (filename, mtime);}   // Устанавливает mtime файла
+  void close()    // Закрывает файл
+  {
+    CHECK (::close(handle)==0, (s,"ERROR: can't close file %s", utf8name));
+    handle = -1;
+  }
+  bool isopen()    {return handle>=0;}
+  void tryClose()  {if (isopen()) close();}
+
+#ifdef FREEARC_WIN
+  FILESIZE size    ()                {return _filelengthi64 (handle);}            // Возвращает размер файла
+  FILESIZE curpos  ()                {return _lseeki64 (handle, 0,   SEEK_CUR);}  // Текущая позиция в файле
+  void     seek    (FILESIZE pos)    {CHECK( _lseeki64 (handle, pos, SEEK_SET) == pos, (s,"ERROR: file seek operation failed"));}       // Переходит на заданную позицию в файле
+#else
+  FILESIZE size    ()                {return myfilelength (handle);}
+  FILESIZE curpos  ()                {return lseek (handle, 0,   SEEK_CUR);}
+  void     seek    (FILESIZE pos)    {CHECK( lseek (handle, pos, SEEK_SET) == pos, (s,"ERROR: file seek operation failed"));}
+#endif
+
+  FILESIZE tryRead (void *buf, FILESIZE size)   {int result = ::read (handle, buf, size); CHECK(result>=0, (s,"ERROR: file read operation failed")); return result;}           // Возвращает кол-во прочитанных байт, которое может быть меньше запрошенного
+  void     read    (void *buf, FILESIZE size)   {CHECK (tryRead (buf, size) == size, (s,"ERROR: can't read %lu bytes", (unsigned long)size));}         // Возбуждает исключение, если не удалось прочесть указанное число байт
+  void     write   (void *buf, FILESIZE size)   {CHECK (::write (handle, buf, size) == size, (s,"ERROR: file write operation failed"));}
+};
+
+
+struct MYDIR : MYFILE
+{
+  int create_dir() {return ::create_dir(filename);}
+  int remove_dir() {return ::remove_dir(filename);}
+  int dir_exists() {return ::dir_exists(filename);}
+  virtual int remove ()  {return remove_dir();}
+
+  // Make it a temporary directory, removed automatically by destructor
+  bool create_tempdir()
+  {
+#ifdef FREEARC_WIN
+    utf16_to_utf8 (GetTempDir(), utf8name);
+#elif defined(FREEARC_UNIX)
+    strcpy(utf8name, GetTempDir());
+#else
+    ???
+#endif
+    SetBaseDir (utf8name);
+    for (unsigned i = time_based_random(), cnt=0; cnt<1000; cnt++)
+    {
+        i = i*54322457 + 137;
+        char dirname[100];
+        sprintf(dirname, "%s%u", "freearc", i);
+        setname(dirname);
+        BuildPathTo(filename);
+        if (create_dir() == 0)   {mark_as_temporary(); return TRUE;}  // Success
+    }
+    return FALSE;                                                     // Fail
+  }
+  virtual ~MYDIR()  {done();}
+};
+
 
 /******************************************************************************
 ** Bounds-checked arrays ******************************************************
@@ -618,7 +912,7 @@ struct Array
 {
     int n;
     ELEM *p;
-    Array(int _n)             {n=_n; p=(ELEM*)malloc(sizeof(ELEM)*n);}
+    Array(int _n)             {n=_n; p=(ELEM*)malloc_msg(sizeof(ELEM)*n);}
     ~Array()                  {free(p);}
     ELEM& operator [](int i)  {CHECK( 0<=i && i<n, (s,"INDEXING ERROR: %d instead of [0,%d)", i, n));
                                return p[n];}
@@ -628,6 +922,7 @@ struct Array
 #define ARRAYD(type,name,size)  type name[size]
 #endif
 
+#endif  // __cplusplus
 
 /******************************************************************************
 ** END. ***********************************************************************

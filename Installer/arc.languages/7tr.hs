@@ -9,7 +9,7 @@ import System.Environment
 -- "7tr arc.russian.txt pl.txt dir\arc.polish.txt" translates 7-zip language file pl.txt
 --   and old FreeArc language file dir\arc.polish.txt into the new FreeArc language file arc.polish.txt
 main = do (my:szip:old) <- getArgs
-          dict    <-  readFile szip >>= return.makeDict
+          dict    <-  fmap (makeDict szip) (readFile szip)
           oldLang <-  if null old then return []
                                   else readFile (head old) >>= return.makeOldLang
           let lang = dict .$lookup "00000000" .$fromMaybe "_New" .$replace ' ' '_' .$map toLower
@@ -17,7 +17,7 @@ main = do (my:szip:old) <- getArgs
           readFile my >>= writeFile out.unlines.map (makeLine dict oldLang).lines
 
 -- |—ообразить словарь из файла национализации 7-zip
-makeDict x = ("copyright", c): xs
+makeDict szip x = ("copyright", c): ("filename", szip): xs
   where l  = x .$ lines
         xs = l .$ map (split2 '=')
                .$ map (\(key,str) -> (trim key, drop 1 $dropEnd 1 $trim str))
@@ -37,12 +37,13 @@ makeLine dict oldLang x =
     (x,xs) | (n,eng) <- split2 ' ' x,
              length n==4, all isDigit n
        -> x++"="++(n `lookup` oldLang `defaultVal`
-                   makeSubst dict n .$replaceAll "{0}" "%1" .$replaceAll "{1}" "%2")
+                   makeSubst dict n .$replaceAll "'{0}'" "\"%1\"" .$replaceAll "'{1}'" "\"%2\"" .$replaceAll "{0}" "%1" .$replaceAll "{1}" "%2")
     _  -> x
 
 makeSubst dict n = case n of
   "0000" -> d "00000000"++" ("++d "00000001"++")"
   "0159" -> "Automatic translation from 7-Zip language file.\\nPlease edit it to finish translation.\\nOriginal copyrights:\\n"++d "copyright"
+  "0462" -> d "filename" .$ reverse .$ dropWhile (/='.') .$ drop 1 .$ takeWhile (`notElem` "\\/") .$ reverse  -- filename of 7-zip langfile w/o extension
   "0022" ->(d "02000301".$replaceAll "{0}" "{1}")++", "++d "02000982"
   "0023" ->(d "02000302".$replaceAll "{0}" "{1}")++", "++d "02000982"
   "0020" -> d "03020215".$replaceAll "{0}" "{1}"
@@ -59,13 +60,13 @@ makeSubst dict n = case n of
 
 -- |“рансл€ци€ номеров сообщений из FreeArc в 7-zip
 trans = map (split2 ' ')
-        ["0050 03000102"
+        ["0050 03000102"      -- Main menu
         ,"0066 03000103"
         ,"0259 03000105"
         ,"0260 02000D07"
         ,"0261 03000106"
 
-        ,"0262 02000103"
+        ,"0262 02000103"      -- File menu/toolbar
         ,"0263 03000330"
         ,"0008 03000333"
         ,"0009 03000334"
@@ -75,7 +76,7 @@ trans = map (split2 ' ')
         ,"0039 03000440"
         ,"0036 03000260"
 
-        ,"0030 03020400"
+        ,"0030 03020400"      -- Commands menu/toolbar
         ,"0040 02000108"
         ,"0033 03000233"
         ,"0034 03020402"
@@ -85,19 +86,31 @@ trans = map (split2 ' ')
         ,"0045 02000106"
         ,"0064 03010400"
 
-        ,"0268 03020290"
+        ,"0268 03020290"      -- Tools menu/toolbar
         ,"0272 02000D10"
 
 
-        ,"0015 02000204"
+        ,"0015 02000204"      -- Column names
         ,"0016 02000207"
         ,"0017 0200020C"
         ,"0018 02000140"
 
-        ,"0134 02000108"
+        ,"0134 02000108"      -- Add dialog
         ,"0135 02000108"
         ,"0136 02000108"
+        ,"0194 02000D02"
+        ,"0195 02000DA1"
+        ,"0196 02000DA2"
+        ,"0197 02000DA3"
+        ,"0198 02000DA4"
+        ,"0183 03080002"
+        ,"0184 02000D10"
+        ,"0186 03020291"
+        ,"0227 02000D08"
+        ,"0221 02000830"
+        ,"0199 03020290"
 
+        ,"0106 03080002"      -- Compression settings
         ,"0107 02000D0B"
         ,"0129 02000D04"
         ,"0108 02000D83"
@@ -108,21 +121,22 @@ trans = map (split2 ' ')
         ,"0138 02000322"
         ,"0139 02000320"
 
-        ,"0119 02000D10"
+        ,"0119 02000D10"      -- Encryption settings
         ,"0120 02000D0A"
         ,"0121 02000D11"
         ,"0131 02000D01"
 
-        ,"0160 03020213"
+        ,"0160 03020213"      -- Delete dialog
         ,"0161 03020213"
 
-        ,"0005 02000820"
+        ,"0005 02000820"      -- Extract dialog
         ,"0001 02000821"
         ,"0002 02000822"
         ,"0051 02000823"
         ,"0004 02000801"
         ,"0021 02000881"
 
+        ,"0173 02000321"      -- Archive information dialog
         ,"0088 02000320"
         ,"0089 02000C03"
         ,"0090 02000323"
@@ -134,55 +148,47 @@ trans = map (split2 ' ')
         ,"0097 02000D11"
         ,"0098 03020291"
 
-        ,"0067 03010400"
+        ,"0067 03010400"      -- Settings dialog
         ,"0068 01000401"
         ,"0069 03000221"
         ,"0292 03000220"
 
-        ,"0079 02000705"
+        ,"0079 02000705"      -- Many dialogs
         ,"0080 02000709"
         ,"0081 02000711"
         ,"0362 02000702"
         ,"0364 02000713"
 
-        ,"0052 02000C10"
-        ,"0053 02000C12"
-        ,"0054 02000C13"
-
-        ,"0056 02000320"
+        ,"0056 02000320"      -- Progress indicator
         ,"0058 02000C05"
         ,"0059 02000C03"
         ,"0252 02000323"
         ,"0060 02000C06"
         ,"0061 02000C04"
         ,"0062 02000C01"
+        ,"0052 02000C10"
+        ,"0053 02000C12"
+        ,"0054 02000C13"
+        ,"0470 02000713"
 
-        ,"0078 02000900"
+        ,"0078 02000900"      -- File overwrite dialog
         ,"0162 02000901"
         ,"0163 02000902"
         ,"0164 02000903"
         ,"0082 02000707"
         ,"0083 0200070B"
 
-        ,"0076 02000B00"
+        ,"0076 02000B00"      -- Enter password dialog
         ,"0077 02000B00"
         ,"0074 02000B01"
         ,"0075 02000B03"
 
-        ,"0173 02000321"
-        ,"0184 02000D10"
-        ,"0183 03080002"
-        ,"0106 03080002"
-        ,"0186 03020291"
-        ,"0227 02000D08"
-        ,"0199 03020290"
-        ,"0221 02000830"
-
-        ,"0194 02000D02"
-        ,"0195 02000DA1"
-        ,"0196 02000DA2"
-        ,"0197 02000DA3"
-        ,"0198 02000DA4"
+        ,"0472 02000A91"      -- Error messages
+        ,"0473 02000A92"
+        ,"0474 02000A94"
+        ,"0475 02000A93"
+        ,"0476 02000A95"
+        ,"0477 0200060C"
         ]
 
 

@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -cpp #-}
 ----------------------------------------------------------------------------------------------------
 ---- Процесс распаковки входных архивов.                                                        ----
 ---- Вызывается из ArcExtract.hs и ArcCreate.hs (при обновлении и слиянии архивов).             ----
@@ -5,7 +6,7 @@
 module ArcvProcessExtract where
 
 import Prelude hiding (catch)
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Int
 import Data.IORef
@@ -15,6 +16,9 @@ import Foreign.Ptr
 import Foreign.Marshal.Utils
 import Foreign.Storable
 
+#ifdef FREEARC_CELS
+import TABI
+#endif
 import Utils
 import Errors
 import Process
@@ -25,7 +29,8 @@ import Encryption
 import Options
 import UI
 import ArhiveStructure
-import ArhiveDirectory
+import Arhive7zLib
+
 
 {-# NOINLINE decompress_file #-}
 -- |Распаковка файла из архива с использованием переданного процесса декомпрессора
@@ -34,8 +39,9 @@ decompress_file decompress_pipe compressed_file writer = do
   -- Не пытаться распаковать каталоги/пустые файлы и файлы без данных, поскольку ожидать получение 0 байтов - воистину дзенское занятие ;)
   when (fiSize(cfFileInfo compressed_file) > 0  &&  not (isCompressedFake compressed_file)) $ do
     sendP decompress_pipe (Just compressed_file)
-    repeat_while (receiveP decompress_pipe) ((>=0).snd) (uncurry writer)
+    repeat_while (receiveP decompress_pipe) ((>=0).snd) (uncurry writer .>> send_backP decompress_pipe ())   -- запишем данные и сообщим распаковщику, что теперь буфер свободен
     failOnTerminated
+  return (cfCRC compressed_file)
 
 {-# NOINLINE decompress_PROCESS #-}
 -- |Процесс, распаковывающий файлы из архивов
@@ -58,19 +64,19 @@ decompress_PROCESS command count_cbytes pipe = do
 {-# NOINLINE decompress_block #-}
 -- |Распаковать один солид-блок
 decompress_block command cfile state count_cbytes pipe = mdo
-  cfile' <- val cfile
+  ;   cfile'     <-  val cfile
   let size        =  fiSize      (cfFileInfo cfile')
       pos         =  cfPos        cfile'
       block       =  cfArcBlock   cfile'
-      compressor  =  blCompressor block .$ limitDecompressionMemoryUsage (opt_limit_decompression_memory command)
-      startPos  | compressor==aNO_COMPRESSION  =  pos  -- для -m0 начинаем чтение напрямую с нужной позиции в блоке
+  ;   compressor <-  block.$ blCompressor.$ limit_decompression command  -- вставим вызовы tempfile если нужно
+  let startPos  | compressor==aNO_COMPRESSION  =  pos  -- для -m0 начинаем чтение напрямую с нужной позиции в блоке
                 | otherwise                    =  0
   state =: (startPos, pos, size)
   archiveBlockSeek block startPos
   bytesLeft <- ref (blCompSize block - startPos)
 
   let reader buf size  =  do aBytesLeft <- val bytesLeft
-                             let bytes   = minI size aBytesLeft
+                             let bytes   = minI (size::Int) aBytesLeft
                              len        <- archiveBlockReadBuf block buf bytes
                              bytesLeft  -= i len
                              count_cbytes  len
@@ -79,14 +85,16 @@ decompress_block command cfile state count_cbytes pipe = mdo
   let writer (DataBuf buf len)  =  decompress_step cfile state pipe buf len
       writer  NoMoreData        =  return 0
 
+  let limit_memory num method   =  return method    -- ограничение памяти для метода используется только при сжатии
+
   -- Добавить ключ в запись алгоритма дешифрования
   keyed_compressor <- generateDecryption compressor (opt_decryption_info command)
   when (any isNothing keyed_compressor) $ do
     registerError$ BAD_PASSWORD (cmd_arcname command) (cfile'.$cfFileInfo.$storedName)
 
   -- Превратим список методов сжатия/шифрования в конвейер процессов распаковки
-  let decompress1 = de_compress_PROCESS1 freearcDecompress reader times  -- первый процесс в конвейере
-      decompressN = de_compress_PROCESS  freearcDecompress times         -- последующие процессы в конвейере
+  let decompress1 = de_compress_PROCESS1 freearcDecompress reader times command limit_memory  -- первый процесс в конвейере
+      decompressN = de_compress_PROCESS  freearcDecompress        times command limit_memory  -- последующие процессы в конвейере
       decompressa [p]     = decompress1 p         0
       decompressa [p1,p2] = decompress1 p2        0 |> decompressN p1 0
       decompressa (p1:ps) = decompress1 (last ps) 0 |> foldl1 (|>) (map (\x->decompressN x 0) (reverse$ init ps)) |> decompressN p1 0
@@ -102,10 +110,11 @@ decompress_block command cfile state count_cbytes pipe = mdo
 -- |Вспомогательный процесс перекладывания данных из буферов входного потока
 -- во входные буфера процедуры упаковки/распаковки
 --   comprMethod - строка метода сжатия с параметрами, типа "ppmd:o10:m48m"
---   num - номер процесса в цепочке процессов упаковки
-de_compress_PROCESS de_compress times comprMethod num pipe = do
+--   num - номер процесса в цепочке процессов упаковки (0 для процессов распаковки)
+de_compress_PROCESS de_compress times command limit_memory comprMethod num pipe = do
   -- Информация об остатке данных, полученных из предыдущего процесса, но ещё не отправленных на упаковку/распаковку
   remains <- ref$ Just (error "undefined remains:buf0", error "undefined remains:srcbuf", 0)
+  let no_progress  =  not$ comprMethod.$compressionIs "has_progress?"
   let
     -- Процедура "чтения" входных данных. Важно, чтобы первый вызов с dstlen=0 не возвращал управление пока не поступит хотя бы один байт данных от предыдущего процесса
     read_data prevlen  -- сколько данных уже прочитано
@@ -123,7 +132,7 @@ de_compress_PROCESS de_compress times comprMethod num pipe = do
         copyData buf0 srcbuf srclen = do
           let len = srclen `min` dstlen    -- определить - сколько данных мы можем прочитать
           copyBytes dstbuf srcbuf len
-          uiReadData num (i len)           -- обновить индикатор прогресса
+          no_progress &&& uiReadData num (i len)           -- обновить индикатор прогресса
           remains =: Just (buf0, srcbuf+:len, srclen-len)
           case () of
            _ | len==srclen -> do send_backP pipe (srcbuf-:buf0+srclen)               -- возвратить размер буфера, поскольку все данные из него уже переданы упаковщику/распаковщику
@@ -141,26 +150,79 @@ de_compress_PROCESS de_compress times comprMethod num pipe = do
   -- Процедура чтения входных данных процесса упаковки/распаковки (вызывается лишь однажды, в отличие от рекурсивной read_data)
   let reader  =  read_data 0
 
-  de_compress_PROCESS1 de_compress reader times comprMethod num pipe
+  de_compress_PROCESS1 de_compress reader times command limit_memory comprMethod num pipe
 
 
 {-# NOINLINE de_compress_PROCESS1 #-}
 -- |de_compress_PROCESS с параметризуемой функцией чтения (может читать данные напрямую
 -- из архива для первого процесса в цепочке распаковки)
-de_compress_PROCESS1 de_compress reader times comprMethod num pipe = do
+de_compress_PROCESS1 de_compress reader times command limit_memory comprMethod num pipe = do
   total' <- ref ( 0 :: FileSize)
   time'  <- ref (-1 :: Double)
+  let no_progress  =  not$ comprMethod.$compressionIs "has_progress?"
+  let -- Напечатать карту памяти
+      showMemoryMap = do printLine$ "\nBefore "++show num++": "++comprMethod++"\n"
+                         testMalloc
+#ifdef FREEARC_CELS
+  let callback p = do
+        TABI.dump p
+        service <- TABI.required p "request"
+        case service of
+          -- Процедура чтения входных данных процесса упаковки/распаковки
+          "read" -> do buf  <- TABI.required p "buf"
+                       size <- TABI.required p "size"
+                       reader buf size
+          -- Процедура записи выходных данных
+          "write" -> do buf  <- TABI.required p "buf"
+                        size <- TABI.required p "size"
+                        total' += i size
+                        no_progress &&& uiWriteData num (i size)
+                        resend_data pipe (DataBuf buf size)
+          -- "Квазизапись" просто сигнализирует сколько данных будет записано в результате сжатия
+          "quasiwrite" -> do bytes <- TABI.required p "bytes"
+                             uiQuasiWriteData num bytes
+                             return aFREEARC_OK
+          -- Информируем пользователя о ходе распаковки
+          "progress" -> do insize  <- peekElemOff (castPtr ptr::Ptr Int64) 0 >>==i
+                           outsize <- peekElemOff (castPtr ptr::Ptr Int64) 1 >>==i
+                           uiReadData  num insize
+                           uiWriteData num outsize
+                           return aFREEARC_OK
+          -- Информация о чистом времени выполнения упаковки/распаковки
+          "time" -> do time <- TABI.required p "time"
+                       time' =: time
+                       return aFREEARC_OK
+          -- Прочие (неподдерживаемые) callbacks
+          _ -> return aFREEARC_ERRCODE_NOT_IMPLEMENTED
+
+  let -- Поскольку Haskell'овский код, вызываемый из Си, не может получать исключений, добавим к процедурам чтения/записи явные проверки
+      checked_callback p = do
+        operationTerminated' <- val operationTerminated
+        if operationTerminated'
+          then return CompressionLib.aFREEARC_ERRCODE_OPERATION_TERMINATED   -- foreverM doNothing0
+          else callback p
+      -- Non-debugging wrapper
+      debug f = f
+      debug_checked_callback what buf size = TABI.call (\a->fromIntegral `fmap` checked_callback a) [Pair "request" what, Pair "buf" buf, Pair "size" size]
+#else
   let -- Процедура чтения входных данных процесса упаковки/распаковки
-      callback "read" buf size = reader buf size
+      callback "read" buf size = do res <- reader buf size
+                                    return res
       -- Процедура записи выходных данных
       callback "write" buf size = do total' += i size
-                                     uiWriteData num (i size)
+                                     no_progress &&& uiWriteData num (i size)
                                      resend_data pipe (DataBuf buf size)
       -- "Квазизапись" просто сигнализирует сколько данных будет записано в результате сжатия
       -- уже прочитанных данных. Значение передаётся через int64* ptr
-      callback "quasiwrite" ptr size = do bytes <- peek (castPtr ptr::Ptr Int64) >>==i
-                                          uiQuasiWriteData num bytes
-                                          return aFREEARC_OK
+      callback "quasiwrite" ptr _ = do bytes <- peek (castPtr ptr::Ptr Int64) >>==i
+                                       uiQuasiWriteData num bytes
+                                       return aFREEARC_OK
+      -- Информируем пользователя о ходе распаковки
+      callback "progress" ptr _ = do insize  <- peekElemOff (castPtr ptr::Ptr Int64) 0 >>==i
+                                     outsize <- peekElemOff (castPtr ptr::Ptr Int64) 1 >>==i
+                                     uiReadData  num insize
+                                     uiWriteData num outsize
+                                     return aFREEARC_OK
       -- Информация о чистом времени выполнения упаковки/распаковки
       callback "time" ptr 0 = do t <- peek (castPtr ptr::Ptr CDouble) >>==realToFrac
                                  time' =: t
@@ -168,6 +230,12 @@ de_compress_PROCESS1 de_compress reader times comprMethod num pipe = do
       -- Прочие (неподдерживаемые) callbacks
       callback _ _ _ = return aFREEARC_ERRCODE_NOT_IMPLEMENTED
 
+  let -- Поскольку Haskell'овский код, вызываемый из Си, не может получать исключений, добавим к процедурам чтения/записи явные проверки
+      checked_callback what buf size = do
+        operationTerminated' <- val operationTerminated
+        if operationTerminated'
+          then return CompressionLib.aFREEARC_ERRCODE_OPERATION_TERMINATED   -- foreverM doNothing0
+          else callback what buf size
 {-
       -- Debugging wrapper
       debug f what buf size = inside (print (comprMethod,what,size))
@@ -176,18 +244,24 @@ de_compress_PROCESS1 de_compress reader times comprMethod num pipe = do
 -}
       -- Non-debugging wrapper
       debug f what buf size = f what buf size
+      debug_checked_callback = debug checked_callback
+#endif
 
   -- СОБСТВЕННО УПАКОВКА ИЛИ РАСПАКОВКА
-  result <- de_compress num comprMethod (debug callback)
-  debug callback "finished" nullPtr result
+  res <- debug_checked_callback "read" nullPtr (0::Int)  -- этот вызов позволяет отложить запуск следующего в цепочке алгоритма упаковки/распаковки до момента, когда предыдущий возвратит хоть какие-нибудь данные (а если это поблочный алгоритм - до момента, когда он обработает весь блок)
+  opt_testMalloc command  &&&  showMemoryMap      -- напечатаем карту памяти непосредственно перед началом сжатия
+  real_method <- limit_memory num comprMethod     -- обрежем метод сжатия при нехватке памяти
+  result <- if res<0  then return res
+                      else wrapCompressionThreadPriority$ de_compress num real_method debug_checked_callback
+  debug_checked_callback "finished" nullPtr result
   -- Статистика
   total <- val total'
   time  <- val time'
-  uiDeCompressionTime times (comprMethod,time,total)
+  uiDeCompressionTime times (real_method,time,total)
   -- Выйдем с сообщением, если произошла ошибка
   unlessM (val operationTerminated) $ do
     when (result `notElem` [aFREEARC_OK, aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED]) $ do
-      registerThreadError$ COMPRESSION_ERROR [compressionErrorMessage result, comprMethod]
+      registerThreadError$ COMPRESSION_ERROR [compressionErrorMessage result, real_method]
       operationTerminated =: True
   -- Сообщим предыдущему процессу, что данные больше не нужны, а следующему - что данных больше нет
   send_backP  pipe aFREEARC_ERRCODE_NO_MORE_DATA_REQUIRED
@@ -260,4 +334,18 @@ data CompressionData = DataBuf (Ptr CChar) Int
 -- |Процедура передачи выходных данных упаковщика/распаковщика следующей процедуре в цепочке
 resend_data pipe x@DataBuf{}   =  sendP pipe x  >>  receive_backP pipe  -- возвратить количество потреблённых байт, возвращаемое из процесса-потребителя
 resend_data pipe x@NoMoreData  =  sendP pipe x  >>  return 0
+
+
+----------------------------------------------------------------------------------------------------
+----- External functions ---------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------
+
+-- |Lower thread priority for the time it performs compression algorithm
+wrapCompressionThreadPriority  =  bracket beginCompressionThreadPriority endCompressionThreadPriority . const
+
+foreign import ccall unsafe "BeginCompressionThreadPriority"
+  beginCompressionThreadPriority :: IO Int
+
+foreign import ccall unsafe "EndCompressionThreadPriority"
+  endCompressionThreadPriority :: Int -> IO ()
 

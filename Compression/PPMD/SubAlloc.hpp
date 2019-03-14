@@ -9,7 +9,7 @@ enum { UNIT_SIZE=12, N1=4, N2=4, N3=4, N4=(128+3-1*N1-2*N2-3*N3)/4,
         N_INDEXES=N1+N2+N3+N4 };
 
 #pragma pack(1)
-struct BLK_NODE {
+static _THREAD1 struct BLK_NODE {
     DWORD Stamp;
     BLK_NODE* next;
     BOOL   avail()      const { return (next != NULL); }
@@ -20,13 +20,13 @@ struct BLK_NODE {
         Stamp--;                            return p;
     }
     inline void insert(void* pv,int NU);
-} BList[N_INDEXES];
+} _THREAD BList[N_INDEXES];
 struct MEM_BLK: public BLK_NODE { DWORD NU; } _PACK_ATTR;
 #pragma pack()
 
 static BYTE Indx2Units[N_INDEXES], Units2Indx[128]; // constants
-static DWORD GlueCount, SubAllocatorSize=0;
-static BYTE* HeapStart, * pText, * UnitsStart, * LoUnit, * HiUnit;
+static _THREAD1 DWORD _THREAD GlueCount, _THREAD SubAllocatorSize=0;
+static _THREAD1 BYTE* _THREAD HeapStart, * _THREAD pText, * _THREAD UnitsStart, * _THREAD LoUnit, * _THREAD HiUnit;
 
 inline void PrefetchData(void* Addr)
 {
@@ -59,14 +59,14 @@ DWORD _STDCALL GetUsedMemory()
 }
 void _STDCALL StopSubAllocator() {
     if ( SubAllocatorSize ) {
-        SubAllocatorSize=0;                 delete[] HeapStart;
+        SubAllocatorSize=0;                 BigFree(HeapStart);
     }
 }
 BOOL _STDCALL StartSubAllocator(UINT t)
 {
     if (SubAllocatorSize == t)              return TRUE;
     StopSubAllocator();
-    HeapStart = (BYTE*) malloc(t);
+    HeapStart = (BYTE*) BigAlloc(t);
     if (HeapStart == NULL)                  return FALSE;
     SubAllocatorSize=t;                     return TRUE;
 }

@@ -2,9 +2,6 @@
 #include "Common.h"
 #include "Compression.h"
 
-// Used in 4x4 only: read entire input buffer before compression begins, allocate output buffer large enough to hold entire compressed output
-int compress_all_at_once = 0;
-
 // Для обработки ошибок во вложенных процедурах - longjmp сигнализирует процедуре верхнего уровня о произошедшей ошибке
 int jmpready = FALSE;
 jmp_buf jumper;
@@ -144,6 +141,18 @@ int split (char *str, char splitter, char **result_base, int result_size)
   return result-result_base;
 }
 
+// Объединить NULL-terminated массив строк src в строку result, ставя между строками разделитель splitter
+void join (char **src, char splitter, char *result, int result_size)
+{
+  char *dst = result;  *dst = '\0';
+  while (*src && result+result_size-dst-1 > 0)
+  {
+    if (dst > result)  *dst++ = splitter;
+    strncopy(dst, *src++, result+result_size-dst);
+    dst = strchr(dst,'\0');
+  }
+}
+
 // Заменяет в строке original все вхождения from на to,
 // возвращая вновь выделенную new строку и освобождая оригинал, если была хоть одна замена
 char *subst (char *original, char *from, char *to)
@@ -205,8 +214,8 @@ MemSize parseMem (char *param, int *error)
 {
   MemSize n=0;
   char c = *param=='='? *++param : *param;
-  if (c=='\0') *error=1;
-  while (c>='0' && c<='9')  n=n*10+c-'0', c=*++param;
+  if (! (c>='0' && c<='9'))  {*error=1; return 0;}
+  while (c>='0' && c<='9')   n=n*10+c-'0', c=*++param;
   switch (c)
   {
     case 'b':  return n;
@@ -276,7 +285,7 @@ char *utf16_to_utf8 (const WCHAR *utf16, char *_utf8)
 // Converts UTF-8 string to OEM
 char *utf8_to_oem (const char *utf8, char *oem)
 {
-  WCHAR *utf16 = (WCHAR*) malloc(MY_FILENAME_MAX*4);
+  WCHAR *utf16 = (WCHAR*) malloc_msg(MY_FILENAME_MAX*4);
   utf8_to_utf16 (utf8, utf16);
   CharToOemW (utf16, oem);
   free (utf16);
@@ -286,13 +295,275 @@ char *utf8_to_oem (const char *utf8, char *oem)
 // Converts OEM string to UTF-8
 char *oem_to_utf8 (const char  *oem, char *utf8)
 {
-  WCHAR *utf16 = (WCHAR*) malloc(MY_FILENAME_MAX*4);
+  WCHAR *utf16 = (WCHAR*) malloc_msg(MY_FILENAME_MAX*4);
   OemToCharW (oem, utf16);
   utf16_to_utf8 (utf16, utf8);
   free (utf16);
   return utf8;
 }
 #endif
+
+
+//*****************************************************************************
+// File/system operations *****************************************************
+//*****************************************************************************
+
+// Directory for temporary files
+static CFILENAME TempDir = 0;
+
+// Set temporary files directory
+void SetTempDir (const CFILENAME dir)
+{
+  if (dir && TempDir && _tcscmp(dir,TempDir)==0)
+    return;  // the same string
+  FreeAndNil(TempDir);
+  if (dir && *dir)
+  {
+    TempDir = (CFILENAME) malloc_msg ((_tcslen(dir)+1) * sizeof(*dir));
+    _tcscpy (TempDir, dir);
+  }
+}
+
+// Return last value set or OS-default temporary directory
+CFILENAME GetTempDir (void)
+{
+  if (!TempDir)
+  {
+#ifdef FREEARC_WIN
+    TempDir = (CFILENAME) malloc_msg();
+    GetTempPathW(MY_FILENAME_MAX, TempDir);
+    realloc (TempDir, (_tcslen(TempDir)+1) * sizeof(*TempDir));
+#else
+    TempDir = tempnam(NULL,NULL);
+    CFILENAME basename = drop_dirname(TempDir);
+    if (basename > TempDir)
+      basename[-1] = '\0';
+#endif
+  }
+  return TempDir;
+}
+
+
+#ifdef FREEARC_WIN
+#include <sys/utime.h>
+
+void SetFileDateTime (const CFILENAME Filename, time_t t)
+{
+  if (t<0)  t=INT_MAX;  // Иначе получаем вылет :(
+  struct tm* t2 = gmtime(&t);
+
+  SYSTEMTIME t3;
+  t3.wYear         = t2->tm_year+1900;
+  t3.wMonth        = t2->tm_mon+1;
+  t3.wDay          = t2->tm_mday;
+  t3.wHour         = t2->tm_hour;
+  t3.wMinute       = t2->tm_min;
+  t3.wSecond       = t2->tm_sec;
+  t3.wMilliseconds = 0;
+
+  FILETIME ft;
+  SystemTimeToFileTime(&t3, &ft);
+
+  HANDLE hndl = CreateFileW(Filename, FILE_WRITE_ATTRIBUTES,
+                            FILE_SHARE_READ|FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  SetFileTime(hndl,NULL,NULL,&ft);  //creation, last access, modification times
+  CloseHandle(hndl);
+  //SetFileAttributes (Filename, attrib);
+}
+
+// Execute program `filename` in the directory `curdir` optionally waiting until it finished
+void RunProgram (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+{
+  STARTUPINFO si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory (&si, sizeof(si));
+  si.cb = sizeof(si);
+  ZeroMemory (&pi, sizeof(pi));
+  BOOL process_created = CreateProcessW (filename, NULL, NULL, NULL, FALSE, 0, NULL, curdir, &si, &pi);
+
+  if (process_created)
+  {
+    if (wait_finish)
+      WaitForSingleObject (pi.hProcess, INFINITE);
+    CloseHandle (pi.hProcess);
+    CloseHandle (pi.hThread);
+  }
+}
+
+// Execute `command` in the directory `curdir` optionally waiting until it finished
+int RunCommand (const CFILENAME command, const CFILENAME curdir, int wait_finish)
+{
+  STARTUPINFO si;
+  PROCESS_INFORMATION pi;
+  ZeroMemory (&si, sizeof(si));
+  si.cb = sizeof(si);
+  ZeroMemory (&pi, sizeof(pi));
+  DWORD ExitCode = 0;  // код возврата вызываемой программы
+
+  BOOL process_created = CreateProcessW (NULL, command, NULL, NULL, FALSE, 0, NULL, curdir, &si, &pi);
+  if (process_created)
+  {
+    if (wait_finish)
+      WaitForSingleObject (pi.hProcess, INFINITE),
+      GetExitCodeProcess  (pi.hProcess, &ExitCode);
+    CloseHandle (pi.hProcess);
+    CloseHandle (pi.hThread);
+  }
+  return ExitCode;
+}
+
+// Execute file `filename` in the directory `curdir` optionally waiting until it finished
+void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+{
+  SHELLEXECUTEINFO sei;
+  ZeroMemory(&sei, sizeof(SHELLEXECUTEINFO));
+  sei.cbSize = sizeof(SHELLEXECUTEINFO);
+  sei.fMask = (wait_finish? SEE_MASK_NOCLOSEPROCESS : 0);
+  sei.hwnd = GetActiveWindow();
+  sei.lpFile = filename;
+  sei.lpDirectory = curdir;
+  sei.nShow = SW_SHOW;
+
+  CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  DWORD rc = ShellExecuteEx(&sei);
+  if (rc && wait_finish)
+    WaitForSingleObject(sei.hProcess, INFINITE),
+    CloseHandle (sei.hProcess);
+}
+
+// Установить приоритет треда какой полагается для тредов сжатия (распаковки, шифрования...)
+int BeginCompressionThreadPriority (void)
+{
+   DWORD dwThreadPriority = GetThreadPriority(GetCurrentThread());
+   SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+   return dwThreadPriority;
+}
+
+// Восстановить приоритет треда таким, как мы его запомнили
+void EndCompressionThreadPriority (int old_priority)
+{
+   SetThreadPriority(GetCurrentThread(), old_priority);
+}
+
+
+#else // For Unix:
+
+#include <sys/resource.h>
+
+void SetFileDateTime(const CFILENAME Filename, time_t t)
+{
+  if (t<0)  t=INT_MAX;  // Иначе получаем вылет :(
+#undef stat
+  struct stat st;
+    stat (Filename, &st);
+  struct utimbuf times;
+    times.actime  = st.st_atime;
+    times.modtime = t;
+  utime (Filename, &times);
+}
+
+// Execute `command` in the directory `curdir` optionally waiting until it finished
+int RunCommand (CFILENAME command, CFILENAME curdir, int wait_finish)
+{
+  char *olddir = (char*) malloc_msg (),
+       *cmd    = (char*) malloc_msg (strlen(command)+10);
+  getcwd(olddir, MY_FILENAME_MAX);
+
+  chdir(curdir);
+  const char *prefix = (memcmp(command,"/"  ,1) == 0)?    "" :
+                       (memcmp(command,"\"/",2) == 0)?    "" :
+                       (memcmp(command,"\"" ,1) == 0)?    (command++, "\"./") :
+                                                          "./";
+  sprintf(cmd, "%s%s%s", prefix, command, wait_finish? "" : " &");
+  int ExitCode = system(cmd);
+
+  chdir(olddir);
+  free(cmd);
+  free(olddir);
+  return ExitCode;
+}
+
+// Execute file `filename` in the directory `curdir` optionally waiting until it finished
+void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+{
+  RunCommand (filename, curdir, wait_finish);
+}
+
+// Установить приоритет треда какой полагается для тредов сжатия (распаковки, шифрования...)
+int BeginCompressionThreadPriority (void)
+{
+  int old = getpriority(PRIO_PROCESS, 0);
+  //setpriority(PRIO_PROCESS, 0, old+1);        закомментировано из-за проблем с восстановлением старого приоритета :(
+  return old;
+}
+
+// Восстановить приоритет треда таким, как мы его запомнили
+void EndCompressionThreadPriority (int old_priority)
+{
+  //setpriority(PRIO_PROCESS, 0, old_priority);
+}
+
+#endif // Windows/Unix
+
+
+// Создать каталоги на пути к name
+void BuildPathTo (CFILENAME name)
+{
+  CFILENAME path_ptr = NULL;
+  for (CFILENAME p = _tcschr(name,0); --p >= name;)
+    if (_tcschr (_T(DIRECTORY_DELIMITERS), *p))
+      {path_ptr=p; break;}
+  if (path_ptr==NULL)  return;
+
+  TCHAR oldc = *path_ptr;
+  *path_ptr = 0;
+
+  if (! file_exists (name))
+  {
+    BuildPathTo (name);
+    create_dir  (name);
+  }
+  *path_ptr = oldc;
+}
+
+
+// ****************************************************************************************************************************
+// ПОДДЕРЖКА СПИСКА ВРЕМЕННЫХ ФАЙЛОВ И УДАЛЕНИЕ ИХ ПРИ АВАРИЙНОМ ВЫХОДЕ ИЗ ПРОГРАММЫ ******************************************
+// ****************************************************************************************************************************
+
+// Table of temporary files that should be deleted on ^Break
+static int TemporaryFilesCount=0;
+static MYFILE *TemporaryFiles[100];
+
+void registerTemporaryFile (MYFILE &file)
+{
+  unregisterTemporaryFile (file);  // First, delete all existing registrations of the same file
+  TemporaryFiles[TemporaryFilesCount] = &file;
+  if (TemporaryFilesCount < elements(TemporaryFiles))
+    TemporaryFilesCount++;
+}
+
+void unregisterTemporaryFile (MYFILE &file)
+{
+  iterate_var(i,TemporaryFilesCount)
+    if (TemporaryFiles[i] == &file)
+    {
+      memmove (TemporaryFiles+i, TemporaryFiles+i+1, (TemporaryFilesCount-(i+1)) * sizeof(TemporaryFiles[i]));
+      TemporaryFilesCount--;
+      return;
+    }
+}
+
+void removeTemporaryFiles (void)
+{
+  // Enum files in reverse order in order to delete dirs after files they contain
+  for(int i=TemporaryFilesCount-1; i>=0; i--)
+    TemporaryFiles[i]->tryClose(),
+    TemporaryFiles[i]->remove();
+}
+
+
 
 #ifndef FREEARC_NO_TIMING
 
@@ -329,7 +600,8 @@ void EnvResetConsoleTitle (void)
 
 void EnvSetConsoleTitle (char *title)
 {
-  fprintf (stderr, "\033]0;%s\a", title);
+  //Commented out since 1) we can't restore title on exit and 2) it looks unusual on Linux
+  //  fprintf (stderr, "\033]0;%s\a", title);
 }
 
 void EnvResetConsoleTitle (void)    {};
@@ -357,30 +629,37 @@ double GetGlobalTime (void)
 // Returns number of seconds spent in this thread
 double GetThreadCPUTime (void)
 {
-    FILETIME kt, ut, x, y;
-    int ok = GetThreadTimes(GetCurrentThread(),&x,&y,&kt,&ut);
-    return !ok? -1 : ((double) (((long long)(ut.dwHighDateTime) << 32) + ut.dwLowDateTime)) / 10000000;
+  FILETIME kt, ut, x, y;
+  int ok = GetThreadTimes(GetCurrentThread(),&x,&y,&kt,&ut);
+  return !ok? -1 : ((double) (((long long)(ut.dwHighDateTime) << 32) + ut.dwLowDateTime)) / 10000000;
 }
 #endif // FREEARC_WIN
+
 
 #ifdef FREEARC_UNIX
 // Returns number of wall-clock seconds since some moment
 double GetGlobalTime (void)
 {
-    struct timespec ts;
-    int res = clock_gettime(CLOCK_REALTIME, &ts);
-    return res? -1 : (ts.tv_sec + ((double)ts.tv_nsec) / 1000000000);
+  struct timespec ts;
+  int res = clock_gettime(CLOCK_REALTIME, &ts);
+  return res? -1 : (ts.tv_sec + ((double)ts.tv_nsec) / 1000000000);
 }
 
 // Returns number of seconds spent in this thread
 double GetThreadCPUTime (void)
 {
-    // clock_gettime() gives us per-thread CPU time.  It isn't
-    // reliable on Linux, but it's the best we have.
-    struct timespec ts;
-    int res = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-    return res? -1 : (ts.tv_sec + ((double)ts.tv_nsec) / 1000000000);
+  // clock_gettime() gives us per-thread CPU time.  It isn't
+  // reliable on Linux, but it's the best we have.
+  struct timespec ts;
+  int res = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  return res? -1 : (ts.tv_sec + ((double)ts.tv_nsec) / 1000000000);
 }
 #endif // FREEARC_UNIX
 
+// Time-based random number
+unsigned time_based_random(void)
+{
+  double t = GetGlobalTime();
+  return (unsigned)t + (unsigned)(t*1000000000);
+}
 #endif // !FREEARC_NO_TIMING

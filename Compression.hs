@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -cpp #-}
 ----------------------------------------------------------------------------------------------------
 ---- Упаковка, распаковка и вычисление CRC.                                                     ----
 ---- Типы данных CompressionMethod, Compressor, UserCompressor - описание метода сжатия.        ----
@@ -20,6 +21,9 @@ import Foreign.Marshal.Pool
 import Foreign.Ptr
 import System.IO.Unsafe
 
+#ifdef FREEARC_CELS
+import qualified TABI
+#endif
 import qualified CompressionLib
 import Utils
 import Errors
@@ -36,7 +40,7 @@ aFAKE_COMPRESSION     = "fake"
 aCRC_ONLY_COMPRESSION = "crc"
 
 -- |Фейковые (нераспаковываемые) методы сжатия.
-isFakeMethod             =  any_function [==aFAKE_COMPRESSION, ==aCRC_ONLY_COMPRESSION] . method_name
+isFakeMethod             =  (==aFAKE_COMPRESSION) . method_name
 -- |LZP метод сжатия.
 isLZP_Method     method  =  method_name method == "lzp"
 -- |Tornado метод сжатия.
@@ -51,10 +55,12 @@ isMM_Method      method  =  method_name method == "mm"
 isJPG_Method     method  =  method_name method == "jpg"
 -- |GRZip метод сжатия.
 isGRZIP_Method   method  =  method_name method == "grzip"
+-- |Метод, которому нужно подавать файлы по одному на солид-блок (bmf, tta и так далее)
+isNonSolidMethod         =  CompressionLib.compressionIs "nosolid?"
 -- |Очень быстрый метод упаковки (>10 mb/s на 1ГГц процессоре)
 isVeryFastMethod         =  CompressionLib.compressionIs "VeryFast?"
 -- |Быстрый метод распаковки
-isFastDecMethod          =  not . any_function [=="ppmd", =="ppmm", =="pmm", isEXTERNAL_Method] . method_name
+isFastDecMethod          =  not . any_function [(=="ppmd"), (=="ppmm"), (=="pmm"), isEXTERNAL_Method] . method_name
 -- |Метод сжатия, выполняемый внешней программой
 isEXTERNAL_Method        =  CompressionLib.compressionIs "external?"
 -- |Метод шифрования.
@@ -207,27 +213,20 @@ compressionLimitDictionary mem []     =  []
 compressionLimitMemoryUsage mem  =  genericLimitMemoryUsage getCompressionMem mem . map (limitCompressionMem mem)
 
 -- |Вставляет вызовы tempfile между алгоритмами сжатия, разбивая их на "кластера",
--- умещающиеся в memory_limit+5% (при этом "маленькие" алгоритмы не должны начинать новых кластеров).
--- При этом для dict/dict+lzp используется особый учёт памяти (blocksize*2 на оба, blocksize/2 на выходе),
--- а external compressors обнуляют потребление памяти
-genericLimitMemoryUsage getMem memory_limit = go (0::Double) ""
+-- умещающиеся в memory_limit+5% (при этом "маленькие" алгоритмы не должны начинать новых кластеров,
+-- а external compressors обнуляют потребление памяти).
+genericLimitMemoryUsage getMem memory_limit | memory_limit==CompressionLib.aUNLIMITED_MEMORY  =  id
+                                            | otherwise                                       =  go (0::Double) ""
   where go _   _    []      =  []
         go mem prev (x:xs) | isEXTERNAL_Method x          =  x: go 0            x xs
                            | mem+newMem < memlimit*1.05   =  x: go (mem+newMem) x xs
                            | otherwise                    =  "tempfile":x: go newMem x xs
 
-           where newMem | mem==0 && isDICT_Method x             =  realToFrac (getBlockSize x) / 2
-                        | isDICT_Method prev && isLZP_Method x  =  0
-                        | otherwise                             =  realToFrac$ getMem x
+           where newMem   = realToFrac (getMem x)
                  memlimit = realToFrac memory_limit
 
--- |Посчитать потребности в памяти цепочки алгоритмов сжатия с учётом их разбиения.
--- на кластеры по compressionIs "external?" и особым учётом dict/dict+lzp
-calcMem getMem  = maximum . map getMemSum . splitOn isEXTERNAL_Method
-  where getMemSum (x:y:xs) | isDICT_Method x && isLZP_Method y  =  max (i$ getMem x) (i(getBlockSize x `div` 2) + getMemSum xs)
-        getMemSum (x:xs)   | isDICT_Method x                    =  max (i$ getMem x) (i(getBlockSize x `div` 2) + getMemSum xs)
-        getMemSum (x:xs)                                        =  i(getMem x) + getMemSum xs
-        getMemSum []                                            =  0::Integer
+-- |Посчитать потребности в памяти цепочки алгоритмов сжатия с учётом их разбиения на кластеры по compressionIs "external?"
+calcMem getMem  = maximum . map (sum.map(i.getMem)) . splitOn isEXTERNAL_Method
 
 -- |Удаляет все упоминания о "tempfile" из записи алгоритма сжатия.
 compressionDeleteTempCompressors = filter (/="tempfile")
@@ -237,70 +236,23 @@ compressionDeleteTempCompressors = filter (/="tempfile")
 ----- (De)compression of data stream                                                           -----
 ----------------------------------------------------------------------------------------------------
 
-{-
-compress   method callback      - упаковать данные
-decompress method callback      - распаковать данные
-
-  method :: CompressionMethod - алгоритм упаковки
-  callback "read" buf size - прочитать входные данные в буфер `buf` длиной `size`
-                             Возвращает 0   - конец данных
-                                        <0  - прервать (рас)паковку (ошибка или больше данных не нужно)
-                                        >0  - кол-во прочитанных байт
-  callback "write" buf size - записать выходные данные
-                              Возвращает <0  - прервать (рас)паковку (ошибка или больше данных не нужно)
-                                         >=0 - всё ок
-                              При возвращении из этой функции данные должны быть "использованы", потому что
-                                (рас)паковщик может начать запись новых данных на то же место
-Входные и выходные буфера выделяются и освобождаются (рас)паковщиком
--}
-
 -- |Процедуры упаковки для различных алгоритмов сжатия.
-freearcCompress   num method | aSTORING ==  method =  copy_data
 freearcCompress   num method | isFakeMethod method =  eat_data
-freearcCompress   num method                       =  checkingCtrlBreak num (CompressionLib.compress method)
+freearcCompress   num method                       =  CompressionLib.compress method
 
 -- |Процедуры распаковки для различных алгоритмов сжатия.
-freearcDecompress num method | aSTORING ==  method =  copy_data
 freearcDecompress num method | isFakeMethod method =  impossible_to_decompress   -- эти типы сжатых данных не подлежат распаковке
-freearcDecompress num method                       =  checkingCtrlBreak num (CompressionLib.decompress method)
-
--- |Поскольку Haskell'овский код, вызываемый из Си, не может получать
--- исключений, добавим к процедурам чтения/записи явные проверки
-checkingCtrlBreak num action callback = do
-  let checked_callback what buf size auxdata = do
-        operationTerminated' <- val operationTerminated
-        if operationTerminated'
-          then return CompressionLib.aFREEARC_ERRCODE_OPERATION_TERMINATED   -- foreverM doNothing0
-          else callback what buf size
-  --
-  res <- checked_callback "read" nullPtr 0 undefined   -- этот вызов позволяет отложить запуск следующего в цепочке алгоритма упаковки/распаковки до момента, когда предыдущий возвратит хоть какие-нибудь данные (а если это поблочный алгоритм - до момента, когда он обработает весь блок)
-  if res<0  then return res
-            else action (checked_callback)
-
--- |Копирование данных без сжатия (-m0)
-copy_data callback = do
-  allocaBytes aHUGE_BUFFER_SIZE $ \buf -> do  -- используем `alloca`, чтобы автоматически освободить выделенный буфер при выходе
-    let go ptr = do
-          len <- callback "read" ptr ((buf+:aHUGE_BUFFER_SIZE)-:ptr)
-          if (len>0)
-            then do let newptr = ptr+:len
-                    if newptr < buf+:aHUGE_BUFFER_SIZE
-                       then go newptr
-                       else do result <- callback "write" buf (newptr-:buf)
-                               if (result>=0)
-                                 then go buf
-                                 else return (result)  -- Возвратим отрицательное число, если произошла ошибка/больше данных не нужно
-            else do if (len==0 && ptr>buf)
-                      then do result <-  callback "write" buf (ptr-:buf)
-                              return (if result>0 then 0 else result)
-                      else return len  -- Возвратим 0, если данные кончились, и отрицательное число, если произошла ошибка/больше данных не нужно
-    go buf -- возвратить результат
+freearcDecompress num method                       =  CompressionLib.decompress method
 
 -- |Читаем всё, не пишем ничего, а CRC считается в другом месте ;)
 eat_data callback = do
   allocaBytes aBUFFER_SIZE $ \buf -> do  -- используем `alloca`, чтобы автоматически освободить выделенный буфер при выходе
     let go = do
+#ifdef FREEARC_CELS
+          len <- TABI.call (\a->fromIntegral `fmap` callback a) [TABI.Pair "request" "read", TABI.Pair "buf" buf, TABI.Pair "size" (aBUFFER_SIZE::MemSize)]
+#else
           len <- callback "read" buf aBUFFER_SIZE
+#endif
           if (len>0)
             then go
             else return len   -- Возвратим 0, если данные кончились, и отрицательное число, если произошла ошибка/больше данных не нужно
@@ -308,10 +260,6 @@ eat_data callback = do
 
 impossible_to_decompress callback = do
   return CompressionLib.aFREEARC_ERRCODE_GENERAL   -- сразу возвратить ошибку, поскольку этот алгоритм (FAKE/CRC_ONLY) не подлежит распаковке
-
-{-# NOINLINE checkingCtrlBreak               #-}
-{-# NOINLINE copy_data                       #-}
-{-# NOINLINE eat_data                        #-}
 
 
 ----------------------------------------------------------------------------------------------------
@@ -342,16 +290,38 @@ foreign import ccall safe "Environment.h UpdateCRC"
 -- |Parse command-line option that represents compression method.
 -- Декодировать запись метода сжатия в виде текстовой строки, превратив его в список ассоциаций
 -- "тип файла -> метод сжатия". Первый элемент этого списка описывает метод сжатия по умолчанию
-decode_method configuredMethodSubsts str =
+decode_method cpus configuredMethodSubsts str =
     str                       -- "3/$obj=2b/$iso=ecm+3b"
+    .$ select_full_by cpus    -- переключение методов сжатия в зависимости от числа ядер/процессоров
     .$ subst list             -- "3b/3t/$obj=2b/$iso=ecm+3b"
     .$ split_to_methods       -- [("","exe+3b"), ("$obj","3b"), ("$text","3t"), ("$obj","2b"), ("$iso","ecm+3b")]
     .$ keepOnlyLastOn fst     -- [("","exe+3b"), ("$text","3t"), ("$obj","2b"), ("$iso","ecm+3b")]
-    .$ filter (not.null.snd)  -- "-m$bmp=" означает запретить использование специального алгоритма для группы $bmp
+    .$ mapSnds (select_full_by cpus)
     .$ mapSnds (subst2 list)  -- [("",["exe","lzma"]), ("$text",["ppmd"]), ("$obj",["lzma"]), ("$iso",["ecm","lzma"])]
+    .$ filter (not.null.snd)  -- "-m$bmp=" означает запретить использование специального алгоритма для группы $bmp
 
     where list = prepareSubsts (concatMap reorder [configuredMethodSubsts, builtinMethodSubsts])   -- сначала пользовательские замены, затем встроенные, чтобы дать первым приоритет
+                 .$ mapSnds (select_full_by cpus)
           reorder list = a++b  where (a,b) = partition (notElem '#') list                          -- внутри этих групп: сначала строчки, не содержащие #, затем с # (сначала конкретные, затем общие замены)
+
+-- |Аналогично select_by, но позволяет глобальную замену без внешних скобок
+select_full_by cpus s  =  select_by cpus ("("++s++")")
+
+-- |Выбрать из записи a|b|c метод сжатия, соответствующий количеству процессоров в системе
+select_by cpus   =  parse ""  where
+  -- Обработка множественных и вложенных скобок типа (a|b)(c|d(e|f))
+  parse acc rest = case rest of
+            '(':xs -> parse acc (parse "" xs)
+            ')':xs -> multi (reverse acc) ++ xs
+            ""     -> reverse acc
+            x:xs   -> parse (x:acc) xs
+  -- Выбор одной из альтернатив по количеству cpu: (A|B||D) означает метод A для cpu=1, B для cpu=2 или 3, D для cpu>=4
+  multi s  =  (repeater ""$ split '|' s) !! (cpus-1)
+  -- Повторяет элементы в списке для multi: (A|B||D) -> (A|B|B|D|D|D...)
+  repeater last ss  =  case ss of
+                ("":xs) -> last : repeater last xs
+                (x :xs) -> x    : repeater x    xs
+                []      -> repeat last
 
 -- Замена по списку для метода сжатия (обобщённого обозначения для файлов всех типов)
 subst list method  =  joinWith "/" (main_methods:group_methods++user_methods)
@@ -367,7 +337,8 @@ subst list method  =  joinWith "/" (main_methods:group_methods++user_methods)
                              .$ filter (("$"==).take 1)                  -- а из них - только начинающиеся с $
 
 -- Замена по списку для алгоритма сжатия (посл-ти компрессоров для конкретного типа файлов)
-subst2 list  =  concatMap f . split_compressor
+subst2 list ""     =  []
+subst2 list method =  concatMap f (split_compressor method)
     where f method = let (head,params)  =  break (==':') method
                      in case (lookup head list) of
                           Just new_head -> subst2 list (new_head++params)
@@ -406,26 +377,21 @@ builtinMethodSubsts = [
     , ""
     , ";Text files compression with slow decompression"
     , "1t  = 1b"
-    , "2t  = grzip:m4:8m:32:h15"
-    , "3t  = dict:p: 64m:85% + lzp: 64m: 24:h20        :92% + grzip:m3:8m:l"
-    , "4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:96m"
-    , "5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:12:192m"
-    , "6t  = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + ppmd:16:384m"
-    , "7t  = dict:p:128m:80% + lzp:320m:185:d1m:s32:h24:92% + ppmd:20:768m"
-    , "8t  = dict:p:128m:80% + lzp:640m:225:d1m:s32:h25:92% + ppmd:24:1536m"
-    , "9t  = dict:p:128m:80% + lzp:800m:235:d1m:s32:h26:92% + ppmd:25:2047m"
+    , "2t  = grzip:m4:8m:32:h15                                             | ex2t"
+    , "3t  = dict:p: 64m:85% + lzp: 64m: 24:h20        :92% + grzip:m3:8m:l | ex3t"
+    , "4t  = dict:p: 64m:80% + lzp: 64m: 65:d1m:s16:h20:90% + ppmd:8:96m    | ex4t"
+    , "5t  = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + ppmd:12:192m  | ex5t"
+    , "#t  = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + ppmd:16:384m"
     , ""
     , ";Binary files compression with slow and/or memory-expensive decompression"
     , "1b  = 1xb"
     , "#b  = #rep+#bx"
-    , "2rep  = rep:  96m"
-    , "3rep  = rep:  96m"
-    , "4rep  = rep:  96m"
+    , "#rep  = rep:  96m"
     , "5rep  = rep: 128m"
     , "6rep  = rep: 256m"
     , "7rep  = rep: 512m"
     , "8rep  = rep:1024m"
-    , "9rep  = rep:2047m"
+    , "9rep  = rep:2040m"
     , ""
     , ";Text files compression with fast decompression"
     , "1xt = 1xb"
@@ -435,20 +401,23 @@ builtinMethodSubsts = [
     , "#xt = dict: 128m:75% + #binary"
     , ""
     , ";Binary files compression with fast decompression"
-    , "1xb = tor:3"
-    , "2xb = tor:96m:h64m"
+    , "1xb = 1binary"
+    , "2xb = 2binary"
     , "#xb = delta + #binary"
     , ""
     , ";Binary files compression with fast decompression"
-    , "1binary = tor:3"
-    , "2binary = tor:  96m:h64m"
-    , "3binary = lzma: 96m:h64m:fast  :mc8"
-    , "4binary = lzma: 96m:h64m:normal:mc16"
+    , "1binary = tor:3                 | ex1binary"
+    , "2binary = tor:  96m:h64m        | ex2binary"
+    , "3binary = lzma: 96m:fast  :mc8  | ex3binary"
+    , "4binary = lzma: 96m:normal:mc16 | ex4binary"
     , "5binary = lzma: 16m:max"
     , "6binary = lzma: 32m:max"
     , "7binary = lzma: 64m:max"
     , "8binary = lzma:128m:max"
-    , "9binary = lzma:255m:max"
+    , "9binary = lzma:254m:max"
+    , ""
+    , ";One more family of methods providing fast but memory-hungry decompression: -m1d, -m2d..."
+    , "#d = #rep+exe+#xb / $obj=#b / $text=dict+#b / $compressed = #$compressed / $wav = #x$wav / $bmp = #x$bmp"
     , ""
     , ";Synonyms"
     , "bcj = exe"
@@ -456,13 +425,14 @@ builtinMethodSubsts = [
     , "#tx = #xt"
     , "x#  = #x"    -- принимаем опции типа "-mx7" для мимикрии под 7-zip
     , ""
+    , ""
     , ";Compression modes involving external PPMONSTR.EXE"
-    , "#p  = #rep+exe+#xb / $obj=#pb / $text=#pt"
+    , "#p  = #rep+exe+#xb / $obj=#pb / $text=#pt / $wav = #$wav / $bmp = #$bmp"
     , "5pt = dict:p: 64m:80% + lzp: 64m:32:h22:85% + pmm: 8:160m:r0"
     , "6pt = dict:p: 64m:80% + lzp: 64m:64:h22:85% + pmm:16:384m:r1"
     , "7pt = dict:p:128m:80% + lzp:128m:64:h23:85% + pmm:20:768m:r1"
     , "8pt = dict:p:128m:80% + lzp:128m:64:h23:85% + pmm:24:1536m:r1"
-    , "9pt = dict:p:128m:80% + lzp:128m:64:h23:85% + pmm:25:2047m:r1"
+    , "9pt = dict:p:128m:80% + lzp:128m:64:h23:85% + pmm:25:2040m:r1"
     , "#pt = #t"
     , "#pb = #b"
     , ""
@@ -472,39 +442,77 @@ builtinMethodSubsts = [
     , "6qb = rep: 256m      + delta                     + pmm:20:384m:r1"
     , "7qb = rep: 512m      + delta                     + pmm:22:768m:r1"
     , "8qb = rep:1024m      + delta                     + pmm:24:1536m:r1"
-    , "9qb = rep:2047m      + delta                     + pmm:25:2047m:r1"
+    , "9qb = rep:2040m      + delta                     + pmm:25:2040m:r1"
     , "#qt = #pt"
     , "#qb = #pb"
+    , ""
     , ""
     , ";Sound wave files are compressed best with TTA"
     , "wav     = tta      ;best compression"
     , "wavfast = tta:m1   ;faster compression and decompression"
-    , "1$wav  = wavfast"
+    , "1$wav  = wavfast | bmpfastest"
     , "2$wav  = wavfast"
     , "#$wav  = wav"
     , "#x$wav = wavfast"
-    , "#p$wav = wav"
     , ""
     , ";Bitmap graphic files are compressed best with GRZip"
-    , "bmp        = mm    + grzip:m1:l:a  ;best compression"
-    , "bmpfast    = mm    + grzip:m4:l:a  ;faster compression"
-    , "bmpfastest = mm:d1 + tor:3:t0      ;fastest one"
+    , "bmp        = mm    + grzip:m1:l2048:a  ;best compression"
+    , "bmpfast    = mm    + grzip:m4:l:a      ;faster compression"
+    , "bmpfastest = mm:d1 + 1binary:t0        ;fastest one"
     , "1$bmp  = bmpfastest"
-    , "2$bmp  = bmpfastest"
-    , "3$bmp  = bmpfast"
+    , "2$bmp  = bmpfastest | bmpfast"
+    , "3$bmp  = bmpfast    | bmp"
     , "#$bmp  = bmp"
     , "1x$bmp = bmpfastest"
     , "2x$bmp = bmpfastest"
     , "#x$bmp = mm+#binary"
-    , "#p$bmp = bmp"
     , ""
-    , ";Quick & dirty compression for data already compressed"
-    , "4$compressed   = rep:96m + tor:c3"
-    , "3$compressed   = rep:96m + tor:3"
-    , "2$compressed   = rep:96m + tor:3"
-    , "4x$compressed  = tor:8m:c3"
-    , "3x$compressed  = rep:8m  + tor:3"
-    , "2x$compressed  = rep:8m  + tor:3"
+    , ";Quick & dirty compression for already compressed data"
+    , "1$compressed   = storing"
+    , "2$compressed   = 2rep + 1binary"
+    , "3$compressed   = 3rep + 1binary"
+    , "4$compressed   = 4rep + etor:c3"
+    , "#$compressed   = "
+    , ""
+    , "1x$compressed  = storing"
+    , "2x$compressed  = rep:8m + 1binary"
+    , "3x$compressed  = rep:8m + 1binary"
+    , "4x$compressed  = etor:8m:c3"
+    , "#x$compressed  = "
+    , ""
+    , ""
+    , ";Multi-threading compression modes"
+    , "xtor  = 4x4:tor"
+    , "xlzma = 4x4:lzma"
+    , "xppmd = 4x4:b7mb:ppmd:c7mb"
+    , "etor  = (|x)tor"
+    , "elzma = (|x)lzma"
+    , "eppmd = (|x)ppmd"
+    , ""
+    , "ex1 = ex1b / $exe=exe+ex1b / $wav=mm:d1+ex1b:t0 / $bmp=mm:d1+ex1b:t0 / $compressed = #$compressed"
+    , "ex# = #rep+exe+ex#b / $obj=#rep+ex#b / $text=ex#t / $wav = #$wav / $bmp = #$bmp / $compressed = #$compressed"
+    , ""
+    , "ex1b = ex1binary"
+    , "ex2b = ex2binary"
+    , "ex#b = delta + ex#binary"
+    , ""
+    , "ex1binary = xtor:3:2m:h256k"
+    , "ex2binary = xtor:5:8m"
+    , "ex3binary = xlzma:fast:8mb:8:mc4:h1m"
+    , "ex4binary = xlzma:16mb:24:mc8:h4m"
+    , "ex5binary = 4x4:i0:lzma: 4mb:max"
+    , "ex6binary = 4x4:i0:lzma: 8mb:max"
+    , "ex7binary = 4x4:i0:lzma:16mb:max"
+    , "ex8binary = 4x4:i0:lzma:32mb:max"
+    , "ex9binary = 4x4:i0:lzma:64mb:max"
+    , ""
+    , "ex1t = ex1b"
+    , "ex2t = grzip:m4"
+    , "ex3t = grzip:m3"
+    , "ex4t = grzip:m1"        -- dict:p: 64m:80% + lzp:  8m: 45:d1m:s16:h15:92% + xppmd:6:48m
+    , "ex5t = dict:p: 64m:80% + lzp: 64m: 65:d1m:s32:h22:90% + xppmd:8:96m"
+    , "ex6t = dict:p: 64m:80% + lzp: 80m:105:d1m:s32:h22:92% + xppmd:12:192m"
+    , "ex#t = dict:p:128m:80% + lzp:160m:145:d1m:s32:h23:92% + xppmd:16:384m"
     ]
 
 -- |Мультимедийный тип файлов?

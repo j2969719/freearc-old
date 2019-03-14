@@ -6,8 +6,9 @@ module FileManDialogs where
 
 import Prelude hiding (catch)
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
+import Control.Monad.Fix
 import Data.Char
 import Data.IORef
 import Data.List
@@ -32,7 +33,7 @@ import Options
 import UIBase
 import UI
 import ArhiveStructure
-import ArhiveDirectory
+import Arhive7zLib
 import ArcExtract
 import FileManPanel
 import FileManUtils
@@ -41,7 +42,7 @@ import FileManUtils
 ---- Диалог распаковки файлов ----------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
-extractDialog fm' exec cmd arcnames arcdir files = do
+extractDialog fm' exec winoptions cmd arcnames arcdir files = do
   fm <- val fm'
   title <- i18n$ case (cmd, files, arcnames) of
                    ("t", [],     [])        -> "0157 Test all archives"
@@ -56,75 +57,84 @@ extractDialog fm' exec cmd arcnames arcdir files = do
                    (_,   files,  arcnames)  -> "0027 Extract files from %4 archives"
   let wintitle  =  formatn title [head files, show3$ length files, takeFileName$ head arcnames, show3$ length arcnames]
   -- Создадим диалог со стандартными кнопками OK/Cancel
-  fmDialog fm' wintitle $ \(dialog,okButton) -> do
+  fmDialog fm' wintitle winoptions $ \(dialog,okButton) -> do
     upbox <- dialogGetUpper dialog
-    overwrite <- radioFrame "0005 Overwrite mode"
-                            [ "0001 Ask before overwrite",
-                              "0002 Overwrite without prompt",
-                              "0003 Update old files",
-                              "0051 Skip existing files" ]
-    ; boxPackStart upbox (widget overwrite) PackNatural 5         `on` cmd/="t"
 
     ; outFrame <- frameNew
-    ; boxPackStart upbox outFrame           PackNatural 5         `on` cmd/="t"
+    ; boxPackStart upbox outFrame           PackNatural 5         `on_` cmd/="t"
     ;   vbox <- vBoxNew False 0
     ;   set outFrame [containerChild := vbox, containerBorderWidth := 5]
     (hbox, _, dir) <- fmFileBox fm' dialog
                                 "dir" FileChooserActionSelectFolder
                          (label "0004 Output directory:")
                                 "0021 Select output directory"
-                                []
+                                aANYFILE_FILTER
                                 (const$ return True)
                                 (fmCanonicalizeDiskPath fm')
-    ; boxPackStart vbox hbox                  PackNatural 0
+    ; boxPackStart vbox hbox                      PackNatural 0
     addDirButton <- checkBox "0014 Append archive name to the output directory"
-    ; boxPackStart vbox (widget addDirButton) PackNatural 0
+    ; boxPackStart vbox (widget addDirButton)     PackNatural 0
+    openOutDirButton <- checkBox "0468 Open output directory in Explorer"
+    ; boxPackStart vbox (widget openOutDirButton) PackNatural 0
+
+    overwrite <- radioFrame "0005 Overwrite mode"
+                            [ "0001 Ask before overwrite",
+                              "0002 Overwrite without prompt",
+                              "0003 Update old files",
+                              "0051 Skip existing files" ]
+    ; boxPackStart upbox (widget overwrite) PackNatural 5         `on_` cmd/="t"
 
     (decryption, decryptionOnOK) <- decryptionBox fm' dialog   -- Настройки расшифровки
     ; boxPackStart upbox decryption           PackNatural 5
 
+    keepBrokenButton <- fmCheckButtonWithHistory fm' "KeepBroken" False "0425 Keep broken extracted files"
+    ; boxPackStart upbox (widget keepBrokenButton) PackNatural 0  `on_` cmd/="t"
+
+    shutdown <- checkBox shutdown_msg
+    ; boxPackStart upbox (widget shutdown)    PackNatural 0
+
     (hbox, options, optionsStr)  <- fmCheckedEntryWithHistory fm' "xoptions" "0072 Additional options:"
-    ; boxPackStart upbox hbox                 PackNatural 5
+    ; boxPackStart upbox hbox                 PackNatural 0
 
 
     -- Установим выходной каталог в значение по умолчанию
     case arcnames of
-      [arcname] -> dir =: takeBaseName arcname
-      _         -> do dir=:"."; addDirButton=:True
+      [arcname] -> do dir =:: fmCanonicalizeDiskPath fm' (takeBaseName arcname)
+      _         -> do dir =:: fmCanonicalizeDiskPath fm' "."; addDirButton=:True
 
 
     widgetShowAll upbox
-    choice <- fmDialogRun fm' dialog (if cmd/="t" then "ExtractDialog" else "TestDialog")
-    windowPresent (fm_window fm)
-    when (choice==ResponseOk) $ do
+    showTestDialog <- fmGetHistoryBool fm' "ShowTestDialog" False
+    choice <- if cmd/="t" || showTestDialog
+                then fmDialogRun fm' dialog (if cmd/="t" then "ExtractDialog" else "TestDialog")
+                else return ResponseOk
+    when (choice `elem` [ResponseOk, aResponseDetach]) $ do
       overwriteOption    <- val overwrite
       dir'               <- val dir;         saveHistory dir
       isAddDir           <- val addDirButton
+      isOpenOutDir       <- val openOutDirButton
       decryptionOptions  <- decryptionOnOK
-      logfile'           <- fmGetHistory1 fm' "logfile" ""
+      keepBroken         <- val keepBrokenButton
+      shutdown'          <- val shutdown
       optionsEnabled     <- val options
-      ; optionsStr'        <- val optionsStr;  saveHistory optionsStr  `on`  optionsEnabled
-      let msgs = case cmd of
-                  "t" -> ["0231 Testing %1",
-                          "0232 SUCCESFULLY TESTED %1",
-                          "0233 %2 WARNINGS WHILE TESTING %1"]
-                  _   -> ["0234 Extracting files from %1",
-                          "0235 FILES SUCCESFULLY EXTRACTED FROM %1",
-                          "0236 %2 WARNINGS WHILE EXTRACTING FILES FROM %1"]
-      exec$ (arcnames ||| ["*"]) .$map (\arcname ->
-            (msgs, [takeFileName arcname],
-             [cmd]++
-             (cmd/="t" &&& (
-               ["-dp"++clear dir']++
-               (isAddDir &&& ["-ad"])++
-               (arcdir &&& files &&& ["-ap"++clear arcdir])++
-               (overwriteOption  `select`  ",-o+,-u -o+,-o-")))++
-             decryptionOptions++
-             (logfile'         &&&  ["--logfile="++clear logfile'])++
-             ["--fullnames"]++
-             ["--noarcext"]++
-             (optionsEnabled   &&&  words (clear optionsStr'))++
-             ["--", clear arcname]++files))
+      ; optionsStr'        <- val optionsStr;  saveHistory optionsStr  `on_`  optionsEnabled
+      let outdir = dir' .$ (isAddDir &&& length(arcnames)==1 &&& (</> takeBaseName(head arcnames)))
+      exec (choice == aResponseDetach)                                               -- Запустить команду в отдельной копии FreeArc?
+           (\ok -> when isOpenOutDir (runFile (outdir++[pathSeparator]) "" False))   -- post-operation action: open outdir in Explorer
+           ((arcnames ||| ["*"]) .$map (\arcname ->
+                [cmd]++
+                (cmd/="t" &&& (
+                    ["-dp"++clear dir']++
+                    (isAddDir &&& ["-ad"])++
+                    (arcdir &&& files &&& ["-ap"++clear arcdir])++
+                    (keepBroken &&& ["-kb"])++
+                    (overwriteOption  `select`  ",-o+,-u -o+,-o-")))++
+                decryptionOptions++
+                ["--fullnames"]++
+                ["--noarcext"]++
+                (shutdown'        &&&  ["--shutdown"])++
+                (optionsEnabled   &&&  words (clear optionsStr'))++
+                ["--", clear arcname]++files))
 
 
 ----------------------------------------------------------------------------------------------------
@@ -136,64 +146,41 @@ arcinfoDialog fm' exec mode arcnames arcdir files = do
   fm <- val fm'
   let arcname = head arcnames
   fm_arc <- case () of _ | isFM_Archive fm -> return (subfm fm)
-                         | otherwise       -> with' (newFMArc fm' arcname "") (return) closeFMArc
-  let archive = subfm_archive fm_arc
+                         | otherwise       -> with' (newFMArc fm' arcname "") (return) (\_ -> closeFMArc fm')
+  let archive    = subfm_archive fm_arc
+      footer     = arcFooter archive
+      dataBlocks = arcDataBlocks archive   -- список солид-блоков
+      dirs_and_files = [("0173 Directories:", show3$ ftDirs$  subfm_filetree fm_arc)
+                       ,("0088 Files:",       show3$ ftFiles$ subfm_filetree fm_arc)]
+
   title <- i18n"0085 All about %1"
   let wintitle  =  format title (takeFileName arcname)
   -- Создадим диалог со стандартными кнопками OK/Cancel
-  fmDialog fm' wintitle $ \(dialog,okButton) -> do
+  fmDialog fm' wintitle [] $ \(dialog,okButton) -> do
     (nb,newPage) <- startNotebook dialog
 ------ Главная закладка ----------------------------------------------------------------------------
     vbox <- newPage "0174 Main";  let pack n makeControl = do control <- makeControl
                                                               boxPackStart vbox control PackNatural n
+    tables <- arcGetTechinfo archive dirs_and_files
+    for (zip [10,0,10,0,10] tables) $ \(n,table) -> do
+      pack n (twoColumnTable table)
 
-    let filelist    = map (cfFileInfo)$ arcDirectory archive
-        footer      = arcFooter archive
-        dataBlocks  = arcDataBlocks archive        -- список солид-блоков
-        numOfBlocks = length dataBlocks
-        empty       = "-"
-    ;   yes        <- i18n"0101 Yes" >>== replaceAll "_" ""
-
-    let origsize = sum$ map blOrigSize dataBlocks  -- суммарный объём файлов в распакованном виде
-        compsize = sum$ map blCompSize dataBlocks  -- суммарный объём файлов в упакованном виде
-        getCompressors = partition isEncryption.blCompressor  -- разделить алг-мы шифрования и сжатия для блока
-        (encryptors, compressors) = unzip$ map getCompressors dataBlocks  -- список алг. шифрования и сжатия.
-        header_encryptors = deleteIf null$ map (fst.getCompressors) (ftBlocks footer)  -- алгоритмы шифрования служебных блоков
-        all_encryptors = deleteIf null encryptors ++ header_encryptors   -- а теперь все вместе :)
-        ciphers = joinWith "\n"$ removeDups$ map (join_compressor.map method_name) all_encryptors   -- имена алг. шифрования.
-        formatMem s  =  x++" "++y  where (x,y) = span isDigit$ showMem s
-
-    let -- Максимальные словари основных и вспомогательных алгоритмов
-        dicts = compressors.$ map (splitAt 1.reverse.map getDictionary)  -- [([mainDict],[auxDict1,auxDict2..])...]
-                           .$ map (\([x],ys) -> (x, maximum(0:ys)))      -- [(mainDict,maxAuxDict)...]
-                           .$ ((0,0):) .$ sort .$ last                   -- Выбираем строчку с макс. основным и вспом. словарём
-        dictionaries  =  case dicts of
-                           (0,0)                     -> empty
-                           (maxMainDict, 0)          -> formatMem maxMainDict
-                           (maxMainDict, maxAuxDict) -> showMem maxAuxDict++" + "++showMem maxMainDict
-
-    pack 10 $twoColumnTable [("0173 Directories:",      show3$ ftDirs$  subfm_filetree fm_arc)
-                            ,("0088 Files:",            show3$ ftFiles$ subfm_filetree fm_arc)
-                            ,("0089 Total bytes:",      show3$ origsize)
-                            ,("0090 Compressed bytes:", show3$ compsize)
-                            ,("0091 Ratio:",            ratio3 compsize origsize++"%")]
-
-    pack  0 $twoColumnTable [("0104 Directory blocks:", show3$ length$ filter ((DIR_BLOCK==).blType) (ftBlocks footer))
-                            ,("0092 Solid blocks:",     show3$ numOfBlocks)
-                            ,("0093 Avg. blocksize:",   formatMem$ origsize `div` i(max numOfBlocks 1))]
-
-    pack 10 $twoColumnTable [("0099 Compression memory:",    formatMem$ maximum$ 0: map compressionGetShrinkedCompressionMem   compressors)
-                            ,("0100 Decompression memory:",  formatMem$ maximum$ 0: map compressionGetShrinkedDecompressionMem compressors)
-                            ,("0105 Dictionary:",            dictionaries)]
-
-    pack  0 $twoColumnTable [("0094 Archive locked:",    ftLocked footer   &&& yes ||| empty)
-                            ,("0098 Archive comment:",   ftComment footer  &&& yes ||| empty)
-                            ,("0095 Recovery info:",     ftRecovery footer ||| empty)
-                            ,("0096 SFX size:",          ftSFXSize footer .$show3 .$changeTo [("0", empty)])
-                            ,("0156 Headers encrypted:", header_encryptors &&& yes ||| empty)]
-
-    table <- twoColumnTable [("0097 Encryption algorithms:",  ciphers ||| empty)]
-    boxPackStart vbox table PackNatural (ciphers &&& 10)
+------ Закладка с описаниями солид-блоков ----------------------------------------------------------
+    vBox <- newPage "0449 Solid blocks"
+    let columnTitles = ["0450 Position", "0451 Size", "0452 Compressed", "0453 Files", "0454 Method"]
+        n = map i18no columnTitles
+    s <- i18ns columnTitles
+    let compressor = join_compressor.blCompressor
+    (listUI, listView, listModel, listSelection, columns, onColumnTitleClicked) <-
+        createListView compressor [(n!!0, s!!0, (show3.blPos),      [New.cellTextEditable := True, cellXAlign := 1]),
+                                   (n!!1, s!!1, (show3.blOrigSize), [New.cellTextEditable := True, cellXAlign := 1]),
+                                   (n!!2, s!!2, (show3.blCompSize), [New.cellTextEditable := True, cellXAlign := 1]),
+                                   (n!!3, s!!3, (show3.blFiles),    [New.cellTextEditable := True, cellXAlign := 1]),
+                                   (n!!4, s!!4, (compressor),       [New.cellTextEditable := True])]
+    boxPackStart vBox listUI PackGrow 0
+    changeList listModel listSelection dataBlocks
+    -- При закрытии диалога сохраним порядок и ширину колонок, при открытии восстановим их
+    restoreColumnsOrderAndWidths fm' "SolidBlocks" listView columns
 
 
 ------ Закладка комментария архива -----------------------------------------------------------------
@@ -203,23 +190,18 @@ arcinfoDialog fm' exec mode arcnames arcdir files = do
     boxPackStart vbox (widget comment) PackGrow 0
 
     widgetShowAll dialog
-    notebookSetCurrentPage nb 1    `on` mode==CommentMode
+    notebookSetCurrentPage nb 1    `on_` mode==CommentMode
     choice <- fmDialogRun fm' dialog "ArcInfoDialog"
-    windowPresent (fm_window fm)
+    saveColumnsOrderAndWidths fm' "SolidBlocks" listView columns
     when (choice==ResponseOk) $ do
       newComment <- val comment
       when (newComment /= ftComment footer) $ do
-        let msgs = ["0237 Modifying %1",
-                    "0238 SUCCESFULLY MODIFIED %1",
-                    "0239 %2 WARNINGS WHILE MODIFYING %1"]
-        let cmd  = ["ch"
-                   ,"--noarcext"
-                   ,newComment &&& ("--archive-comment="++newComment)
-                               ||| "-z-"
-                   ,"--"
-                   ,arcname]
-        --
-        exec [(msgs, [takeFileName arcname], cmd)]
+        exec False doNothing [["ch"
+                              ,"--noarcext"
+                              ,newComment &&& ("--archive-comment="++newComment)
+                                          ||| "-z-"
+                              ,"--"
+                              ,arcname]]
 
 
 ----------------------------------------------------------------------------------------------------
@@ -228,7 +210,7 @@ arcinfoDialog fm' exec mode arcnames arcdir files = do
 
 settingsDialog fm' = do
   fm <- val fm'
-  fmDialog fm' "0067 Settings" $ \(dialog,okButton) -> do
+  fmDialog fm' "0067 Settings" [] $ \(dialog,okButton) -> do
     (nb,newPage) <- startNotebook dialog
 ------ Главная закладка ----------------------------------------------------------------------
     vbox <- newPage "0174 Main";  let pack x = boxPackStart vbox x PackNatural 1
@@ -242,16 +224,22 @@ settingsDialog fm' = do
                                           "logfile" FileChooserActionSave
                                    (label "0166 Logfile:")
                                           "0167 Select logfile"
-                                          []
+                                          aANYFILE_FILTER
                                           (const$ return True)
                                           (fmCanonicalizeDiskPath fm')
     ; viewLogfileButton <- button "0292 View"
+    -- Каталог для временных файлов
+    (tempdirBox, _, tempdir) <- fmFileBox fm' dialog
+                                          "tempdir" FileChooserActionSelectFolder
+                                   (label "0447 Temporary directory:")
+                                          "0448 Select directory for temporary files"
+                                          aANYFILE_FILTER
+                                          (const$ return True)
+                                          (fmCanonicalizeDiskPath fm')
     -- Прочее
-    toolbarTextButton   <- fmCheckButtonWithHistory fm' "ToolbarCaptions" True "0361 Add captions to toolbar buttons"
-    checkNewsButton     <- fmCheckButtonWithHistory fm' "CheckNews"       True "0370 Watch for new versions via Internet"
-    registerButton      <- button "0172 Associate FreeArc with .arc files"
-    notes               <- label . joinWith "\n" =<<
-      i18ns["0168 You should restart FreeArc in order for a language settings to take effect.",
+    checkNewsButton <- fmCheckButtonWithHistory fm' "CheckNews"       True "0370 Watch for new versions via Internet"
+    notes           <- label . joinWith "\n" =<<
+      i18ns["0168 You should restart "++aFreeArc++" in order for a language settings to take effect.",
             "0169 Passwords need to be entered again after restart."]
 
 -----------------------------------------------------------------------------------------------
@@ -277,22 +265,20 @@ settingsDialog fm' = do
     --
     showLang i18n
 
-    -- Текущие настройки
-    inifile  <- io$ findFile configFilePlaces aINI_FILE
-    settings <- inifile  &&&  io(readConfigFile inifile) >>== map (split2 '=')
-    let langFile =  settings.$lookup aINITAG_LANGUAGE `defaultVal` ""
+    -- Файл языковой локализации
+    langFile <- fmGetHistory1 fm' aINITAG_LANGUAGE ""
 
     -- Заполнить список языков именами файлов в каталоге arc.languages и выбрать активный язык
-    langDir   <- io$ findDir libraryFilePlaces aLANG_DIR
-    langFiles <- langDir &&& (io(dir_list langDir) >>== map baseName >>== sort >>== filter (match "arc.*.txt"))
+    langDir   <- findDir libraryFilePlaces aLANG_DIR
+    langFiles <- langDir &&& (dir_list langDir >>== map baseName >>== sort >>== filter (match "arc.*.txt"))
     -- Отобразим языки в 5 столбцов, с сортировкой по столбцам
     let cols = 5
-    ;   langComboBox `New.comboBoxSetWrapWidth` cols
-    let rows = (length langFiles) `divRoundUp` cols;  add = rows*cols - length langFiles
+        rows = (length langFiles) `divRoundUp` cols;  add = rows*cols - length langFiles
         sortOnColumn x  =  r*cols+c  where (c,r) = x `divMod` rows  -- пересчитать из поколоночных позиций в построчные
     ;   langFiles <- return$ map snd $ sort $ zip (map sortOnColumn [0..]) (langFiles ++ replicate add "")
     --
     for langFiles (New.comboBoxAppendText langComboBox . mapHead toUpper . replace '_' ' ' . dropEnd 4 . drop 4)
+    langComboBox  `New.comboBoxSetWrapWidth`  cols
     whenJust_ (elemIndex (takeFileName langFile) langFiles)
               (New.comboBoxSetActive langComboBox)
 
@@ -300,12 +286,13 @@ settingsDialog fm' = do
     let getCurrentLangFile = do
           lang <- New.comboBoxGetActive langComboBox
           case lang of
-            Just lang -> myCanonicalizePath (langDir </> (langFiles !! lang))
-            Nothing   -> return ""
+            -1   -> return ""
+            lang -> myCanonicalizePath (langDir </> (langFiles !! lang))
 
     -- При выборе другого языка локализации вывести информацию о нём
-    langComboBox `New.onChanged` do
-      whenJustM_ (New.comboBoxGetActive langComboBox) $ \_ -> do
+    on langComboBox changed $ do
+      choice <- New.comboBoxGetActive langComboBox
+      when (choice /= -1) $ do
         langFile   <- getCurrentLangFile
         localeInfo <- parseLocaleFile langFile
         showLang (i18n_general (return localeInfo) .>>== fst)
@@ -313,28 +300,6 @@ settingsDialog fm' = do
     -- Редактирование текущего файла локализации/логфайла
     editLangButton    `onClick` (runEditCommand =<< getCurrentLangFile)
     viewLogfileButton `onClick` (runViewCommand =<< val logfile)
-
-#if defined(FREEARC_WIN)
-    registerButton `onClick` do
-      exe <- getExeName                                -- Name of FreeArc.exe file
-      let ico   =  exe `replaceExtension` ".ico"       -- Name of FreeArc.ico file
-          empty =  exe `replaceFileName` "empty.arc"   -- Name of empty archive file
-          register = registrySetStr hKEY_CLASSES_ROOT
-          regCmd name msg cmdline = do
-              register ("FreeArc.arc\\shell\\"++name) "" msg
-              register ("FreeArc.arc\\shell\\"++name++"\\command") "" ("\""++exe++"\" "++cmdline++" --noarcext -- \"%1\"")
-      register ".arc" "" "FreeArc.arc"
-      register ".arc\\ShellNew" "FileName" empty
-      register "FreeArc.arc" "" "FreeArc archive"
-      register "FreeArc.arc\\DefaultIcon" "" (ico++",0")
-      register "FreeArc.arc\\shell" "" "open"
-      register "FreeArc.arc\\shell\\open\\command" "" ("\""++exe++"\" \"%1\"")
-      regCmd   "extract-folder" "Extract to new folder" "x -ad"
-      regCmd   "extract-here"   "Extract here"          "x"
-      regCmd   "test"           "Test"                  "t"
-      -- todo: extract to ...;    *: add to archive; add to ...; выбор надписи и профайла/опций пользователя
-      return ()
-#endif
 
     ; langFrame <- frameNew
     ;   vbox1 <- vBoxNew False 0
@@ -350,10 +315,64 @@ settingsDialog fm' = do
     boxPackStart vbox                aboutLabel          PackNatural 5
     boxPackStart vbox                langFrame           PackNatural 5
     boxPackStart vbox                logfileBox          PackNatural 5
-    boxPackStart vbox       (widget  toolbarTextButton)  PackNatural 5
+    boxPackStart vbox                tempdirBox          PackNatural 5
     boxPackStart vbox       (widget  checkNewsButton)    PackNatural 5
-    boxPackStart vbox       (widget  registerButton)     PackNatural 5   `on` isWindows
     boxPackStart vbox       (widget  notes)              PackNatural 5
+
+------ Закладка настроек интерфейса -----------------------------------------------------------
+    vbox <- newPage "0466 Interface";  let pack x = boxPackStart vbox x PackNatural 1
+
+    toolbarTextButton       <- fmCheckButtonWithHistory  fm' "ToolbarCaptions" True  "0361 Add captions to toolbar buttons";            pack (widget toolbarTextButton)
+    showTestDialogButton    <- fmCheckButtonWithHistory  fm' "ShowTestDialog"  False "0469 Show \"Test archive\" dialog";               pack (widget showTestDialogButton)
+    targzButton             <- fmCheckButtonWithHistory  fm' "QuickOpenTarGz"  True  "0485 Open .tar.gz-like archives in single step";  pack (widget targzButton)
+    (hbox, extract_all_for) <- fmLabeledEntryWithHistory fm' "ExtractAllFor"         "0467 Unpack whole archive when running:";         pack hbox
+
+------ Закладка интеграции с Explorer ---------------------------------------------------------
+#if defined(FREEARC_WIN)
+    vbox <- newPage "0421 Explorer integration";  let pack x = boxPackStart vbox x PackNatural 1
+
+    associateArcButton <- fmCheckButtonWithHistory fm' "Settings.Associate"             False  ("0172 Associate "++aFreeArc++" with .arc files")
+    associateZipButton <- fmCheckButtonWithHistory fm' "Settings.AssociateNonArc"       False  ("0471 Associate "++aFreeArc++" with other archives")
+    contextMenuButton  <- fmCheckButtonWithHistory fm' "Settings.ContextMenu"           False   "0422 Enable context menu in Explorer"
+    cascadedButton     <- fmCheckButtonWithHistory fm' "Settings.ContextMenu.Cascaded"  True    "0423 Make it cascaded"
+    empty              <- label ""
+    mapM_ (pack.widget) [associateArcButton, associateZipButton, empty]
+
+    frame <- frameNew;  frameSetLabelWidget frame (widget contextMenuButton)
+    boxPackStart vbox frame PackGrow 1
+
+    hbox <- hBoxNew False 0;  containerAdd frame hbox
+
+    let show_or_hide = widgetSetSensitivity hbox =<< val contextMenuButton
+    show_or_hide
+    show_or_hide .$ setOnUpdate contextMenuButton
+    oldContextMenu <- val contextMenuButton
+
+    vbox <- vBoxNew False 0;  boxPackStart hbox vbox PackGrow 10
+    let pack x = boxPackStart vbox x PackNatural 1
+
+    empty <- label ""
+    notes <- label =<< i18n"0424 Enable individual commands:"
+    mapM_ (pack.widget) [cascadedButton, empty, notes]
+
+    -- Put all subsequent checkboxes to scrolled window
+    scrolledWindow <- scrolledWindowNew Nothing Nothing
+    boxPackStart vbox scrolledWindow PackGrow 1
+    vbox <- vBoxNew False 0
+    scrolledWindowAddWithViewport scrolledWindow vbox
+    scrolledWindowSetPolicy scrolledWindow PolicyAutomatic PolicyAutomatic
+    Just viewport <- binGetChild scrolledWindow
+    viewportSetShadowType (castToViewport viewport) ShadowNone
+    let pack x = boxPackStart vbox x PackNatural 1
+
+    let makeButton ("",_,_)             = do pack =<< hSeparatorNew; return []
+        makeButton (cmdname,itext,imsg) = do
+          button <- fmCheckButtonWithHistory fm' ("Settings.ContextMenu.Command."++cmdname) True imsg
+          pack (widget button)
+          return [button]
+
+    commands <- getExplorerCommands >>= concatMapM makeButton
+#endif
 
 ------ Закладка сжатия ------------------------------------------------------------------------
     (_, saveCompressionHistories) <- compressionPage fm' =<< newPage "0106 Compression"
@@ -366,24 +385,115 @@ settingsDialog fm' = do
                                                               boxPackStart vbox control PackNatural n
 
     maxBlock <- getMaxMemToAlloc
-    pack 10 $twoColumnTable [("0389 Largest contiguous free memblock:", showMem (maxBlock `roundDown` mb))]
+    pack 10 $twoColumnTable [("0461 Largest address space block:", showMem (maxBlock `roundDown` mb))]
 
 
 -----------------------------------------------------------------------------------------------
     widgetShowAll dialog
     choice <- fmDialogRun fm' dialog "SettingsDialog"
-    windowPresent (fm_window fm)
     when (choice==ResponseOk) $ do
-      -- Сохраняем настройки в INI-файл, пароли - в глоб. переменных, keyfile - в истории
+      -- Сохраняем настройки и keyfile в INI-файл, пароли - в глоб. переменных
       langFile <- getCurrentLangFile
-      inifile  <- io$ findOrCreateFile configFilePlaces aINI_FILE
-      io$ buildPathTo inifile
-      io$ saveConfigFile inifile$ map (join2 "=") [(aINITAG_LANGUAGE, takeFileName langFile)]
-      logfile' <- val logfile;  saveHistory logfile
-      saveHistory `mapM_` [toolbarTextButton, checkNewsButton]
-      saveCompressionHistories
-      saveEncryptionHistories ""
+      fmReplaceHistory fm' aINITAG_LANGUAGE (takeFileName langFile)
+      loadTranslation
+      saveHistory `mapM_` [logfile, tempdir, extract_all_for]
+      saveHistory `mapM_` [checkNewsButton, toolbarTextButton, showTestDialogButton, targzButton]
+      saveCompressionHistories "partial"
+      saveEncryptionHistories  "partial" ""
+#if defined(FREEARC_WIN)
+      saveHistory `mapM_` ([associateArcButton, associateZipButton, contextMenuButton, cascadedButton] ++ commands)
+      registerShellExtensions' (fm_history fm) (Just oldContextMenu)
+#endif
       return ()
+
+
+----------------------------------------------------------------------------------------------------
+---- (Де)регистрация shell extension и ассоциации FreeArc с архивными файлами ----------------------
+----------------------------------------------------------------------------------------------------
+
+#if defined(FREEARC_WIN)
+-- |Регистрация/Удаление регистрации через командную строку
+changeRegisterShellExtensions action = do
+  hf' <- openHistoryFile
+  when (action==["--unregister"]) $ do
+    hfReplaceHistoryBool hf' "Settings.Associate"        False
+    hfReplaceHistoryBool hf' "Settings.AssociateNonArc"  False
+    hfReplaceHistoryBool hf' "Settings.ContextMenu"      False
+  registerShellExtensions' hf' Nothing
+
+-- |Изменение настроек интеграции с Explorer
+registerShellExtensions' hf' oldContextMenu = do
+  hfCacheConfigFile hf' $ do
+  associateArc <- hfGetHistoryBool hf' "Settings.Associate"            True
+  associateZip <- hfGetHistoryBool hf' "Settings.AssociateNonArc"      True
+  contextMenu  <- hfGetHistoryBool hf' "Settings.ContextMenu"          True
+
+  exe <- getExeName                                -- Name of FreeArc.exe file
+  let ico   =  exe `replaceExtension` ".ico"       -- Name of FreeArc.ico file
+      dir   =  exe.$takeDirectory                  -- FreeArc.exe directory
+      shext =  dir </> "ArcShellExt"               -- Shell extension directory
+      empty =  dir </> "empty.arc"                 -- Name of empty archive file
+      version  = aARC_VERSION_WITH_DATE
+      reg   = registryGetStr hKEY_CLASSES_ROOT
+  oldAssociateArc <- and `fmap` sequence [(Just exe==)                `fmap` reg (aFreeArc++".arc") "Owner"   -- ассоциация с .arc включена?
+                                         ,(Just (aFreeArc++".arc")==) `fmap` reg (".arc") ""]
+  oldAssociateZip <- and `fmap` sequence [(Just exe==)                `fmap` reg (aFreeArc++".zip") "Owner"   -- ассоциация с .zip включена?
+                                         ,(Just (aFreeArc++".zip")==) `fmap` reg (".zip") ""]
+  old_shext   <- hfGetHistory1 hf' "Settings.ContextMenu.Directory" ""
+  hfReplaceHistory             hf' "Settings.ContextMenu.Directory" shext
+  old_version <- hfGetHistory1 hf' "Settings.ContextMenu.Version"   ""
+  hfReplaceHistory             hf' "Settings.ContextMenu.Version"   version
+
+  -- UAC-compatibility: instead of modifying registry directly, we are calling external executables that have admin privileges
+  reglist32 <- newList;  reglist64 <- newList
+  let add_to_list x  =  for [reglist32, reglist64] (<<=x)
+  let register      key name value  =  mapM_ add_to_list ["RegistryCreateKey", key, name, value]
+      regDeleteTree key             =  mapM_ add_to_list ["RegistryDeleteTree", key]
+      runDll32      dll func        =  mapM_ (reglist32 <<=) ["RunDll", dll, func]
+      runDll64      dll func        =  mapM_ (reglist64 <<=) ["RunDll", dll, func]
+
+  -- (Un)registering ArcShellExt dlls - performed only if settings were changed
+  let dll_register mode = when ((oldContextMenu,old_shext,old_version) /= (Just contextMenu,shext,version)) $ do
+                            runDll32 (shext </> "ArcShellExt.dll")    (if mode=="" then "DllRegisterServer" else "DllUnregisterServer")
+                            runDll64 (shext </> "ArcShellExt-64.dll") (if mode=="" then "DllRegisterServer" else "DllUnregisterServer")
+
+  -- First, unregister any old version if required
+  dll_register "/u"
+  when (associateArc/=oldAssociateArc  ||  oldAssociateArc && version/=old_version) $ do
+    regDeleteTree ("*\\shell\\"++aFreeArc)               -- these registry entries were used
+    regDeleteTree ("Directory\\shell\\"++aFreeArc)       --   for Explorer integration in FreeArc 0.50
+    for [aFreeArcExt] $ \ext -> do
+      regDeleteTree ("."++ext)
+      regDeleteTree (aFreeArc++"."++ext)
+  when (associateZip/=oldAssociateZip  ||  associateZip && version/=old_version) $ do
+    for (words other_archive_extensions) $ \ext -> do
+      regDeleteTree ("."++ext)
+      regDeleteTree (aFreeArc++"."++ext)
+
+  -- Second, associate FreeArc with .arc and archives if it was not associated before or program was updated
+  for ((associateArc  &&&  not (oldAssociateArc && version==old_version)  &&&  [aFreeArcExt]) ++
+       (associateZip  &&&  not (oldAssociateZip && version==old_version)  &&&  words other_archive_extensions)) $ \ext -> do
+    register  (aFreeArc++"."++ext)                            ""          ((if ext==aFreeArcExt then aFreeArc else map toUpper ext)++" archive")
+    register  (aFreeArc++"."++ext)                            "Owner"     exe   -- used to check in oldAssociateArc/Zip that exension is already associated with this program installation
+    register  (aFreeArc++"."++ext++"\\DefaultIcon")           ""          (ico++",0")
+    register  (aFreeArc++"."++ext++"\\shell")                 ""          ("open")
+    register  (aFreeArc++"."++ext++"\\shell\\open\\command")  ""          ("\""++exe++"\" \"%1\"")
+    register  ("."++ext)                                      ""          (aFreeArc++"."++ext)
+  --register  (".arc\\ShellNew")                              "FileName"  (empty)   -- disabled because we don't yet support Drag&Drop
+
+  -- Third, add items to Explorer's right-click menu and register DLL
+  when contextMenu $ do
+    writeShellExtScript hf'
+    dll_register ""
+
+  -- Run external executables with admin privileges that make actual changes to the registry
+  list32 <- listVal reglist32;  list64 <- listVal reglist64
+  list32 &&& runCommand (unparseCommand$ (shext</>("Manager of FreeArc integration settings.exe"         )):"0.60":list32) "." True
+  list64 &&& runCommand (unparseCommand$ (shext</>("Manager of FreeArc integration settings (64-bit).exe")):"0.60":list64) "." True
+
+#else
+changeRegisterShellExtensions = doNothing
+#endif
 
 
 ----------------------------------------------------------------------------------------------------
@@ -398,16 +508,10 @@ compressionPage fm' vbox = do
 
   -- Настройки алгоритма сжатия.
   hbox <- hBoxNew False 0;  pack hbox
-  ; vbox1 <- vBoxNew False 0
-  ;   method <- radioFrame "0107 Compression level" levels
-  ;     boxPackStart vbox1 (widget method)  PackNatural 0
-  ;   xMethod <- checkBox "0113 Fast, low-memory decompression"
-  ;     boxPackStart vbox1 (widget xMethod) PackNatural 0
-  ;   autodetect <- checkBox "0176 Filetype auto-detection"
-  ;     boxPackStart vbox1 (widget autodetect) PackNatural 1
-  ;   boxPackStart hbox vbox1 PackNatural 5
-  ; methodText <- labelNew Nothing
-  ;   boxPackStart hbox methodText PackGrow 0
+  ; method     <- radioFrame "0107 Compression level" levels;    boxPackStart hbox (widget method)  PackNatural 0
+  ; methodText <- labelNew Nothing;                              boxPackStart hbox methodText       PackGrow 0
+  xMethod    <- checkBox "0113 Fast, low-memory decompression";  pack (widget xMethod)
+  autodetect <- checkBox "0176 Filetype auto-detection"       ;  pack (widget autodetect)
 
   -- Настройки размера солид-блока
   vbox1 <- vBoxNew False 0;  let pack1 x = boxPackStart vbox1 x PackNatural 1
@@ -433,22 +537,22 @@ compressionPage fm' vbox = do
         m <- val method
         x <- val xMethod
         methodName <- getSimpleMethod
-        let compressor = methodName.$ decode_method []
+        let compressor = methodName.$ decode_method 1 []
                                    .$ limitCompressionMem   (parsePhysMem "75%")
                                    .$ limitDecompressionMem (1*gb)
             cmem = compressor.$ compressorGetShrinkedCompressionMem
             dmem = compressor.$ compressorGetShrinkedDecompressionMem
-        let level  =         "      ccm      uharc     7-zip        rar        ace      zip"
-            cspeed = x.$bool "    3mb/s      3mb/s     4mb/s     10mb/s     20mb/s   50mb/s" --m9,m5..m1
-                             "  2.5mb/s    2.5mb/s     4mb/s      8mb/s     15mb/s   50mb/s" --m9x,m5x..m1x
-            dspeed = x.$bool " 4-40mb/s   4-40mb/s  4-40mb/s     25mb/s     40mb/s  100mb/s" --m9,m5..m1
-                             "   40mb/s     40mb/s    40mb/s     40mb/s     60mb/s  100mb/s" --m9x,m5x..m1x
+        let level  =         "      ccm     uharc     7-zip        rar       bzip2      zip"
+            cspeed = x.$bool "    3mb/s     3mb/s     5mb/s     10mb/s      20mb/s   50mb/s" --m9,m5..m1
+                             "  2.5mb/s   2.5mb/s     5mb/s     10mb/s      20mb/s   50mb/s" --m9x,m5x..m1x
+            dspeed = x.$bool " 3-40mb/s  3-40mb/s  5-60mb/s  10-60mb/s  15-100mb/s  120mb/s" --m9,m5..m1
+                             "   40mb/s    40mb/s    60mb/s     60mb/s     100mb/s  120mb/s" --m9x,m5x..m1x
         labelSetMarkup methodText . deleteIf (=='_') . unlines =<< mapM i18fmt
             [ ["0114 Compression level: %1",               bold((words level!!m).$replace '_' ' ')]
             , ["0115 Compression speed: %1, memory: %2",   bold(words cspeed!!m), bold(showMem cmem)]
             , ["0116 Decompression speed: %1, memory: %2", bold(words dspeed!!m), bold(showMem dmem)]
             , [""]
-            , ["0390 All speeds were measured on 3GHz Core2Duo"]]
+            , ["0390 All speeds were measured on 3GHz Core2 Duo"]]
         w1 <- i18n (levels!!m)
         w2 <- i18n "0226 (fast, low-memory decompression)"
         autodetect'   <- val autodetect
@@ -473,10 +577,11 @@ compressionPage fm' vbox = do
   describeMethod .$ setOnUpdate solidByExtension
 
   -- Сохранение истории строковых полей и обработка нажатия на Save
-  let saveHistories = do
+  let saveHistories full = do
         whenM (val solidBytesOn) $ do saveHistory solidBytes
         whenM (val solidFilesOn) $ do saveHistory solidFiles
-  save `onClick` do saveHistories; saveHistory cmethod
+        when (full=="full")      $ do saveHistory cmethod
+  save `onClick` saveHistories "full"
 
   -- Возвратим метод назначения реакции на изменение настройки сжатия и процедуру, выполняемую при нажатии на OK
   return (\act -> setOnUpdate cmethod (val cmethod >>= act), saveHistories)
@@ -526,7 +631,7 @@ encryptionPage fm' dialog okButton vbox = do
                                           "akeyfile" FileChooserActionOpen
                                 (checkBox "0123 Keyfile:")
                                           "0124 Select keyfile"
-                                          []
+                                          aANYFILE_FILTER
                                           (const$ return True)
                                           (fmCanonicalizeDiskPath fm')
   ; createKeyfile <- button "0125 Create"
@@ -546,34 +651,27 @@ encryptionPage fm' dialog okButton vbox = do
 
   -- Создать новый файл-ключ, записав криптографически случайные данные в указанный пользователем файл
   createKeyfile `onClick` do
-    title <- i18n "0126 Create new keyfile"
-    bracketCtrlBreak "createKeyfile" (fileChooserDialogNew (Just title) (Just$ castToWindow dialog) FileChooserActionSave [("OK",ResponseOk), ("Cancel",ResponseCancel)]) widgetDestroy $ \chooserDialog -> do
-      fileChooserSetFilename    chooserDialog =<< (fmCanonicalizeDiskPath fm' "new.key" >>== unicode2utf8)
-      fileChooserSetCurrentName chooserDialog "new.key"
-      fileChooserSetFilename    chooserDialog =<< (fmCanonicalizeDiskPath fm' "new.key" >>== unicode2utf8)
-      fileChooserSetDoOverwriteConfirmation chooserDialog True
-      choice <- dialogRun chooserDialog
-      windowPresent dialog
-      when (choice==ResponseOk) $ do
-        whenJustM_ (fileChooserGetFilename chooserDialog) $ \fn8 -> do
-          let filename = utf8_to_unicode fn8
-          filePutBinary filename =<< generateRandomBytes 1024
-          keyfile   =: filename
-          keyfileOn =: True
+    let default_keyfile = do fm <- val fm'; return$ fm_curdir fm </> "new.key"
+    chooseFile dialog FileChooserActionSave "0126 Create new keyfile" aANYFILE_FILTER default_keyfile $ \filename -> do
+      --to do: fileChooserSetDoOverwriteConfirmation chooserDialog True
+      filePutBinary filename =<< generateRandomBytes 1024
+      keyfile   =: filename
+      keyfileOn =: True
 
   -- Инициализация: прочитаем пароли из глобальных переменных
   pwd1 =:: val encryptionPassword
   pwd2 =:: val encryptionPassword
 
   -- Сохранение истории строковых полей и обработка нажатия на Save
-  let saveHistories = do
+  let saveHistories full = do
         whenM (val keyfileOn) $ do saveHistory keyfile
+        when (full=="full")   $ do saveHistory method
         saveHistory encAlg
-  save `onClick` do saveHistories; saveHistory method
+  save `onClick` saveHistories "full"
 
   -- Действия, выполняемые при нажатии на OK. Возвращает опции, которые нужно добавить в командную строку
-  let onOK encryption = do
-        saveHistories
+  let onOK full encryption = do
+        saveHistories full
         pwd' <- val pwd1;  encryptionPassword =: pwd'
         decryptionOptions <- decryptionOnOK
         return$ decryptionOptions ++ ((words encryption `contains` "-p?") &&& pwd' &&& ["-p"++pwd'])
@@ -617,7 +715,7 @@ decryptionBox fm' dialog = do
                                         "keyfile" FileChooserActionOpen
                                  (label "0123 Keyfile:")
                                         "0124 Select keyfile"
-                                        []
+                                        aANYFILE_FILTER
                                         (const$ return True)
                                         (fmCanonicalizeDiskPath fm')
   hbox <- hBoxNew False 0
@@ -628,18 +726,31 @@ decryptionBox fm' dialog = do
   -- Прочитаем пароли из глобальных переменных
   pwd =:: val decryptionPassword
   -- Действие, выполняемое при нажатии на OK. Возвращает опции, которые нужно добавить к командной строке
-  let onOK = do
-        pwd'     <- val pwd;      decryptionPassword =: pwd'
-        keyfile' <- val keyfile;  saveHistory keyfile
-        return$ (pwd'      &&&  ["-op"++pwd'])++
-                (keyfile'  &&&  ["--OldKeyfile="++clear keyfile'])
-
+  let onOK = do decryptionPassword =:: val pwd
+                saveHistory keyfile
+                fmGetDecryptionOptions fm'
+  --
   return (decryptionFrame, onOK)
 
 
 ----------------------------------------------------------------------------------------------------
 ---- Вспомогательные определения -------------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------
+
+-- |Режимы диалогов
+data DialogMode = EncryptionMode | ProtectionMode | RecompressMode | CommentMode | MakeSFXMode | NoMode  deriving Eq
+
+-- |Определяет то, как имена каталогов подставляются в команды
+addCmdFiles dirname =  [dirname++[pathSeparator]]
+xCmdFiles   dirname =  [dirname++[pathSeparator]++"*"]
+dCmdFiles   dirname =  [dirname, dirname++[pathSeparator]++"*"]
+
+-- |Выполнить операцию над текущим архивом/всеми отмеченными файлами на диске
+compressionOperation fm' action exec winoptions cmd mode = do
+  fm <- val fm'
+  files <- if isFM_Archive fm then return [fm_arcname fm]
+                              else getSelection fm' addCmdFiles  -- todo: j/ch когда Selection включает каталоги
+  action fm' exec winoptions cmd files mode
 
 -- |Выполнить операцию над выбранными файлами в архиве/всеми файлами в выбранных архивах
 archiveOperation fm' action = do
@@ -665,25 +776,22 @@ refreshCommand fm' = do
   curfile <- fmGetCursor fm'
   selected <- getSelection fm' (:[])
   -- Обновим содержимое каталога/архива и восстановим текущий файл и список отмеченных
-  chdir fm' (fm_current fm)
+  closeFMArc fm'
+  fmChdir fm' (fm_current fm)
   when (selected>[]) $ do
     fmSetCursor fm' curfile
-  fmUnselectFilenames fm' (const True)
-  fmSelectFilenames   fm' ((`elem` selected).fmname)
+  fmUnselectAll fm'
+  fmSelectFilenames fm' ((`elem` selected).fmname)
 
 -- |Просмотреть файл
-runViewCommand           = runEditCommand
+runViewCommand = runEditCommand
 
 -- |Редактировать файл
-runEditCommand filename  = run (iif isWindows "notepad" "gedit") [filename]
+runEditCommand filename = run (iif isWindows "notepad" "gedit") [filename]
   where run cmd params = forkIO (rawSystem cmd params >> return ()) >> return ()
   -- edit filename | isWindows && takeExtension filename == "txt"  =  todo: direct shell open command
 
--- |Определяет то, как имена каталогов подставляются в команды
-addCmdFiles dirname =  [dirname++"/"]
-xCmdFiles   dirname =  [dirname++"/*"]
-
--- Поместим все контролы в симпатичный notebook и получим процедуру создания новых страниц в нём
+-- Поместим все контролы в симпатичный notebook и возвратим процедуру создания новых страниц в нём
 startNotebook dialog = do
   upbox <- dialogGetUpper dialog
   nb <- notebookNew;  boxPackStart upbox nb PackGrow 0
@@ -692,6 +800,21 @@ startNotebook dialog = do
                         return vbox
   return (nb,newPage)
 
--- |Режимы диалогов
-data DialogMode = EncryptionMode | ProtectionMode | RecompressMode | CommentMode | MakeSFXMode | NoMode  deriving Eq
+-- |Выполнить операцию с использованием временного файла, куда записываются данные contents
+withTempFile contents = withTemporary (`filePutBinary` contents) fileRemove
+
+-- |Выполнить операцию с использованием временного каталога
+withTempDir = withTemporary createDirectoryHierarchy dirRemoveRecursive
+
+-- |Выполнить операцию с использованием временного файла/каталога
+withTemporary preAction postAction action = do
+  tempDir <- getTempDir
+  createDirectoryHierarchy tempDir
+  fix $ \tryNext -> do n <- generateRandomBytes 4 >>== encode16
+                       let tempname = tempDir </> ("freearc"++n++".tmp")
+                       e <- fileOrDirExist tempname
+                       if e then tryNext
+                            else do preAction tempname
+                                    ensureCtrlBreak "remove temporary files" (ignoreErrors$ postAction tempname) $ do
+                                      action tempname
 

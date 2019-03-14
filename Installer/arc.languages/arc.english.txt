@@ -23,6 +23,10 @@ Add dialog
 1222 Include only files=Activate this option if you explicitly want to specify the type of files to be archived, for instance *.txt
 1223 Exclude files=Activate this option if you want to exclude a special type of files.
 
+--Settings dialog
+1467 Unpack whole archive when running:=FreeArc is able to run files within archives. Nevertheless a lot of executable files are dependent from other files. If an executable file does not run properly, you can determine FreeArc to extract the whole archive on certain, explicitly mentioned files, if you try to run it directly from archive.
+1469 Show "Test archive" dialog=Test operation will show dialog that allows to input passwords and other options of operation
+
 --Compression settings
 1113 Fast, low-memory decompression=Disables use of algorithms having slow or memory-hungry decompression. OTOH using this option makes compression slower and worse.
 1176 Filetype auto-detection=When enabled, FreeArc analyzes contents of each file and selects optimal compression method for it. When disabled, compression algorithms are selected according to arc.groups

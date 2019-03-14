@@ -1,0 +1,1 @@
+g++ -DFREEARC_UNIX -DFREEARC_INTEL_BYTE_ORDER -DUNICODE -D_UNICODE -D_FILE_OFFSET_BITS=64 -O3 -I../_Encryption/headers srep.cpp ../Common.cpp -osrep  -s -lrt -lstdc++

@@ -6,7 +6,7 @@ module Errors where
 
 import Prelude hiding (catch)
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Char
 import Data.Maybe
@@ -48,7 +48,12 @@ data ErrorTypes = GENERAL_ERROR                 [String]
                 | CANT_READ_DIRECTORY           String
                 | CANT_GET_FILEINFO             String
                 | CANT_OPEN_FILE                String
+                | UNSUPPORTED_METHOD            String
+                | DATA_ERROR                    String
+                | DATA_ERROR_ENCRYPTED          String
                 | BAD_CRC                       String
+                | BAD_CRC_ENCRYPTED             String
+                | UNKNOWN_ERROR                 String
                 | BAD_CFG_SECTION               String [String]
                 | OP_TERMINATED
                 | TERMINATED
@@ -58,6 +63,8 @@ data ErrorTypes = GENERAL_ERROR                 [String]
                 | INTERNAL_ERROR                String
                 | COMPRESSION_ERROR             [String]
                 | BAD_PASSWORD                  FilePath FilePath
+  deriving (Eq)
+
 
 --foreign import "&errCounter" :: Ptr Int
 {-
@@ -101,26 +108,49 @@ terminateOperation = do
 
 -- |Принудительно завершает выполнение программы с заданным exitCode и печатью сообщения msg
 shutdown msg exitCode = do
-  separator' =: ("","\n")
-  log_separator' =: "\n"
-  fin <- val finalizers
-  for fin $ \(name,id,action) -> do
-    action
-  compressionLib_cleanup
-
   w <- val warnings
-  case w of
-    0 -> when (exitCode==aEXIT_CODE_SUCCESS) $ condPrintLineLn "k" "All OK"
-    _ -> condPrintLineLn "n"$ "There were "++show w++" warning(s)"
-  ignoreErrors (msg &&& condPrintLineLn "n" msg)
-  condPrintLineLn "e" ""
+  -- Make cleanup unless this is a second call (after pause)
+  unlessM (val programFinished) $ do
+    programFinished =: True
+    separator' =: ("","\n")
+    log_separator' =: "\n"
+
+    fin <- val finalizers
+    for fin $ \(name,id,action) -> do
+      ignoreErrors$ action
+    compressionLib_cleanup
+
+    unlessM (val fileManagerMode) $ do
+      case w of
+        0 -> when (exitCode==aEXIT_CODE_SUCCESS) $ condPrintLineLn "k" "All OK"
+        _ -> condPrintLineLn "n"$ "There were "++show w++" warning(s)"
+      ignoreErrors (msg &&& condPrintLineLn "n" msg)
+      condPrintLineLn "e" ""
 #if !defined(FREEARC_WIN) && !defined(FREEARC_GUI)
-  putStrLn ""  -- в Unix отсутствует автоматический перевод строки в терминале по завершению программы
+    putStrLn ""  -- в Unix отсутствует автоматический перевод строки в терминале по завершению программы
 #endif
-  ignoreErrors$ closeLogFile
-  ignoreErrors$ hFlush stdout
-  ignoreErrors$ hFlush stderr
-  --killThread myThread
+
+    ignoreErrors$ closeLogFile
+    ignoreErrors$ hFlush stdout
+    ignoreErrors$ hFlush stderr
+    --killThread myThread
+
+    -- Выключить компьютер если запрошено
+    powerOffComputer `onM` val perform_shutdown
+
+    -- Make a pause if necessary
+    unlessM (val fileManagerMode) $ do
+      when (exitCode/=aEXIT_CODE_USER_BREAK) $ do
+        warningsBefore' <- val warningsBefore
+        pause_option <- val pause_before_exit
+        pause <- val pauseAction
+        case pause_option of
+          "on"          -> pause
+          "on-warnings" -> pause `on_` w>warningsBefore' || exitCode/=aEXIT_CODE_SUCCESS
+          "on-error"    -> pause `on_` exitCode/=aEXIT_CODE_SUCCESS
+          _             -> doNothing0
+
+  -- And finally - exit program!
   exit (exitCode  |||  (w &&& aEXIT_CODE_WARNINGS))
 #if 0
   -- Более корректный способ завершения программы, к сожалению arc.exe с ним иногда виснет
@@ -130,6 +160,9 @@ shutdown msg exitCode = do
      | otherwise  -> ExitSuccess
 #endif
   return undefined
+
+-- |Вызывается когда очередь команд становится пуста
+onEmptyQueue  =  powerOffComputer `onM` val perform_shutdown
 
 -- |"handle" с выполнением "onException" также при ^Break
 handleCtrlBreak name onException action = do
@@ -172,13 +205,34 @@ finalizers :: IORef [(String, Int, IO ())]
 finalizers = unsafePerformIO (ref [])
 {-# NOINLINE finalizers #-}
 
+-- |ИД основного треда операции (только в режиме файл-менеджера)
+parent_id :: IORef ThreadId
+parent_id = unsafePerformIO (ref undefined)
+{-# NOINLINE parent_id #-}
+
 -- |Флаг, показывающий что мы находимся в режиме прерывания текущей операции
 operationTerminated = unsafePerformIO (ref False)
 {-# NOINLINE operationTerminated #-}
 
+-- |Устанавливается после завершения выполнения всех команд, когда мы просто ждём закрытия окна программы
+programFinished = unsafePerformIO (ref False)
+{-# NOINLINE programFinished #-}
+
 -- |Режим работы файл-менеджера: при этом registerError обрабатывается по-другому - мы дожидаемся завершения всех тредов упаковки и распаковки
 fileManagerMode = unsafePerformIO (ref False)
 {-# NOINLINE fileManagerMode #-}
+
+-- |Делать ли паузу перед выходом из программы?
+pause_before_exit = unsafePerformIO (ref "")
+{-# NOINLINE pause_before_exit #-}
+
+-- |UI-операция, вызываемая для задержки выхода из программы
+pauseAction = unsafePerformIO (ref$ return ()) :: IORef (IO())
+{-# NOINLINE pauseAction #-}
+
+-- |Выключить компьютер по окончанию работы?
+perform_shutdown = unsafePerformIO (ref False)
+{-# NOINLINE shutdown #-}
 
 
 ---------------------------------------------------------------------------------------------------
@@ -193,7 +247,7 @@ errormsg (BROKEN_ARCHIVE arcname msgs) = do
   i18fmt ["0341 %1 isn't archive or this archive is corrupt: %2. Please recover it using 'r' command or use -tp- option to ignore Recovery Record", arcname, msg]
 
 errormsg (INTERNAL_ERROR msg) =
-  return$ "FreeArc internal error: "++msg
+  return$ aFreeArc++" internal error: "++msg
 
 errormsg (COMPRESSION_ERROR msgs) =
   i18fmt msgs
@@ -222,7 +276,9 @@ errormsg (CMDLINE_BAD_OPTION_FORMAT option) =
 
 errormsg (INVALID_OPTION_VALUE fullname shortname valid_values) = do
   or <- i18n"0323 or"
-  i18fmt ["0326 %1 option must be one of: %2", fullname, enumerate or (map (('-':shortname)++) valid_values)]
+  let spelling | shortname>"" = (('-':shortname)++)
+               | otherwise    = (("--"++fullname++"=")++)
+  i18fmt ["0326 %1 option must be one of: %2", fullname, enumerate or (map spelling valid_values)]
 
 errormsg (CMDLINE_NO_COMMAND args) =
   i18fmt ["0327 no command name in command: %1", unwords args]
@@ -242,17 +298,32 @@ errormsg (CANT_GET_FILEINFO filename) =
 errormsg (CANT_OPEN_FILE filename) =
   i18fmt ["0332 can't open file \"%1\"", filename]
 
+errormsg (UNSUPPORTED_METHOD filename) =
+  i18fmt ["0472 Unsupported compression method for \"%1\".", filename]
+
+errormsg (DATA_ERROR filename) =
+  i18fmt ["0473 Data error in \"%1\". File is broken.", filename]
+
+errormsg (DATA_ERROR_ENCRYPTED filename) =
+  i18fmt ["0474 Data error in encrypted file \"%1\". Wrong password?", filename]
+
 errormsg (BAD_CRC filename) =
-  i18fmt ["0333 CRC error in file \"%1\"", filename]
+  i18fmt ["0475 CRC failed in \"%1\". File is broken.", filename]
+
+errormsg (BAD_CRC_ENCRYPTED filename) =
+  i18fmt ["0476 CRC failed in encrypted file \"%1\". Wrong password?", filename]
+
+errormsg (UNKNOWN_ERROR filename) =
+  i18fmt ["0477 Unknown error", filename]
 
 errormsg (BAD_CFG_SECTION cfgfile section) =
   i18fmt ["0334 bad section %1 in %2", head section, cfgfile]
 
 errormsg (OP_TERMINATED) =
-  i18fmt ["0335 operation terminated!"]
+  i18fmt ["0455 Operation terminated by user!"]
 
 errormsg (TERMINATED) =
-  i18fmt ["0336 program terminated!"]
+  i18fmt ["0456 Program terminated by user!"]
 
 errormsg (NOFILES) =
   i18fmt ["0337 no files, erasing empty archive"]
@@ -277,6 +348,7 @@ enumerate s list  =  joinWith2 ", " (" "++s++" ") (map quote list)
 ---- Коды выхода для различных ошибок --------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
+errcode TERMINATED     = aEXIT_CODE_USER_BREAK
 errcode BAD_PASSWORD{} = aEXIT_CODE_BAD_PASSWORD
 errcode _              = aEXIT_CODE_FATAL_ERROR
 
@@ -328,24 +400,25 @@ printLineLn str = do
 printLineNeedSeparator str = do
   separator' =: ("",str)
 
--- Записать строку в логфайл.
--- Вывести её на экран при условии, что её вывод не запрещён опцией --display
-condPrintLine c line = do
-  display_option <- val display_option'
-  when (c/="$" || (display_option `contains` '#')) $ do
-      printLog line
-  when (display_option `contains_one_of` c) $ do
-      printLineC c line
-
 -- |Напечатать строку с разделителем строк после неё
 condPrintLineLn c line = do
   condPrintLine c line
   condPrintLineNeedSeparator c "\n"
 
+-- Записать строку в логфайл.
+-- Вывести её на экран при условии, что её вывод не запрещён опцией --display
+condPrintLine c line = do
+  if c=="G" then val loggingHandlers >>= mapM_ ($line) else do
+  display_option <- val display_option'
+  when (c `notElem` words "$ !"   ||   (display_option `contains` '#')) $ do
+      printLog line
+  when (display_option `contains_one_of` c) $ do
+      printLineC c line
+
 -- Отделить последующий вывод заданной строкой при условии разрешения вывода класса c
 condPrintLineNeedSeparator c str = do
   display_option <- val display_option'
-  when (c/="$" || (display_option `contains` '#')) $ do
+  when (c `notElem` words "$ !"   ||   (display_option `contains` '#')) $ do
       log_separator' =: str
   when (c=="" || (display_option `contains_one_of` c)) $ do
       separator' =: (c,str)
@@ -375,7 +448,9 @@ logfile'        = unsafePerformIO$ newIORef Nothing
 -- Переменные, используемые для украшения печати
 separator'      = unsafePerformIO$ newIORef ("","") :: IORef (String,String)
 log_separator'  = unsafePerformIO$ newIORef "\n"    :: IORef String
-display_option' = unsafePerformIO$ newIORef$ error "undefined display_option"
+display_option' = unsafePerformIO$ newIORef ""      :: IORef String
+-- Операции вывода сообщений в лог
+loggingHandlers = unsafePerformIO$ newIORef [] :: IORef [String -> IO ()]
 
 {-# NOINLINE printLine #-}
 {-# NOINLINE printLineNeedSeparator #-}
@@ -392,13 +467,16 @@ display_option' = unsafePerformIO$ newIORef$ error "undefined display_option"
 -- |Запись сообщения об ошибке в логфайл и аварийное завершение программы с этим сообщением
 registerError err = do
   msg <- errormsg err
-  msg <- i18fmt ["0316 ERROR: %1", msg]
+  msg <- if err `elem` [TERMINATED,OP_TERMINATED]
+           then return msg
+           else i18fmt ["0316 ERROR: %1", msg]
   val errorHandlers >>= mapM_ ($msg)
-  -- Если мы в режиме файл-менеджера, то придётся ждать завершения всех тредов компрессии,
-  -- иначе - просто совершаем аварийный выход из программы
+  -- Если мы не в режиме файл-менеджера - совершаем аварийный выход из программы
   unlessM (val fileManagerMode) $ do
     shutdown msg (errcode err)
+  -- Иначе ждём завершения всех тредов компрессии
   operationTerminated =: True
+  killThread =<< val parent_id
   fail ""
 
 -- |Запись предупреждения в логфайл и вывод его на экран
@@ -418,6 +496,8 @@ count_warnings action = do
 
 -- |Счётчик ошибок, возникших в ходе работы программы
 warnings = unsafePerformIO$ newIORef 0 :: IORef Int
+-- |Количество предупреждений перед последним показом диалога прогресса
+warningsBefore = unsafePerformIO$ newIORef 0 :: IORef Int
 
 -- В зависимости от режима зарегистрировать ошибку или предупреждение
 registerThreadError err = do
@@ -431,6 +511,7 @@ warningHandlers = unsafePerformIO$ newIORef [] :: IORef [String -> IO ()]
 {-# NOINLINE registerError #-}
 {-# NOINLINE registerWarning #-}
 {-# NOINLINE warnings #-}
+{-# NOINLINE warningsBefore #-}
 {-# NOINLINE errorHandlers #-}
 {-# NOINLINE warningHandlers #-}
 
@@ -459,4 +540,8 @@ fileCopy srcname dstname = do
 -- |Stop program execution
 foreign import ccall unsafe "stdlib.h exit"
   exit :: Int -> IO ()
+
+-- |Reboot computer (
+foreign import ccall unsafe "PowerOffComputer"
+  powerOffComputer :: IO ()
 

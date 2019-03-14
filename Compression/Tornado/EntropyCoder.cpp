@@ -21,13 +21,6 @@ enum CodecDirection {Encoder, Decoder};
 
 #define MAXELEM 8  /* size of maximum data element that can be read/written to byte stream */
 
-struct ByteBuffer
-{
-    byte *buf;               // Buffer pointer
-    ByteBuffer (uint size)   {buf = (byte*) malloc (size);}
-    ~ByteBuffer()            {free(buf);}
-};
-
 struct OutputByteStream
 {
     CALLBACK_FUNC *callback;  // Function that writes data to the outstream
@@ -45,10 +38,10 @@ struct OutputByteStream
     {
         callback = _callback;  auxdata = _auxdata;  chunk = _chunk;
         // Add 512 bytes for LZ77_ByteCoder (its LZSS scheme needs to overwrite old flag words) and 4096 for rounding written chunks
-        last_qwrite = output = buf = (byte*) malloc (chunk+pad+512+4096);
+        last_qwrite = output = buf = (byte*) BigAlloc (chunk+pad+512+4096);
         errcode = buf==NULL?  FREEARC_ERRCODE_NOT_ENOUGH_MEMORY : FREEARC_OK;
     }
-    ~OutputByteStream()       {free(buf);}
+    ~OutputByteStream()       {BigFree(buf);}
     // Returns error code if there was any problems in stream work
     int error()               {return errcode;}
     // Drop/use anchor which marks place in buffer
@@ -61,13 +54,15 @@ struct OutputByteStream
     // Finish working, flushing any pending data
     void finish (int n=-1);
     // Writes 8-64 bits to the buffer
-    void put8   (uint c)      {*         output = c; advance(1);}
+    void put8   (uint c)      {          *output= c;  advance(1);}
     void put16  (uint c)      {setvalue16(output, c); advance(2);}
     void put24  (uint32 c)    {setvalue32(output, c); advance(3);}
     void put32  (uint32 c)    {setvalue32(output, c); advance(4);}
     void put64  (uint64 c)    {setvalue64(output, c); advance(8);}
     // Writes len bytes pointed by ptr
     void putbuf (void *ptr, uint len);
+    // Set context for order-1 coders
+    void set_context(int i) {}
 };
 
 void OutputByteStream::putbuf (void *ptr, uint len)
@@ -122,13 +117,13 @@ struct InputByteStream
     {
         callback   = _callback;  auxdata = _auxdata;
         bufsize    = compress_all_at_once? _bufsize+(_bufsize/4) : LARGE_BUFFER_SIZE;  // For all-at-once compression input buffer should be large enough to hold all compressed data
-        buf        = (byte*) malloc (MAXELEM+bufsize);
+        buf        = (byte*) BigAlloc (MAXELEM+bufsize);
         errcode    = buf==NULL?  FREEARC_ERRCODE_NOT_ENOUGH_MEMORY : FREEARC_OK;
         input      = buf + MAXELEM;
         read_point = buf + bufsize;
         if (error()==FREEARC_OK)   errcode = callback ("read", buf+MAXELEM, bufsize, auxdata);
     }
-    ~InputByteStream()  {free(buf);}
+    ~InputByteStream()  {BigFree(buf);}
     // Returns error code if there is any problem in stream work
     int error()  {return errcode<0? errcode : FREEARC_OK;}
 
@@ -288,7 +283,9 @@ struct HuffmanTree
     int    fast_index[1<<FAST_BITS];  //   Direct decoding table for short codes (<=FAST_BITS)
     uint16 *index;                    //   Direct decoding table for long codes
 
-    HuffmanTree (CodecDirection _type, int _n);
+    HuffmanTree (CodecDirection _type, int _n)    {init(_type, _n);}
+    void   init (CodecDirection _type, int _n);
+    HuffmanTree ()                                {}
     ~HuffmanTree()                                {free(index);}
     void Inc (int s, int i=1)                     {counter[s] += i;}
     void build_tree (int rescale_mode);
@@ -305,7 +302,7 @@ struct HuffmanTree
     }
 };
 
-HuffmanTree::HuffmanTree (CodecDirection _type, int _n)
+void HuffmanTree::init (CodecDirection _type, int _n)
 {
     CHECK( _n<=MAXHUF, (s,"Fatal error: HuffmanTree::n=%d is larger than maximum allowed value %d", _n, MAXHUF));
     if (_n==0) return;
@@ -499,6 +496,63 @@ struct HuffmanDecoder : InputBitStream
             huf.build_tree (getbits(3));  // Rebuild huffman tree on EOB code
         }
         huf.Inc (x);
+        return x;
+    }
+};
+
+
+// Order-1 semi-adaptive huffman coder ************************************************************
+
+// Encode symbols using many huffman coders
+template <int ORDER1_CONTEXTS, int EOB>
+struct HuffmanEncoderOrder1 : OutputBitStream
+{
+    HuffmanTree  *huf;           // Huffman trees used to encode symbols
+    int          remainder[ORDER1_CONTEXTS];     // Count symbols remaining before huffman tree rebuild
+
+    HuffmanEncoderOrder1 (CALLBACK_FUNC *callback, void *auxdata, UINT chunk, UINT pad, int n)
+        : OutputBitStream (callback,auxdata,chunk,pad)  {context=0; huf = new HuffmanTree[ORDER1_CONTEXTS]; for(int i=0;i<ORDER1_CONTEXTS;i++)  remainder[i]=HUFBLOCKSIZE/4, huf[i].init(Encoder,n);}
+
+    // In order to unify order-0 and order-1 coder APIs, we provide API to specify context in separate call
+    int context;
+    void set_context(int i) {context=i;}
+    void encode (UINT x)    {encode(context,x);}
+
+    // Encode symbol and count it in huffman tree
+    void encode (int i, UINT x)
+    {
+        if (--remainder[i]==0)  {      // Rebuild huffman tree periodically
+            const int rescale_mode = 3;  // Statistics update rate
+            putbits (huf[i].bits[EOB], huf[i].code[EOB]);
+            putbits (3, rescale_mode);
+            huf[i].build_tree (rescale_mode);
+            remainder[i] = HUFBLOCKSIZE;
+        }
+        huf[i].Inc (x);
+        putbits (huf[i].bits[x], huf[i].code[x]);
+    }
+};
+
+// Decode symbols using many huffman coders
+template <int ORDER1_CONTEXTS, int EOB>
+struct HuffmanDecoderOrder1 : InputBitStream
+{
+    HuffmanTree  huf[ORDER1_CONTEXTS];           // Huffman trees used to decode symbols
+
+    HuffmanDecoderOrder1 (CALLBACK_FUNC *callback, void *auxdata, UINT bufsize, int n)
+        : InputBitStream (callback, auxdata, bufsize)  {iterate(ORDER1_CONTEXTS, huf[i].init(Decoder,n));}
+
+    // Decode symbol and count it in huffman tree
+    UINT decode(int i)
+    {
+        UINT x;
+        while (1) {
+            x = huf[i].Decode (needbits (huf[i].maxbits));
+            dumpbits (huf[i].bits[x]);
+            if (x != EOB) break;
+            huf[i].build_tree (getbits(3));  // Rebuild huffman tree on EOB code
+        }
+        huf[i].Inc (x);
         return x;
     }
 };

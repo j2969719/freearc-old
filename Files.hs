@@ -19,7 +19,7 @@ module Files (module Files, module FilePath) where
 import Prelude hiding (catch)
 import Control.Concurrent
 import Control.Concurrent.MVar
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Array
 import Data.Char
@@ -31,8 +31,9 @@ import Foreign.Marshal.Alloc
 import System.Posix.Internals
 import System.Posix.Types
 import System.IO
-import System.IO.Error hiding (catch)
+import System.IO.Error hiding (try, catch)
 import System.IO.Unsafe
+import System.Environment
 import System.Locale
 import System.Time
 import System.Process
@@ -42,7 +43,7 @@ import Utils
 import FilePath
 #if defined(FREEARC_WIN)
 import Win32Files
-import System.Win32
+import System.Win32 hiding (try)
 #else
 import System.Posix.Files hiding (fileExist)
 #endif
@@ -56,6 +57,9 @@ aLARGE_BUFFER_SIZE = 256*kb
 -- |Количество байт, которые должны читаться/записываться за один раз в очень быстрых методах (storing, tornado и тому подобное)
 -- Этот объём минимизирует потери на disk seek operations - при условии, что одновременно не происходит в/в в другом потоке ;)
 aHUGE_BUFFER_SIZE = 8*mb
+
+-- |Optimal size of buffers for I/O operations
+aIO_BUFFER_SIZE = 64*kb
 
 
 ----------------------------------------------------------------------------------------------------
@@ -91,8 +95,8 @@ exclude_special_names s  =  (s/=".")  &&  (s/="..")
 -- Strip "drive:/" at the beginning of absolute filename
 stripRoot = dropDrive
 
--- |Replace all '\' with '/'
-translatePath = map (\c -> if isPathSeparator c  then '/'  else c)
+-- |Replace all '\' with '/' or reverse :)
+translatePath = make_OS_native_path
 
 -- |Filename extension, "dir/name.ext" -> "ext"
 getFileSuffix = snd . splitFilenameSuffix
@@ -141,14 +145,17 @@ findOrCreateFile possibleFilePlaces cfgfilename = do
     x:xs -> return x
     []   -> return (head variants)
 
+-- Место где хранятся персональные файлы конфигурации каждого пользователя
+personalConfigFilePlaces filename = do dir <- myGetAppUserDataDirectory aFreeArc
+                                       return [dir </> filename]
 
 #if defined(FREEARC_WIN)
 -- Под Windows все дополнительные файлы по умолчанию лежат в одном каталоге с программой
 libraryFilePlaces = configFilePlaces
-configFilePlaces filename  =  do -- dir1 <- getAppUserDataDirectory "FreeArc"
-                                 exe  <- getExeName
-                                 return [-- dir1              </> filename,
-                                         takeDirectory exe </> filename]
+configFilePlaces filename  =  do personal <- personalConfigFilePlaces filename
+                                 exe <- getExeName
+                                 return$ personal++
+                                         [takeDirectory exe </> filename]
 
 -- |Имя исполняемого файла программы
 getExeName = do
@@ -158,16 +165,64 @@ getExeName = do
 foreign import ccall unsafe "Environment.h GetExeName"
   c_GetExeName :: CWFilePath -> CInt -> IO CWFilePath
 
+-- |Каталог где хранятся индивидуальные настройки пользователя для данной программы
+myGetAppUserDataDirectory :: String -> IO FilePath
+myGetAppUserDataDirectory appName = do
+  allocaBytes (long_path_size*4) $ \pOutPath -> do
+     r <- c_MyGetAppUserDataDirectory pOutPath
+     when (r<0) (fail$ "getAppUserDataDirectory")
+     s <- peekCWString pOutPath
+     return (s </> appName)
+
+foreign import ccall unsafe "MyGetAppUserDataDirectory"
+            c_MyGetAppUserDataDirectory :: CWString
+                                           -> IO CInt
+
+foreign import stdcall unsafe "SHGetFolderPathW"
+            c_SHGetFolderPath :: Ptr ()
+                              -> CInt
+                              -> Ptr ()
+                              -> CInt
+                              -> CWString
+                              -> IO CInt
 #else
 -- |Места для поиска конфиг-файлов
-configFilePlaces  filename  =  do dir1 <- getAppUserDataDirectory "FreeArc"
-                                  return [dir1   </> filename
-                                         ,"/etc/FreeArc" </> filename]
+configFilePlaces  filename  =  do personal <- personalConfigFilePlaces filename
+                                  return$ personal++
+                                          [("/etc/"++aFreeArc) </> filename]
 
 -- |Места для поиска sfx-модулей
-libraryFilePlaces filename  =  return ["/usr/lib/FreeArc"       </> filename
-                                      ,"/usr/local/lib/FreeArc" </> filename]
+libraryFilePlaces filename  =  do personal <- personalConfigFilePlaces filename
+                                  return$ personal++
+                                          [("/usr/lib/"++aFreeArc)       </> filename
+                                          ,("/usr/local/lib/"++aFreeArc) </> filename]
+
+-- |Имя исполняемого файла программы
+getExeName = do
+  allocaBytes (long_path_size*4) $ \pOutPath -> do
+    c_GetExeName pOutPath (fromIntegral long_path_size*4) >>= peekCString
+
+foreign import ccall unsafe "Environment.h GetExeName"
+  c_GetExeName :: CFilePath -> CInt -> IO CFilePath
+
+
+-- |Каталог где хранятся индивидуальные настройки пользователя для данной программы
+myGetAppUserDataDirectory = getAppUserDataDirectory
+
 #endif
+
+
+-- |Get temporary files directory
+getTempDir = c_GetTempDir >>= peekCFilePath
+
+foreign import ccall safe "Environment.h GetTempDir"
+  c_GetTempDir :: IO CFilePath
+
+-- |Set directory for temporary files
+setTempDir dir = withCFilePath dir c_SetTempDir
+
+foreign import ccall safe "Environment.h SetTempDir"
+  c_SetTempDir :: CFilePath -> IO ()
 
 
 ----------------------------------------------------------------------------------------------------
@@ -183,21 +238,30 @@ runProgram cmd = do
     waitForProcess ph
     return result
 
--- |Execute file `filename` in the directory `curdir` optionally waiting until it finished
-runFile filename curdir wait_finish = do
+-- |Execute file/command in the directory `curdir` optionally waiting until it finished
+runFile    = runIt c_RunFile
+runCommand = runIt c_RunCommand
+runIt c_run_it filename curdir wait_finish = do
   withCFilePath filename $ \c_filename -> do
   withCFilePath curdir   $ \c_curdir   -> do
-  c_RunFile c_filename c_curdir (i$fromEnum wait_finish)
+  c_run_it c_filename c_curdir (i$fromEnum wait_finish)
 
 foreign import ccall safe "Environment.h RunFile"
   c_RunFile :: CFilePath -> CFilePath -> CInt -> IO ()
 
+foreign import ccall safe "Environment.h RunCommand"
+  c_RunCommand :: CFilePath -> CFilePath -> CInt -> IO ()
+
+-- |Составить строку команды из списка строк аргументов
+unparseCommand  =  joinWith " " . map quote
+
 
 #if defined(FREEARC_WIN)
--- |Создать HKEY и прочитать из Registry значение типа REG_SZ
+-- |Открыть HKEY и прочитать из Registry значение типа REG_SZ
 registryGetStr root branch key =
-  bracket (regCreateKey root branch) regCloseKey
-    (\hk -> registryGetStringValue hk key)
+  (bracket (regOpenKey root branch) regCloseKey
+     (\hk -> registryGetStringValue hk key))
+  `catch` (\e -> return Nothing)
 
 -- |Создать HKEY и записать в Registry значение типа REG_SZ
 registrySetStr root branch key val =
@@ -215,6 +279,34 @@ registrySetStringValue :: HKEY -> String -> String -> IO ()
 registrySetStringValue hk key val =
   withTString val $ \v ->
   regSetValueEx hk key rEG_SZ v (length val*2)
+
+-- |Удалить целую ветку из Registry
+registryDeleteTree :: HKEY -> String -> IO ()
+registryDeleteTree key subkey = do
+  handle (\e -> return ()) $ do
+  withForeignPtr key $ \ p_key -> do
+  withTString subkey $ \ c_subkey -> do
+  failUnlessSuccess "registryDeleteTree" $ c_RegistryDeleteTree p_key c_subkey
+foreign import ccall unsafe "Environment.h RegistryDeleteTree"
+  c_RegistryDeleteTree :: PKEY -> LPCTSTR -> IO ErrCode
+
+#else
+{- |The 'mySetEnv' function inserts or resets the environment variable name in
+     the current environment list.  If the variable @name@ does not exist in the
+     list, it is inserted with the given value.  If the variable does exist,
+     the argument @overwrite@ is tested; if @overwrite@ is @False@, the variable is
+     not reset, otherwise it is reset to the given value.
+-}
+
+mySetEnv :: String -> String -> Bool {-overwrite-} -> IO ()
+mySetEnv key value True  = withCString (key++"="++value) $ \s -> do
+                           throwErrnoIfMinus1_ "mySetEnv" (c_putenv s)
+
+mySetEnv key value False = (getEnv key >> return ()) `catch`  (\e -> mySetEnv key value True)
+
+
+foreign import ccall unsafe "putenv"
+   c_putenv :: CString -> IO CInt
 #endif
 
 
@@ -239,7 +331,7 @@ getDrives = getLogicalDrives >>== unfoldr (\n -> Just (n `mod` 2, n `div` 2))
                              >>== concat
                              >>=  mapM (\d -> do t <- withCString d c_GetDriveType; return (d++"\t"++(driveTypes!!i t)))
 
-driveTypes = ["", ""]++split ',' "Removable,Fixed,Network,CD/DVD,Ramdisk"
+driveTypes = (split ',' "???,???,Removable,Fixed,Network,CD/DVD,Ramdisk") ++ repeat "???"
 
 foreign import stdcall unsafe "windows.h GetDriveTypeA"
   c_GetDriveType :: LPCSTR -> IO CInt
@@ -248,8 +340,9 @@ foreign import stdcall unsafe "windows.h GetDriveTypeA"
 
 -- |Create a hierarchy of directories
 createDirectoryHierarchy :: FilePath -> IO ()
-createDirectoryHierarchy dir = do
-  let d = stripRoot dir
+createDirectoryHierarchy dir0 = do
+  let dir = dropTrailingPathSeparator dir0
+      d   = stripRoot dir
   when (d/= "" && exclude_special_names d) $ do
     unlessM (dirExist dir) $ do
       createDirectoryHierarchy (takeDirectory dir)
@@ -260,6 +353,24 @@ buildPathTo filename  =  createDirectoryHierarchy (takeDirectory filename)
 
 -- |Return current directory
 getCurrentDirectory = myCanonicalizePath "."
+
+-- | @'dirRemoveRecursive' dir@  removes an existing directory /dir/
+-- together with its content and all subdirectories. Be careful,
+-- if the directory contains symlinks, the function will follow them.
+dirRemoveRecursive :: FilePath -> IO ()
+dirRemoveRecursive startLoc = do
+  contents <- dirList startLoc
+  sequence_ [rm (startLoc </> x) | x <- contents, x /= "." && x /= ".."]
+  dirRemove startLoc
+  where
+    rm :: FilePath -> IO ()
+    rm f = do temp <- try (fileRemove f)     -- todo: check that exception is really generated
+              case temp of
+                Left e  -> do isDir <- dirExist f
+                              -- If f is not a directory, re-throw the error
+                              unless isDir $ throw e
+                              dirRemoveRecursive f
+                Right _ -> return ()
 
 -- | Given path referring to a file or directory, returns a
 -- canonicalized path, with the intent that two paths referring
@@ -308,16 +419,14 @@ clearArchiveBit filename = do
     attr <- getFileAttributes filename
     when (attr.&.fILE_ATTRIBUTE_ARCHIVE /= 0) $ do
         setFileAttributes filename (attr - fILE_ATTRIBUTE_ARCHIVE)
+-- |Clear all file's attributes (before deletion)
+clearFileAttributes filename = do
+    setFileAttributes filename 0
 #else
-clearArchiveBit _ = return ()
+clearArchiveBit     = doNothing
+clearFileAttributes = doNothing
 #endif
 
-
--- |Минимальное datetime, которое только может быть у файла. Соответствует 1 января 1970 г.
-aMINIMAL_POSSIBLE_DATETIME = 0 :: CTime
-
--- |Get file's date/time
-getFileDateTime filename  =  fileWithStatus "getFileDateTime" filename stat_mtime
 
 -- |Set file's date/time
 setFileDateTime filename datetime  =  withCFilePath filename (`c_SetFileDateTime` datetime)
@@ -349,6 +458,10 @@ foreign import ccall unsafe "Environment.h FormatDateTime"
 executeModes         =  [ownerExecuteMode, groupExecuteMode, otherExecuteMode]
 removeFileModes a b  =  a `intersectFileModes` (complement b)
 #endif
+
+-- Wait a few seconds (no more than half-hour due to Int overflow!)
+sleepSeconds secs = do let us = round (secs*1000000)
+                       threadDelay us
 
 
 ----------------------------------------------------------------------------------------------------
@@ -389,9 +502,14 @@ archiveCopyData srcarc pos size dstarc = do
 -- |При работе с одним физическим диском (наиболее частый вариант)
 -- нет смысла выполнять несколько I/O операций параллельно,
 -- поэтому мы их все проводим через "угольное ушко" одной-единственной MVar
-oneIOAtTime = unsafePerformIO$ newMVar "oneIOAtTime value"
-fileReadBuf  file buf size = withMVar oneIOAtTime $ \_ -> fileReadBufSimple  file buf size
-fileWriteBuf file buf size = withMVar oneIOAtTime $ \_ -> fileWriteBufSimple file buf size
+-- UPDATE: Seems that this is no more holds for Vista
+--
+--oneIOAtTime = unsafePerformIO$ newMVar "oneIOAtTime value"
+--fileReadBuf  file buf size = withMVar oneIOAtTime $ \_ -> fileReadBufSimple  file buf size
+--fileWriteBuf file buf size = withMVar oneIOAtTime $ \_ -> fileWriteBufSimple file buf size
+
+fileReadBuf  = fileReadBufSimple
+fileWriteBuf = fileWriteBufSimple
 
 
 ----------------------------------------------------------------------------------------------------
@@ -413,9 +531,7 @@ fileFlush          = choose  fFlush          (\_     -> err "url_flush")
 fileClose          = choose  fClose          url_close
 
 -- |Проверяет существование файла/URL
-fileExist name | isURL name = do url <- withCString name url_open
-                                 url_close url
-                                 return (url/=nullPtr)
+fileExist name | isURL name = withCString name url_exists >>== (/=0)
                | otherwise  = fExist name
 
 -- |Проверяет, является ли имя url
@@ -439,6 +555,7 @@ type URL = Ptr ()
 foreign import ccall safe "URL.h"  url_setup_proxy         :: Ptr CChar -> IO ()
 foreign import ccall safe "URL.h"  url_setup_bypass_list   :: Ptr CChar -> IO ()
 foreign import ccall safe "URL.h"  url_open   :: Ptr CChar -> IO URL
+foreign import ccall safe "URL.h"  url_exists :: Ptr CChar -> IO CInt
 foreign import ccall safe "URL.h"  url_pos    :: URL -> IO Int64
 foreign import ccall safe "URL.h"  url_size   :: URL -> IO Int64
 foreign import ccall safe "URL.h"  url_seek   :: URL -> Int64 -> IO ()
@@ -474,7 +591,7 @@ fileWithStatus       = wWithFileStatus
 fileStdin            = 0
 stat_mode            = wst_mode
 stat_size            = wst_size
-stat_mtime           = wst_mtime
+raw_stat_mtime       = wst_mtime
 dirCreate            = wmkdir
 dirExist             = wDoesDirectoryExist
 dirRemove            = wrmdir
@@ -511,7 +628,7 @@ fileSetSize          = hSetFileSize
 fileStdin            = stdin
 stat_mode            = st_mode
 stat_size            = st_size  .>>== i
-stat_mtime           = st_mtime
+raw_stat_mtime       = st_mtime
 dirCreate            = createDirectory     =<<. str2filesystem
 dirExist             = doesDirectoryExist  =<<. str2filesystem
 dirRemove            = removeDirectory     =<<. str2filesystem

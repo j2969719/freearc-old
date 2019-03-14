@@ -24,6 +24,7 @@ import System.Posix.Terminal
 #endif
 
 import Utils
+import Charsets
 import Errors
 import Files
 import FileInfo
@@ -38,10 +39,13 @@ import UIBase
 -- |Запускает background thread для вывода индикатора прогресса
 guiStartProgram = do
   -- Обновляем индикатор прогресса и заголовок окна раз в 0.5 секунды
-  indicatorThread 0.5 $ \indicator indType title b bytes total processed p -> do
+  indicatorThread 0.5 $ \updateMode indicator indType title b bytes total processed p -> do
     myPutStr$ back_percents indicator ++ p
     myFlushStdout
     setConsoleTitle title
+
+-- |Вызывается в начале обработки архива
+guiStartArchive = doNothing0
 
 -- |Вызывается в начале обработки файла
 guiStartFile = do
@@ -49,9 +53,10 @@ guiStartFile = do
   when (opt_indicator command == "2") $ do
     syncUI $ do
     uiSuspendProgressIndicator
-    uiMessage' <- val uiMessage
+    (msg,filename)  <- val uiMessage
+    imsg <- i18n (msg ||| msgDo(cmd_name command))
     myPutStrLn   ""
-    myPutStr$    left_justify 72 (msgFile(cmd_name command) ++ uiMessage')
+    myPutStr$    left_justify 72 ("  "++format imsg filename)
     uiResumeProgressIndicator
     hFlush stdout
 
@@ -64,16 +69,26 @@ uiSuspendProgressIndicator = do
 
 -- |Возобновить вывод индикатора прогресса и вывести его текущее значение
 uiResumeProgressIndicator = do
-  (indicator, indType, arcname, direction, b, bytes', total') <- val aProgressIndicatorState
-  bytes <- bytes' b;  total <- total'
+  (indicator, indType, arcname, direction, b :: Rational, bytes', total') <- val aProgressIndicatorState
+  bytes <- bytes' (round b);  total <- total'
   myPutStr$ percents indicator bytes total
   myFlushStdout
   aProgressIndicatorEnabled =: True
+
+-- |Сделать паузу в выполнении программы
+guiPauseAtEnd = do
+  withoutEcho getHiddenChar
+  return ()
+
+-- |Завершить выполнение программы
+guiDoneProgram = do
+  return ()
 
 {-# NOINLINE guiStartProgram #-}
 {-# NOINLINE guiStartFile #-}
 {-# NOINLINE uiSuspendProgressIndicator #-}
 {-# NOINLINE uiResumeProgressIndicator #-}
+{-# NOINLINE guiDoneProgram #-}
 
 
 ----------------------------------------------------------------------------------------------------
@@ -99,7 +114,7 @@ ask question ref_answer answer_on_u =  do
 
 -- |Собственно общение с пользователем происходит здесь
 ask_user question = syncUI $ pauseTiming go  where
-  go = do myPutStr$ "\n  "++question++" ("++valid_answers++")? "
+  go = do myPutStr$ "\n  "++question++"?\n  "++commented_answers++"? "
           hFlush stdout
           answer  <-  getLine >>== strLower
           when (answer=="q") $ do
@@ -118,6 +133,7 @@ askHelp = unlines [ "  Valid answers are:"
                   , "    q - quit program"
                   ]
 
+commented_answers = "(Y)es / (N)o / (A)lways / (S)kip all / (U)pdate all / (Q)uit"
 valid_answers = "y/n/a/s/u/q"
 
 
@@ -230,10 +246,10 @@ setConsoleTitle title = do
   withTString title c_SetConsoleTitle
 
 -- |Set console title (external)
-foreign import ccall unsafe "Environment.h EnvSetConsoleTitle"
+foreign import ccall safe "Environment.h EnvSetConsoleTitle"
   c_SetConsoleTitle :: TString -> IO ()
 
 -- |Reset console title
-foreign import ccall unsafe "Environment.h EnvResetConsoleTitle"
+foreign import ccall safe "Environment.h EnvResetConsoleTitle"
   resetConsoleTitle :: IO ()
 

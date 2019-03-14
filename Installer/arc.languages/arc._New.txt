@@ -1,4 +1,4 @@
 ﻿Language name in english and mother tongue
 0000 Language=New
-0159 Copyright=Use this file as template for developing new translations
+0159 Copyright=Use this file as template for developing new translations. Just press Edit button at right and follow instructions in file being edited
 

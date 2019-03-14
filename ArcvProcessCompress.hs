@@ -7,6 +7,7 @@ module ArcvProcessCompress where
 import Prelude hiding (catch)
 import Control.Monad
 import Data.IORef
+import Data.Array.IO
 import Foreign.C.Types
 import Foreign.Ptr
 
@@ -17,9 +18,10 @@ import Process
 import FileInfo
 import Compression
 import Encryption
-import Options           (opt_data_password, opt_headers_password, opt_encryption_algorithm)
+import Options           (opt_data_password, opt_headers_password, opt_encryption_algorithm, limit_compression)
 import UI
 import ArhiveStructure
+import Arhive7zLib
 import ArhiveDirectory
 import ArcvProcessExtract
 import ArcvProcessRead
@@ -30,15 +32,14 @@ import ArcvProcessRead
 compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
 
   -- Процедура отображения в UI входных данных
-  let display (FileStart fi)               =  uiStartFile      fi
-      display (DataChunk buf len)          =  uiUnpackedBytes  (i len)
+  let display (FileStart fi)               =  uiStartFile      "" (Right fi)
+      display (DataChunk buf len)          =  return ()
       display (CorrectTotals files bytes)  =  uiCorrectTotal   files bytes
       display (FakeFiles cfiles)           =  uiFakeFiles      (map cfFileInfo cfiles) 0
       display _                            =  return ()
 
   -- Процедура записи упакованных данных в архив
-  let write_to_archive (DataBuf buf len) =  do uiCompressedBytes  (i len)
-                                               archiveWriteBuf    archive buf len
+  let write_to_archive (DataBuf buf len) =  do doBufChunks buf len aIO_BUFFER_SIZE (archiveWriteBuf archive)
                                                return len
       write_to_archive  NoMoreData       =  return 0
 
@@ -90,8 +91,17 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
                                                          then generateEncryption algorithm password   -- not thread-safe due to use of PRNG!
                                                          else return (id,id)
 
+        -- Окончательное ограничение метода сжатия объёмом доступной памяти - непосредственно перед стартом алгоритма.
+        -- Запоминаем в массиве окончательно использованные методы сжатия
+        final_compressor <- newListArray (1,length real_compressor) real_compressor :: IO (IOArray Int String)
+        let limit_memory num method = do
+              if num > length real_compressor  then return method  else do  -- пропускаем процедуру для алгоритмов шифрования, которые добавляются ниже
+              newMethod <- method.$limit_compression command
+              writeArray final_compressor num newMethod
+              return newMethod
+
         -- Процесс упаковки одним алгоритмом
-        let compressP = de_compress_PROCESS freearcCompress times
+        let compressP = de_compress_PROCESS freearcCompress times command limit_memory
         -- Последовательность процессов упаковки, соответствующая последовательности алгоритмов `real_compressor`
         let real_crypted_compressor = add_real_encryption real_compressor
             processes = zipWith compressP real_crypted_compressor [1..]
@@ -108,10 +118,10 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
 
         -- Упаковать один солид-блок
         pos_begin <- archiveGetPos archive
-        ; times <- uiStartDeCompression "compression"              -- создать структуру для учёта времени упаковки
-        ;   compress_f                                             -- упаковать данные
-        ; uiFinishDeCompression times `on` block_type==DATA_BLOCK  -- учесть в UI чистое время операции
-        ; uiUpdateProgressIndicator 0                              -- отметить, что прочитанные данные уже обработаны
+        ; times <- uiStartDeCompression "compression"               -- создать структуру для учёта времени упаковки
+        ;   compress_f                                              -- упаковать данные
+        ; uiFinishDeCompression times `on_` block_type==DATA_BLOCK  -- учесть в UI чистое время операции
+        ; uiUpdateProgressIndicator 0                               -- отметить, что прочитанные данные уже обработаны
         pos_end   <- archiveGetPos archive
 
         -- Возвратить в первый процесс информацию о только что созданном блоке
@@ -119,10 +129,12 @@ compress_AND_write_to_archive_PROCESS archive command backdoor pipe = do
         (Directory dir)  <-  receiveP pipe   -- Получим от первого процесса список файлов в блоке
         crc'             <-  val crc >>== finishCRC     -- Вычислим окончательное значение CRC
         origsize'        <-  val origsize
+        write_compressor <-  if just_copy then return compressor
+                                          else getElems final_compressor >>== add_encryption_info >>== compressionDeleteTempCompressors
         putP backdoor (ArchiveBlock {
                            blArchive     = archive
                          , blType        = block_type
-                         , blCompressor  = compressor .$(not just_copy &&& add_encryption_info) .$compressionDeleteTempCompressors
+                         , blCompressor  = write_compressor
                          , blPos         = pos_begin
                          , blOrigSize    = origsize'
                          , blCompSize    = pos_end-pos_begin

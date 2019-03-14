@@ -317,6 +317,7 @@
     Computing estimated time and speed takes into account duration of last stage rather than whole operation
     Unarc crashed on errors instead of displaying error message
     Unarc didn't deleted partially decompressed files
+    TTA: crashed on recompressing WAV files
   Fixed GUI bugs:
     First file in directory was selected after any operation if nothing was selected before
     ArcInfo on empty.arc or non-archive was terminating program
@@ -344,17 +345,127 @@
     Removed hack that reversed column sort indicators due to bug in old GTK versions
     Linux: fixed warnings printed by Archive Open dialog
 
+0.51 (April 28 2009)
 
-  aARC_VERSION = "0.51", aARCHIVE_VERSION = make4byte 0 0 5 1
+
+  Installer\readme.txt: обновить номера версий во всех файлах
+  "0999 xxx" -> проверить что всё переведено
 === To-do list ====================================================================================
+linux: open .tar.gz in single click
 
-  HCAR
 
-  взять whatsnew с вики
+http://www.donationcoder.com/Reviews/Archive/ArchiveTools/index.html
+izarc, alzip, tugzip
+http://www.pkgid.ru/index.php?name=Html_Content&op=page&folder=Freearc&contentsite=chapter_freearc.html
+файл linux-problems
+тестирование x.cmd - файл остаётся открытым (уже исправлено). затем arcinfo, exit - freearc зависает в памяти
+shutdown: продумать работу в режиме файл-менеджера и чекбокс в progress window
+bookmarking, search, archive conversion, secure deletion
+-lc: убрать +5% (вместо этого -lc=80%*RAM если необходимо), вычитать память кеша из [cd]limit
+DoubleClick->Run inside archive (включая обновление архива если файл был изменён)
+ctrl-f4 - сортировка по расширению
+multiple arc*.ini files
+option 'Do not show hidden files and folders' (like in Explorer)
+настройки "доп. расширения архивов FreeArc" и "доп. расширения прочих архивов"
+архивные команды в Explorer меню для неархивов, just for case
+bug: не удаляем tempfiles при cancel/^break
+unix: makefile: добавлять UsePersonalSettings=1 в freearc.ini
+unix: -mrep+tempfile+lzma не может прочесть созданный tempfile
+unix: BeginCompressionThreadPriority
 
-  не закрывать программу по Exit если выполняется архивация
+installer: overwrite arc.ini/groups
+7z.dll
+  encrypted archives: password_size = 1000
+    t encrypted.7z - запрос пароль - Escape => зависание
+  архив 7z внутри arc без сжатия: показывается как архив 7z :D
+  The "open dialog" in FA shows no rar/zip/7z (must use "All files" instead)
+  открывать .arc/.tar/.zip/... внутри архива в самом FreeArc
+  opening tar.gz archive from Window's Explorer does only open the outer .gz layer
+  открывать .tar.gz в один клик - вместо runme запускать freearc !.! (linux: getProgName returns "./freearc")
+  Right-click context menu only offers to decompress the gz, but not the inner tar, too
+  tabi: поддержка генерации исключений, преобразование utf8<->utf16 и кодирование строк в utf8 by default
+  extraction: -ap
+  в конце операции индикатор прогресса должен точно показывать объём исходных/сжатых данных
+  utf8: global_use_utf16_conversion=1, исправить getEnv/mySetEnv
+  multivolume archives: запрос след. тома, ругаться при частичной распаковке последнего файла когда нет больше томов (SubItem error в 7zip)
+  ArcInfo
+  хранить время в .arc в UTCTime вместо local time
+  поддержка bz2 (время извлечённого файла)
+сайт
+  svn -> tracker
+  fa_history
+unarc[.dll]
+  -cfg=, default from unarc.dll directory
+  -w=-dp by default
+  если файлы заняты другим процессом, нужно, чтобы появилось сообщение об ошибке (ну или типа такого: "cannot update files" - или "file coudn't be extracted").
+  tta/mm: BigAlloc
+  создавать каталоги в конце распаковки
+unix
+  http://library.gnome.org/devel/integration-guide/stable/desktop-files.html.en
+  http://standards.freedesktop.org/desktop-entry-spec/latest/index.html
+
+
+freearc-extractor.exe: ask archive at start
+расширения arc и non-arc архивов в Settings?
+
+4x4:b7m:ppmd:c7m
+lzma:959m
+from unzip 6.0: NO_W32TIMES_IZFIX
+кеширование записи при сжатии, чтения при распаковке, между агоритмами, перед/после external compressors
+  +RTS -N2 + 64kb chunks вместо отдельного треда
+решить наконец проблему с Cancel путём использования отдельного потока для ожидания завершения операции
+rep:a8 - 8-слотовая хеш-таблица для увеличения сжатия
+  индексировать 256-байтные блоки; использовать масссив 1-байтных ключей для быстрой первичной проверки хеша
+    (96mb/256*2.5 = 1mb для массива первичной проверки)
+lzma: распаковка с выделением под словарь нескольких буферов (как в rep)
+arc: при вставке tempfile учитывать что rep может использовать маленькие блоки памяти (как это уже сделано в unarc)
+попробовать для исправления arcshellext 32-bit: убрать -DUNICODE, добавить CoInitializeEx
+
+инсталятор
+  sfx linux/nodelete
+  ?выбор языка средствами инсталятора
+fashell
+  openDialog (cmd:"--":params) - расширить чтобы можно было передавать опции ("--add-dialog -mx -- filenames")
+  разделители в начале/конце (для некаскадного меню) и между группами операций
+i18n
+  About window: "About FreeArc", "Credits" and "Close"
+  The file size in main window is displayed as x,xxx,xxx but for european country should be x.xxx.xxx
+  translate the "Gb" and "Mb" and "kb" fields or dropdown entries that are not yet translatable...
+при начале след. операции показывается индикатор прогресса от предыдущей (по крайней мере после Cancel)
+печатать в кавычках "xxx" в логфайл и на экран если есть пробелы внутри
+??after "--" allow filenames starting with "@". use "-@" option to include listfiles anywhere on cmdline
+"поверх всех окон": настройка в Setings/Interface
+"solid blocks": сохранение настроек, сортировка
+"-xdir\" - не сканировать dir вообще
+iss
+  проверка на исчерпание свободного места в write callback...
+  отдельный код ошибки для переполнения диска и обработка его в iss script
+  проверить совместимость с InnoSetup/Unicode при русских именах архивов, файлов в них, каталогов инсталяции
+cvt
+  ввод нового имени для одного архива
+gui-версия не обрабатывает правильно ошибки:
+  a x:\a
+  -mqq
+внешний вид
+  по окончании операции в заголовке и поле Message "SUCESSFULLY TESTED a.arc", "% WARNINGS IN TESTING a.arc", "ERROR IN ..."
+    и заменять Отмена на ОК
+  в GTK нет возможности сделать, чтобы в этом поле текст, который не поместился в поле с логом (внизу FM) по ширине, переносился на новую строчку?
+other
+  Включение/выключение ассоциаций после переноса FreeArc на другую машину: http://forum.ru-board.com/topic.cgi?forum=5&topic=29437&start=1780#4
+  installer.exe -p"/q" will then launch setup.exe /q
+  иконки - хотя бы dir/arc/archives/rest
+  icons
+    SHFILEINFO shFileInfo;
+    SHGetFileInfo(filename, 0, &shFileInfo, sizeof(shFileInfo), SHGFI_ICON);
+    ExtractIcon - file's individual icon
+    http://msdn.microsoft.com/en-us/library/dd183402(VS.85).aspx
   загружать иконки для всех команд из png/ico файлов
+  unix - run-by-extension - /etc/mailcap and xdg-mime
+  сайт - ссылки на http://win-rar.ru/study/ , софтпедию и другие ресурсы упоминающие freearc
+  lzma: разрешить словарь в 1гб
 
+
+ДОБАВИТЬ В 7z.dll ПОДДЕРЖКУ .arc ИЛИ СДЕЛАТЬ unarc.dll С АНАЛОГИЧНЫМ ИНТЕРФЕЙСОМ (и chaining к 7z.dll)!!!!!!!!!!!!!!!!!!!
 
   -ap
     FAR: -apdir1 + dir1/dir2/file in filelist (rar-style?)
@@ -369,7 +480,21 @@
            - никого при -r-
       3. нерекурсивный поиск не-regexp имён - использовать stat
     dir/ -> dir/* (a-la RAR)
-    Не забыть соответственно изменить FileManager (addCmdFiles)
+    Не забыть соответственно изменить FileManager (addCmdFiles, xCmdFiles, dCmdFiles, deleteAct)
+    Остались проблемы: удаление пустых каталогов из архива (TC), копирование пустых каталогов из
+      архива (FAR), копирование в каталоги/из каталогов внутри архива (-ap)
+    arc a a d:\ - дубликаты файлов
+
+    Ещё одно описание
+      В общем, нашел засаду. Если распаковывать так
+      "arc x --noarcext -y -- emptydirs.arc", то все OK.
+      Но вот если делать это из FAR (через MultiArc), то командная строка будет:
+      "arc x --noarcext -y -fn -kb -- emptydirs.arc @C:\Windows\temp\far0000001", то так пустые пустые папки не создаются.
+
+      Причем важно только то что идёт после имени архива
+      "arc x --noarcext -y -fn -kb -- emptydirs.arc 123" - неправильно
+
+      ну а просто "arc x --noarcext -y -fn -kb -- emptydirs.arc" - снова ОК
 
     Отбор и исключение целых каталогов: Stats, Stats/, Stats/*, Stats\*, -xStats...
       копирование пустых каталогов в/из архива; перенос непустых каталогов в архив (сам каталог не удаляется)
@@ -381,13 +506,9 @@
   bugs
     *Last в истории - локализуется после первого же использования
     update GUI docs
-    sfx - поддержка и автоматическое использование метода tempfile
     dict bug: arc a aa cls.zip -mprecomp+6pt -t
       bcj+dict creates corrupted archives
     что будет, если упаковать на CD, т.е. файл лежит на диске на которой нельзя писать, или в папке, где запрешена запись
-    arc a a d:\ - дубликаты файлов
-    остались проблемы: удаление пустых каталогов из архива (TC), копирование пустых каталогов из
-      архива (FAR), копирование в каталоги/из каталогов внутри архива (-ap)
     separate & no files selected
     "arc a a ../file" - не удаляется ".." из имени; аналогично при распаковке
     arc a dir/ - создаёт архив dir/.arc; нужно отсекать имена архивов кончающиеся на :/\ или содержащие :
@@ -396,9 +517,8 @@
     обновление архива, содержащего xxx: если не удалось открыть xxx с диска, то файл из архива исчезнет вообще
     tta: float32 badly compressed (vs wavpack), int32 isn't compressed at all
     +RTS -S - processed by arc.exe itself too :)
-    запрещать все операци, приводящие к созданию невалидного sfx
+    запрещать все операции, приводящие к созданию невалидного sfx
     после "нет такого файла или каталога" (выбор из истории) - неправильное имя в поле path
-    descript.ion for all files in package would be nice to see
   GUI
     использовать "arc:dir" вместо "arc/dir" чтобы не иметь проблем с разделением пути на архив и каталог в нём
     перевод tooltips:
@@ -410,11 +530,10 @@
       вторая строка
       (пустая строка в конце)
     перевод сообщений об ошибках (errormsg) и интернализация cmdline версии
-  GRZip multithreading!
-    ?fixing SyncQueue
-    limiting memory
   -ilog a-la RAR (выключить поддержку Lua)
-  arc.ini: нужна возможность указать non-solid mode для внешнего упаковщика
+  mm/tta/?external: BigAlloc
+  избавиться от storing_PROCESS, переместив "перекладывание" в процедуру чтения в runFuncP
+  descript.ion for all files in package would be nice to see
 
 
 
@@ -422,8 +541,6 @@
        TC: при распаковке FreeArc.exe извлекается также no-url\FreeArc.exe
          arc x a FreeArc.exe  -  rar извлекает только один файл (*.exe извлекает все файлы)
 
-  mm/tta/ppmd/lzp/dict: BigAlloc
-  URL support: dynamic dlls in order to cutoff rep:1g errors
   testmem and correct method before starting single_compress (?? - параллельно работающим тредам
     компрессии может не хватить памяти)
   для полной реализации многопоточности нужно:
@@ -438,6 +555,7 @@
     2. ты начинаешь работать над gui и параллельно я работаю над добавлением поддержки 7z.dll
 
   обновление доки
+    Options --unregister --settings-dialog --add-dialog --extract-dialog
     Filetype detection
         сосредоточено на выявлении $text и $compressed (для -m2..-m4) файлов
         отключается в -m1 и при использовании явного метода сжатия (в общем случае - при отсутствии
@@ -457,7 +575,6 @@
     описание ht4
 
   рус. документация (4gb)
-  англ. документация (future plans)
   linux скриншоты
 
 
@@ -467,18 +584,11 @@
     каталоги в архиве
       refresh - перечитать архив
       closeFMArc перед переходом и перед refresh
-    закрытие диалога прогресса не должно приводить к закрытию программы
-      +terminated -> fail в extract
-      +shutdown проверяет terminated и выдаёт Ctrl-Break
-      +terminated -> fail в compress (завершать все треды распаковки)
-        quasiread each 256kb in dict/rep/delta/lzp
-      progress indicator: max(write, quasiwrite), min(read, quasiread)
+    progress indicator: max(write, quasiwrite), min(read, quasiread)
 
     проблемы
       Please, Bulat, can be PPMonstr's output limited to one row?
       несколько паролей/keyfiles расшифровки
-      "all ok" после каждой команды
-        if you test an archiv, there is no message given back, there should be some kind of "Archive OK" at the end of the test
       использовать при вычислении cmem/dmem parseCmdline или по крайней мере полный код из неё
       при распаковке/тестировании архива без паролей они всё равно запрашиваются в диалоге
       команда "ch" должна применять переупаковку/перешифровку только к файлам, указанным в cmdline
@@ -500,10 +610,10 @@
         -hpxx - включить шифрование
     an additional progressbar for big files, like in Winrar
     progress indicator - обновлять при копировании солид-блоков (archiveCopyData)
-    DoubleClick->Run inside archive
     нет списка дисков на верхнем уровне, нет ".."
-    ctrl-f4 - сортировка по расширению
-    option 'Do not show hidden files and folders' (like in Explorer)
+    Переименование файлов/папок внутри архива
+    Создание папок внутри архива и перемещение туда файлов уже находящихся в нём.
+    рекурсивное удаление каталогов - вероятно, спрашивать пользователя на каждый непустой каталог, причём рекурсивно
     Performance problems
       Оглавление архива: faster removeDups, keepOnlyFirstOn, buildTree
       медленное открытие/закрытие диалога Add (многократное чтение из history/запись в него)
@@ -513,19 +623,16 @@
     выделять или insert'ом, или пробелом (winrar сбрасывает выделение только тех файлов, которые были отмечены мышью)
     tooltips: выводить tooltip не только на метке, но и на относящемуся к ней контролу: combobox, label...
     tooltips в диалоге прогресса с объяснением смысла каждого числа
-    сливать arc.english.txt and locale для того, чтобы выводились англисйские tooltips при отсутствии наших
+    сливать arc.english.txt and locale для того, чтобы выводились английские tooltips при отсутствии наших
     диалог Settings
       "Restore standard profiles" button
       Date format selection
-      Windows: [x] Associate FreeArc with .arc files
       [x] don't keep history
       Import 7-zip lang. file
     Recover, including "Original:"
     возможность сохранения чего-то типа "проекта" как в Nero, т.е. чтобы был список файлов + все настроики
     команды View, Queue/Apply; d&d support
-    freearc a/x --dialog - открыть диалог добавления/распаковки (для Total Commander, например)
     формировать команду внизу диалогов распаковки/сжатия/модификации и выполнять её (так чтобы пользователь мог отредактировать)
-    галочка "Detach operation" во всех диалогах операций, запускающая отдельную копию WinArc для выполнения операции!
     "Detach" FM button and appropriate syntax: "freearc c:\dir file1 file2 file3 /select file1"
     открывать лог-файл в начале работы программы
     диалог распаковки
@@ -538,7 +645,7 @@
     отображение/ред-ние очереди операций в диалоге прогресса
     автоматическое обновление списка файлов каждую секунду/при обновлении каталога
     использовать уже открытый архив для ускорения выполнения операций view/test/extract
-    linux: иной порядок кнопок в диалоге (HButtonBox?)
+    When I delete the selected file in Freearc, then no file is selected and when I press a cursor key Freearc jumps to the first file. It would be better if Freearc selected the next file instead.
     добавление файлов
       compression settings
         dict/mem
@@ -549,26 +656,23 @@
         test archive after operation [0..3]
       place archive to the folder named as: current user, month, weekday, monthday
       include system/hidden files
-    удаление файлов
-      рекурсивное удаление для каталогов (упереть removeDirectoryRecursive)
 
   lzma
     разбить son на две части - сначала выделять макс. доступный блок, затем остаток
-    регулирование размера хеша и sizeReserv
+    регулирование размера sizeReserv
     CLZInWindow - уменьшать sizeReserv до dictSize/8 при BT и dict=81..95mb, 161..191mb, 321mb...
     lzma:32m:ht4 - если файл маленький, то при уменьшении словаря не уменьшать (а лучше даже
                    увеличить) хеш-таблицу: 32m+16m -> 8m+32m (вплоть до 4*dictsize)
-    то что сначала выделяется хеш, а затем 1.25*dict - это было сделано для старых matchfinders,
-      где это обеспечивало выделение от больших блоков к меньшим. переделаю
   Сжатие
     -m3t = dict[:p?] + lzp:32m:32:h18:a + grzip:m3:l, где lzp:a - grzip-friendly модификация алгоритма
         (длины в тексте, а не в конце) с умножением для хешировани
-    grzip: bwt-сортировка из dark
     lzp: p=HTable[k] - не выполнять при c!=LZP_MATCH_FLAG
     lzp: ускорить выч. хэша, пропускать по 4-8 байт когда долго ничего не находится (+tor)
     $bmp/$wav - group solid block by 64kb?
     для решения проблемы -ld1gb - выделять память небольшими блоками (при распаковке в lzma, rep, ppmd, tor)
     tor:5 -> delta+tor:5:t0 ?  видимо, имеет смысл только на быстрых машинах
+    BMP files should be feed to BMF one-by-one (the same for wav). Needs "patching" decompressed file since it loses .bmp format headers
+    rep:a99 in -m5..9 modes?
   Compressor: лучше всего для толстых алгоритмов использовать внешние компрессоры. уже сейчас можно взять compressor.exe и использовать его подобным образом. в будущем же
     compressor будет совместим по формату данных с внутренними алгоритмами так, что к примеру можно будет упаковать внешним lzma со словарём в 1 гиг, а распаковывать внутренним
     понятно, будут 32 и 64-разрядные версии, причём компилироваться они будут ICC, что увеличит скорость на 10-20%
@@ -595,7 +699,6 @@
     знать какой минимум памяти для распаковки нужен полезно, если памяти нужно больше 192мб или
       больше 3/4 физ. озу
     wopen: win95-совместимость?
-    tempfile между слишком толстыми алгоритмами?
   Фичи
     -ver (rar-compatible)
     use fiGroup for sort
@@ -621,7 +724,6 @@
     bytes - выводить сколько действительно обработано, без прибавления 10% на read
     вывод индикатора может сжирать всё время CPU
     Background - уменьшать приоритет, минимизировать в трей
-    тестирование архива с RR - вылет! "ERROR: undefined CUI::ref_ui_state"
     checkbox "Close on exit"; "Remaining time", "Estimated endtime"
     объём озу, используемый текущим алгоритмом
     учитывать, что cbytes может отставать от b (индейская хитрость!)
@@ -650,7 +752,6 @@
     unc names
     "arc a a c:* -ep3"; "arc a a -m1 \* -ep3"
   unixify long option names (keep old names for compatibility?)
-  External: удаление временных файлов при ^Break
   dict: уменьшить время init (1/15 sec) для небольших файлов?
 
 
@@ -667,13 +768,9 @@
 
 0.41a:
   Encryption: ch - реализовать дешифрование+шифрование при копировании блока в ArcCreate
-  скорость чтения при тестировании архива - всего 10мб/с (see Stats/read10mbs) 0.35->0.36, буферизация?
   -m2: 5% запись на диск, 3% ускорение CRC, 10% kadach MF, 7% huffman (-0.3% compression), 10% use repdist for MM detection
 
 0.41a:
-  External:
-    создавать свои файлы в уникальных подкаталогах каталога TEMP
-    проверка кода возврата of external compressors?
   Encryption:
     -p- - дешифровать (-p-- - оставить как есть) ?
     -p? -hp? - два отд. пароля?
@@ -706,13 +803,6 @@
     продвигаться при работе препроцессоров dict/lzp и многошаговых алгоритмов (dict, grzip)
       10%/n для каждого компрессора в списке кроме последнего
     не учитывать каталоги/пустые файлы, поскольку они сжимаются мгновенно
-    quasiwrite4rep: -50kb read, 250kb quasiwrite
-      read -50kb
-      write 250kb
-      read 0
-      write -250kb
-      write ....
-      read 50kb - before the next read operation
   Использовать словарь до 48/96 мб для -m3/-m4, в зависимости от объёма свободной памяти
      -lc = max(memory required for decompression, FreeMem())
      :mc - увеличивать/уменьшать автоматически при увеличении/ограничении памяти
@@ -757,9 +847,7 @@
     автоперебор параметров сжатия (в частности, ppmd order)
     Значительно можно улучшить степень сжатия, если в архиватор заложить механизм распознавания типов файлов.
       Бинарник - значит жмём так-то, веб-страница - значит так, лог - меняем параметры и т.д.
-  использовать ICC для компиляции CompressionLib в DLL (http://www.haskell.org/haskellwiki/FFI_cook_book)
   ускорить dict, lzp, добавить свои MF в lzma; dict для бинарных файлов?
-  one-file preprocessors: exe, precomp, mm, jpg
   async -m1 mode
   Multi-volume: при выходе записываемых данных за границы размера тома
     1. создать описание солид-блока с имеющимся списком файлов
@@ -779,9 +867,7 @@
 
 
 Основные улучшения в 0.43
-  -u=new.arc, -mt for -m2/-m3
   mm: YFrFb, YC0Cg and so on
-  *.zip и в $compressed, и в $precomp ?  "$precomp $compressed\n*.zip..."
   сбор статистики о файлах с незнакомыми расширениями для выбора алгоритма сжатия.
     mmdet для $wav/$bmp
   mmdet: порверять избыточность rle+ari модели вместо чистой order-0?
@@ -799,8 +885,6 @@
   Rename[Extracted/Existing] / AutoRename[Extracted/Existing][Unicode/Latin1] / Help
   Выводить arccomment при ВСЕХ операциях (включая 'r' и 'cw')
   сделать опцию "расширенные маски" для использования [] в масках файлов
-  compressionLimitMemoryUsage и calcMem содержат особые случаи для DICT и прочих алгоритмов,
-    что может быть неверно при изменениях в них и при расчёте памяти для распаковки (compressionLimitMemoryUsage freearcGetDecompressionMem)
 Обработка ошибок
   все операции с файлами должны содержать "catch registerError"
   правильные коды возврата в rep/dict/lzp/...

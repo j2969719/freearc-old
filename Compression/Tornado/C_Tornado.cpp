@@ -48,7 +48,7 @@ void TORNADO_METHOD::SetDictionary (MemSize dict)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_TORNADO)
-void TORNADO_METHOD::ShowCompressionMethod (char *buf)
+void TORNADO_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     struct PackMethod defaults = std_Tornado_method[m.number];  char NumStr[100], BufferStr[100], HashSizeStr[100], TempHashSizeStr[100], RowStr[100], EncStr[100], ParserStr[100], StepStr[100], TableStr[100], TempAuxHashSizeStr[100], AuxHashSizeStr[100], AuxRowStr[100];
     showMem (m.buffer,       BufferStr);

@@ -453,13 +453,14 @@ int phase1 (byte *buf, unsigned bufsize)
 {
     // Максимально допустимое количество слов - 1/32 от объёма входных данных
     unsigned max_words = roundup_to_power_of (mymax(bufsize/32,32768), 2);
-    FirstWord = (Word*) malloc (max_words * sizeof (Word));
+    FirstWord = (Word*) BigAlloc (max_words * sizeof (Word));
     LastWord = FirstWord+max_words;
     NextWord = FirstWord;
 
     // Для уменьшения числа коллизий объём хеша - вдвое больше максимального количества слов
     unsigned scanhash_size = max_words*2, mask = scanhash_size-1;
-    scan_hash = (stats*) calloc (scanhash_size, sizeof (stats));
+    scan_hash = (stats*) BigAlloc (scanhash_size * sizeof (stats));
+    memset (scan_hash, 0, scanhash_size * sizeof (stats));
     // Не дадим словам использовать нулевой элемент хеша, поскольку это сделает невозможным поиск их детей
     // То же самое применимо к элементам хеша, чей индекс кратен 2^16 (при 16 битах, используемых для хранения значения хеш-функции в scan_hash)
     for (int i=0; i<scanhash_size; i+= 1<<(sizeof(hash0_t)*8)) {
@@ -647,12 +648,12 @@ int phase2 (unsigned bufsize, int MinLargeCnt, int MinMediumCnt, int MinSmallCnt
             debug (verbose>2 && printf( "BadWord '%.*s' %d (%d)\n", len, ptr, cnt, cnt0));
         }
     }
-    FreeAndNil (scan_hash);  // Скрипач больше не нужен :)
+    BigFreeAndNil (scan_hash);  // Скрипач больше не нужен :)
 
     // Перенесём выжившие слова в начало массива FirstWord и уменьшим его, чтобы оставить только их
     int good_words = LastWord-q;
     memmove (FirstWord, q, good_words*sizeof(Word));  LastWord = FirstWord + good_words;
-    FirstWord = (Word*) realloc (FirstWord, good_words*sizeof(Word));
+    //FirstWord = (Word*) realloc (FirstWord, good_words*sizeof(Word));  -- impossible due to use of BigAlloc
     debug (verbose>0 && printf( " Good words: %d                ", good_words) );
 
     return good_words>0? 0 : -1;  // All right if there is at least one good word
@@ -825,7 +826,7 @@ found:
     {
     // Выделить под упакованные данные размер входного файла
     // плюс 200 кб - должно хватить при любом раскладе :)
-    *outbuf = (byte*) malloc (bufsize+200000);
+    *outbuf = (byte*) BigAlloc (bufsize+200000);
     byte *outptr = *outbuf;        // текущий указатель в выходном буфере
 
     // Вывести словарь в выходной поток в 5 приёмов:
@@ -955,7 +956,7 @@ int phase6 ()
     unsigned unique_bytes = 0, words_len = 0;
     for (Word *p = FirstWord; p<LastWord; p++) {
         unique_bytes +=  p->len - (p==FirstWord? 0 : common_prefix_length (p, p-1));
-        if (p->len>DIRECT_CHARS)  words_len += p->len;
+        if (p->len > DIRECT_CHARS)  words_len += p->len;
     }
     hashsize = roundup_to_power_of (unique_bytes*4, 2);
     hashmask = hashsize-1;
@@ -1025,7 +1026,7 @@ inline CodeWord *FindWord (byte *p0, byte *endbuf)
     // содержат только 7 пробелов, то hash0 будет хешем от 7 пробелов и по этому адресу в code_words
     // будет 5-пробельное слово - хошь-верь, хошь-нет)
     byte *p = p0;
-    unsigned hash0 = hashsize + *p++;
+    unsigned hash0 = hashsize + *p++;   if (p==endbuf)  return NULL;
     do {
         // Вычислим hash для слова [p0,p)
         byte c = *p++;
@@ -1111,7 +1112,7 @@ int phase7 (byte *buf, unsigned bufsize, byte *outbuf, unsigned *outsize)
     for (int n=13; n>=0; --n)   debug (verbose>1 && printf( " %d", used_hash2[n]) );
 #endif
 
-    FreeAndNil (FirstWord);
+    BigFreeAndNil (FirstWord);
     FreeAndNil (hashbits);
     FreeAndNil (codewords_hash);
     FreeAndNil (words_text);
@@ -1125,12 +1126,12 @@ int phase7 (byte *buf, unsigned bufsize, byte *outbuf, unsigned *outsize)
 // Вызвать заданную функцию и, если она возвратила код ошибки, - выйти из DictEncode(), освободив всю память
 #define check(call)  { int code = call;                   \
                        if (code) {                        \
-                           FreeAndNil (scan_hash);        \
-                           FreeAndNil (FirstWord);        \
+                           BigFreeAndNil (FirstWord);     \
+                           BigFreeAndNil (scan_hash);     \
                            FreeAndNil (hashbits);         \
                            FreeAndNil (codewords_hash);   \
                            FreeAndNil (words_text);       \
-                           FreeAndNil (*outbuf);          \
+                           BigFreeAndNil (*outbuf);       \
                            return code;                   \
                        }                                  \
                      }                                    \
@@ -1155,7 +1156,7 @@ int DictEncode (byte *buf, unsigned bufsize, byte **outbuf, unsigned *outsize, i
     check (phase7 (buf, bufsize, *outbuf+dictlen, &datalen));
     // Возвратить размер и адрес выходного буфера
     *outsize = dictlen + datalen;
-    *outbuf  = (byte*) realloc (*outbuf, *outsize);
+    //*outbuf  = (byte*) realloc (*outbuf, *outsize);  -- impossible due to use of BigAlloc
     return 0;  // All right
 }
 
@@ -1176,7 +1177,7 @@ dict[UCHAR_MAX+1];
 #define put_byte(c)      (*outptr++ = (c))
 #define put_word(p,len)  (memcpy (outptr, (p), (len)), outptr += (len))
 
-// Распаковать входные данные buf[bufsize] в outbuf и возвратить размер распакованных данных
+// Распаковать входные данные buf[bufsize] в outbuf и возвратить размер распакованных данных в *outsize
 int DictDecode (byte *buf, unsigned bufsize, byte *outbuf, unsigned *outsize)
 {
     int retcode = 0;
@@ -1226,7 +1227,7 @@ int DictDecode (byte *buf, unsigned bufsize, byte *outbuf, unsigned *outsize)
                 dict2(i,j).ptr = wordptr;
                 // Скопируем начало слова из предыдущего
                 for( int k=0; k<dict2(i,j).len; k++ ) {
-                    if (prevptr==NULL)  {retcode = -1; goto done;}  // Ошибка во входных данных - копирование данных из предыдущего слова, которого нет :)
+                    if (prevptr==NULL)  {retcode = FREEARC_ERRCODE_BAD_COMPRESSED_DATA; goto done;}  // Ошибка во входных данных - копирование данных из предыдущего слова, которого нет :)
                     *wordptr++ = *prevptr++;
                 }
                 // И прочитаем остаток слова из входного потока

@@ -1,6 +1,6 @@
 include common.mak
 
-ALL: $(TEMPDIR)/Environment.o $(TEMPDIR)/GuiEnvironment.o $(TEMPDIR)/URL.o
+ALL: $(TEMPDIR)/Environment.o $(TEMPDIR)/GuiEnvironment.o $(TEMPDIR)/URL.o $(TEMPDIR)/Client7z.o
 
 CODE_FLAGS = -fno-exceptions -fno-rtti -Wall \
                 -Wno-unknown-pragmas -Wno-sign-compare -Wno-conversion
@@ -18,6 +18,9 @@ $(TEMPDIR)/GuiEnvironment.o:  GuiEnvironment.cpp Environment.h Compression/Commo
 
 $(TEMPDIR)/URL.o:  URL.cpp URL.h Compression/Common.h makefile
 	$(GCC) -c $(CFLAGS) -o $*.o $<
+
+$(TEMPDIR)/Client7z.o:  Client7z.cpp makefile
+	$(GCC) -c $(CFLAGS) -o $*.o -w -I. -I7zip/CPP -I7zip/CPP/include_windows -I7zip/CPP/myWindows -ICompression/_TABI -fexceptions $<
 
 clean:
 	rm -rf $(TEMPDIR)-unarc/*.o

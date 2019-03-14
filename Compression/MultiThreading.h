@@ -1,17 +1,5 @@
-#include "LZMA/Windows/Thread.h"
-#include "LZMA/Windows/Synchronization.h"
-
-using namespace NWindows;
-using namespace NWindows::NSynchronization;
-
-// Shorter names
-typedef CCriticalSection     Mutex;
-typedef CCriticalSectionLock Lock;
-typedef CAutoResetEvent      Event;
-typedef CManualResetEvent    ManualEvent;
-typedef CSemaphore           Semaphore;
-#define Signal Set
-//#define Wait   Lock
+#include "LZMA2/MultiThreading/Thread.h"
+#include "LZMA2/MultiThreading/Synchronization.h"
 
 // *************************************************************************************************
 // *** Queue with thread-safe Put/Get operations ***************************************************
@@ -40,7 +28,7 @@ public:
         Close();
         head = tail = 0;
         size = max_elements+1;   // +1 simplifies distinguishing between full and empty queues
-        a = (T*) malloc(size * sizeof(T));
+        a = (T*) malloc_msg(size * sizeof(T));
     }
 
     // Add object to the queue
@@ -70,7 +58,7 @@ public:
                 }
             }
             // Sleep until new object will be added to the queue
-            ObjectAdded.Lock();
+            ObjectAdded.Wait();
         }
     }
 };
@@ -116,10 +104,10 @@ struct WorkerThread
     {
         for(;;)
         {
-            StartOperation.Lock();                    // wait for data to process
+            StartOperation.Wait();                    // wait for data to process
             ////int InSize = job->InSize;  - the same insize should be inside process()
             if (InSize <= 0)  break;                  // signal to finish thread execution and release resources
-            task->LimitThreads.Lock();                // wait for compression slot
+            task->LimitThreads.Wait();                // wait for compression slot
             task->SetErrCode (OutSize = process());   // process data and save errcode/outsize
             task->LimitThreads.Release();             // release compression slot
             OperationFinished.Signal();               // signal to Writer thread
@@ -145,8 +133,8 @@ struct MTCompressor : BaseTask
     virtual ~MTCompressor() { WriterJobs.Close(); FreeJobs.Close(); };
 };
 
-static DWORD WINAPI RunWorkerThread (void *param)  {((WorkerThread*)               param) -> run();          return 0;}
-static DWORD WINAPI RunWriterThread (void *param)  {((MTCompressor<WorkerThread>*) param) -> WriterThread(); return 0;}
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE RunWorkerThread (void *param)  {((WorkerThread*)               param) -> run();          return 0;}
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE RunWriterThread (void *param)  {((MTCompressor<WorkerThread>*) param) -> WriterThread(); return 0;}
 
 template <class Job>
 int MTCompressor<Job>::run()
@@ -155,12 +143,12 @@ int MTCompressor<Job>::run()
     CreateJobs();
     if (errcode == 0)
     {
-        CThread t;  t.Create(RunWriterThread, this);
+        Thread t;  t.Create(RunWriterThread, this);
         // Perform (de)compression cycle
         SetErrCode(main_cycle());
         // Wait for Writer thread to finish
         WriterJobs.Put(NULL);
-        Finished.Lock();
+        Finished.Wait();
     }
     WaitJobsFinished();
     LimitThreads.Close();
@@ -179,7 +167,7 @@ void MTCompressor<Job>::WriterThread()
         if (job==NULL  ||  job->InSize <= 0)
             break;
         // Wait until (de)compression will be finished
-        job->OperationFinished.Lock();
+        job->OperationFinished.Wait();
         // Записать сжатый блок и выйти, если при записи произошла ошибка/больше данных не нужно
         if (SetErrCode(callback("write", job->OutBuf, job->OutSize, auxdata)) < 0)
             break;
@@ -199,7 +187,7 @@ void MTCompressor<Job>::WaitJobsFinished()
     {
         jobs[i].InSize = 0;
         jobs[i].StartOperation.Signal();
-        jobs[i].Finished.Lock();
+        jobs[i].Finished.Wait();
     }
 }
 
@@ -224,7 +212,7 @@ void MTCompressor<Job>::CreateJobs ()
         if (job->init() >= 0)
         {
             threads++;
-            CThread t;  t.Create (RunWorkerThread, job);
+            Thread t;  t.Create (RunWorkerThread, job);
             FreeJobs.Put(job);
         }
         else

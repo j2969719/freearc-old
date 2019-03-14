@@ -5,7 +5,7 @@
 module ArcvProcessRead where
 
 import Prelude hiding (catch)
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.IORef
 import Foreign.Ptr
@@ -22,6 +22,7 @@ import Compression
 import Options
 import UI
 import ArhiveStructure
+import Arhive7zLib
 import ArhiveDirectory
 import ArhiveFileList
 import ArcvProcessExtract
@@ -40,6 +41,7 @@ data Instruction
   |   CopySolidBlock [CompressedFile]         --   Копирование солид-блока целиком из существующего архива
   |   DataEnd                                 --   Конец блока архива
   |   Directory [FileWithCRC]                 --   Запрос на получение служебных данных о последнем созданном блоке архива
+  |   FileCrc CRC                             --   CRC файла, переданного при распаковке в тред записи на диск
   | TheEnd                                    -- Создание архива завершено
 
 -- |Предикаты для использования в циклах: выполнять до конца блока архива, выполнять до конца архива
@@ -56,14 +58,12 @@ notTheEnd  _       = True
 create_archive_structure_AND_read_files_PROCESS command archive oldarc files processDir arcComment writeRecoveryBlocks results backdoor pipe = do
   initPos <- archiveGetPos archive
   -- При возникновении ошибки установим флаг для прерывания работы c_compress()
-  handleCtrlBreak "operationTerminated =: True" (operationTerminated =: True) $ do
+  -- handleCtrlBreak "operationTerminated =: True" (operationTerminated =: True) $ do
   -- Создадим процесс для распаковки файлов из входных архивов и гарантируем его корректное завершение
-  bracket (runAsyncP$ decompress_PROCESS command doNothing)
-          ( \decompress_pipe -> do sendP decompress_pipe Nothing; joinP decompress_pipe)
-          $ \decompress_pipe -> do
+  bracketedRunAsyncP (decompress_PROCESS command doNothing) Nothing $ \decompress_pipe -> do
   -- Создадим кеш для упреждающего чтения архивируемых файлов
   withPool $ \pool -> do
-  bufOps <- makeFileCache (opt_cache command) pool pipe
+  bufOps <- makeFileCache (opt_compression_cache command) pool pipe
   -- Параметры для writeControlBlock
   let params = (command,bufOps,pipe,backdoor)
 
@@ -123,8 +123,7 @@ createSolidBlock command processDir bufOps pipe decompress_pipe (orig_compressor
       -- True, если это целый солид-блок из входного архива, который можно скопировать без изменений
       copy_solid_block = not(opt_recompress command)  &&  isWholeSolidBlock files
   -- Ограничить компрессор объёмом свободной памяти и значением -lc
-  real_compressor <- limit_compressor command compressor
-  opt_testMalloc command &&& testMalloc
+  real_compressor <- limit_compression command compressor
 
   -- Сжать солид-блок данных и отослать в следующий процесс список помещённых в него файлов
   unless (null files) $ do
@@ -195,7 +194,7 @@ read_file _ pipe (receiveBuf, sendBuf) decompress_pipe compressed_file = do
   crc  <-  ref aINIT_CRC                       -- Инициализируем значение CRC
   -- Операция "записи" распакованных данных путём копирования их в собственные буфера
   -- и отсылки этих буферов на последующую обработку
-  let writer inbuf 0 = send_backP decompress_pipe ()  -- сообщим распаковщику, что теперь буфер свободен
+  let writer inbuf 0 = return ()
       writer inbuf insize = do
         (buf, size) <- receiveBuf              -- получим свободный буфер из очереди буферов
         let len  = min insize size             -- определим сколько данных мы можем обработать
@@ -218,10 +217,9 @@ read_file _ pipe (receiveBuf, sendBuf) decompress_pipe compressed_file = do
 
 -- |Создать кеш для упреждающего чтения и возвратить процедуры receiveBuf и sendBuf
 -- для получения свободного буфера из кеша и освобождения использованного буфера, соответственно
-makeFileCache cache_size pool pipe = do
-  -- Размер буферов, на которые будет разбит весь кеш
-  let bufsize | cache_size>=aLARGE_BUFFER_SIZE*16  =  aLARGE_BUFFER_SIZE
-              | otherwise                          =  aBUFFER_SIZE
+makeFileCache orig_cache_size pool pipe = do
+  let bufsize     =  aIO_BUFFER_SIZE                     -- Размер буферов, на которые будет разбит весь кеш
+      cache_size  =  orig_cache_size `atLeast` bufsize   -- Кеш должен включать как минимум один буфер
   -- Выделить память под кеш и натравить memoryAllocator на выделенный блок памяти
   heap                     <-  pooledMallocBytes pool cache_size
   (getBlock, shrinkBlock)  <-  memoryAllocator   heap cache_size bufsize 256 (receive_backP pipe)

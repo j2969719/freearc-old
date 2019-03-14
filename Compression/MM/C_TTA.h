@@ -20,6 +20,13 @@ public:
 
   // Конструктор, присваивающий параметрам метода сжатия значения по умолчанию
   TTA_METHOD();
+  // Универсальный метод: возвращаем различные простые характеристики метода сжатия
+  virtual int doit (char *what, int param, void *data, CALLBACK_FUNC *callback)
+  {
+      // Запретить солид-сжатие, если кодируются 2+ байтовые значения или пропускаются байты в начале каждого файла
+      if (strequ (what,"nosolid?"))   return word_size!=8 || offset!=0;
+      else return COMPRESSION_METHOD::doit (what, param, data, callback);
+  }
 
   // Функции распаковки и упаковки
   virtual int decompress (CALLBACK_FUNC *callback, void *auxdata);
@@ -27,11 +34,10 @@ public:
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_TTA)
-  virtual void ShowCompressionMethod (char *buf);
+  virtual void ShowCompressionMethod (char *buf, bool purify);
 
   // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
   virtual MemSize GetCompressionMem     (void)         {return 2*mb;}
-  virtual MemSize GetDecompressionMem   (void)         {return 1*mb;}
   virtual MemSize GetDictionary         (void)         {return 0;}
   virtual MemSize GetBlockSize          (void)         {return 0;}
   virtual void    SetCompressionMem     (MemSize mem)  {}
@@ -39,6 +45,7 @@ public:
   virtual void    SetDictionary         (MemSize dict) {}
   virtual void    SetBlockSize          (MemSize bs)   {}
 #endif
+  virtual MemSize GetDecompressionMem   (void)         {return 1*mb;}
 };
 
 // Разборщик строки метода сжатия TTA

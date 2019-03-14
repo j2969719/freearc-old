@@ -41,4 +41,31 @@ void _STDCALL DecodeFile(_PPMD_FILE* DecodedFile,_PPMD_FILE* EncodedFile,
 /*  imported function                                                       */
 void _STDCALL  PrintInfo(_PPMD_FILE* DecodedFile,_PPMD_FILE* EncodedFile);
 
+
+/* _USE_THREAD_KEYWORD macro must be defined at compilation for creation    *
+ * of multithreading applications. Some compilers generate correct code     *
+ * with the use of standard '__thread' keyword (GNU C), some others use it  *
+ * in non-standard way (BorlandC) and some use __declspec(thread) keyword   *
+ * (IntelC, VisualC).                                                       */
+//#define _USE_THREAD_KEYWORD
+
+#undef _THREAD
+#undef _THREAD1
+
+#if defined(_USE_THREAD_KEYWORD)
+#if defined(_MSC_VER)
+#define _THREAD
+#define _THREAD1 __declspec(thread)
+#elif defined(__GNUC__)
+#define _THREAD
+#define _THREAD1 __thread
+#else /* __BORLANDC__ */
+#define _THREAD __thread
+#define _THREAD1
+#endif /* defined(_MSC_VER) */
+#else
+#define _THREAD
+#define _THREAD1
+#endif /* defined(_USE_THREAD_KEYWORD) */
+
 #endif /* !defined(_PPMD_H_) */

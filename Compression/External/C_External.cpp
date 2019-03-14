@@ -4,90 +4,80 @@ extern "C" {
 #include "C_External.h"
 }
 
-
-int external_program (bool IsCompressing, CALLBACK_FUNC *callback, void *auxdata, char *infile, char *outfile, char *cmd, char *name, int MinCompression, double *addtime)
+int external_program (bool IsCompressing, CALLBACK_FUNC *callback, void *auxdata, char *infile_basename, char *outfile_basename, char *cmd, char *method, int MinCompression, double *addtime)
 {
-    BYTE* Buf = (BYTE*) BigAlloc(LARGE_BUFFER_SIZE);  // буфер, используемый для чтения/записи данных
-    if (!Buf)  {return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;}
-    int x;                                            // код, возвращённый последней операцией чтения/записи
-    int ExitCode = 0;                                 // код возврата внешней программы
-    bool useHeader = !strequ(name,"tempfile");        // TRUE, если в начало сжатого потока записывается 0/1 - данные несжаты/сжаты
+    MYDIR t;  if (!t.create_tempdir())  return FREEARC_ERRCODE_WRITE;
+    MYFILE infile (t, infile_basename);   infile.mark_as_temporary();
+    MYFILE outfile(t, outfile_basename);  outfile.mark_as_temporary();
+
+    BYTE* Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);    // буфер, используемый для чтения/записи данных
+    int x;                                                // код, возвращённый последней операцией чтения/записи
+    int ExitCode = 0;                                     // код возврата внешней программы
+    bool useHeader = !strequ(method,"tempfile");          // TRUE, если в начало сжатого потока записывается 0/1 - данные несжаты/сжаты
 
     // Перепишем входные данные во временный файл
-    remove (infile);
-    FILE *f = NULL;
+    infile.remove();
     uint64 bytes = 0;
     BYTE runCmd = 1;
     if (!IsCompressing && useHeader)  checked_read (&runCmd, 1);
     while ( (x = callback ("read", Buf, LARGE_BUFFER_SIZE, auxdata)) > 0 )
     {
-        if (f==NULL)  {f = fopen (infile, "wb");  // Не открываем файл пока не прочтём хоть сколько-нибудь данных (для решения проблем с перепаковкой солид-блоков)
-        	       if (!f)  {x=FREEARC_ERRCODE_IO; break;}
-                       registerTemporaryFile (infile,f);}
-        if (runCmd!=0 && runCmd!=1) {            // Для совместимости со старыми версиями FreeArc, которые не добавляли 1 перед сжатыми данными (убрать из FreeArc 0.80!)
+        if (!infile.isopen())  {// Не открываем файл пока не прочтём хоть сколько-нибудь данных (для решения проблем с перепаковкой солид-блоков)
+            if (!infile.tryOpen(WRITE_MODE))  {x=FREEARC_ERRCODE_WRITE; break;}
+        }
+        if (runCmd!=0 && runCmd!=1) {            // Для совместимости со старыми версиями FreeArc, которые не добавляли 1 перед сжатыми данными (убрать из FreeArc 1.0!)
             outfile = "data7777";
             bytes += 1;
-            if (file_write(f,&runCmd,1) != 1)   {x=FREEARC_ERRCODE_IO; break;}
+            if (write(infile.handle,&runCmd,1) != 1)   {x=FREEARC_ERRCODE_WRITE; break;}
             runCmd = 1;
         }
         bytes += x;
-        if (file_write(f,Buf,x) != x)           {x=FREEARC_ERRCODE_IO; break;}
+        if (write(infile.handle,Buf,x) != x)           {x=FREEARC_ERRCODE_WRITE; break;}
     }
-    BigFree(Buf);  Buf = NULL;
-    unregisterTemporaryFile (infile);
-    fclose (f);    f = NULL;
-    if (x)  {remove (infile); return x;}   // Если при чтении/записи произошла ошибка - выходим
+    FreeAndNil(Buf);
+    infile.close();
+    if (x)  return x;   // Если при чтении/записи произошла ошибка - выходим
 
     // Если cmd пусто - диск используется просто для буферизации данных перед дальнейшим сжатием.
     // Если runCmd==0 - данные были скопированы без сжатия
-    remove (outfile);
-    registerTemporaryFile (infile);
-    registerTemporaryFile (outfile);
+    outfile.remove();
     if (*cmd && runCmd) {
     	char temp[30];
         printf ("\n%s %s bytes with %s\n", IsCompressing? "Compressing":"Unpacking", show3(bytes,temp), cmd);
+        MYFILE _tcmd(cmd); // utf8->utf16 conversion
         double time0 = GetGlobalTime();
-        ExitCode = system (cmd);
+        ExitCode = RunCommand (_tcmd.filename, t.filename, TRUE);
         printf ("\nErrorlevel=%d\n", ExitCode);
         if (addtime)  *addtime += GetGlobalTime() - time0;
     } else {
-        rename (infile, outfile);
+        infile.rename (outfile);
     }
 
     // Откроем выходной файл, если команда завершилась успешно и его можно открыть
-    if(ExitCode==0)    f = fopen (outfile, "rb" );
-    if (f) {
-        registerTemporaryFile (outfile,f);
-        unregisterTemporaryFile (infile);
-        remove (infile);
+    if(ExitCode==0)    outfile.tryOpen (READ_MODE);
+    if (outfile.isopen()) {
+        infile.remove();
         BYTE compressed[1] = {1};
         if (IsCompressing && useHeader)     checked_write(compressed,1);
     } else {
-        unregisterTemporaryFile (outfile);
-        unregisterTemporaryFile (infile);
-        if (IsCompressing && !useHeader)    {remove (infile); return FREEARC_ERRCODE_GENERAL;}
-        remove (outfile);
-        if (!IsCompressing)                 {remove (infile); return FREEARC_ERRCODE_INVALID_COMPRESSOR;}
-        rename (infile, outfile);
-        f = fopen (outfile, "rb" );
-        if (!f)                             {remove (infile); remove (outfile); return FREEARC_ERRCODE_IO;}
-        registerTemporaryFile (outfile,f);
+        if (IsCompressing && !useHeader)    return FREEARC_ERRCODE_GENERAL;
+        outfile.remove();
+        if (!IsCompressing)                 return FREEARC_ERRCODE_INVALID_COMPRESSOR;
+        infile.rename (outfile);
+        if (!outfile.tryOpen (READ_MODE))   return FREEARC_ERRCODE_READ;
         BYTE uncompressed[1] = {0};
         if (IsCompressing)                  checked_write(uncompressed,1);
     }
 
     // Прочитаем выходные данные из файла
-    QUASIWRITE (get_flen(f));
-    Buf = (BYTE*) BigAlloc(LARGE_BUFFER_SIZE);
-    while ((x = file_read (f, Buf, LARGE_BUFFER_SIZE)) > 0)
+    QUASIWRITE (outfile.size());
+    Buf = (BYTE*) malloc_msg(LARGE_BUFFER_SIZE);
+    while ((x = read (outfile.handle, Buf, LARGE_BUFFER_SIZE)) > 0)
     {
         checked_write (Buf, x);
     }
 finished:
-    unregisterTemporaryFile (outfile);
-    fclose (f);
-    remove (outfile);
-    BigFree(Buf);
+    FreeAndNil(Buf);
     return x;         // 0, если всё в порядке, и код ошибки иначе
 }
 
@@ -177,7 +167,7 @@ int EXTERNAL_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_EXTERNAL)
-void EXTERNAL_METHOD::ShowCompressionMethod (char *buf)
+void EXTERNAL_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     if (strequ (name, "pmm")) {
         char MemStr[100];
@@ -338,6 +328,7 @@ int AddExternalCompressor (char *params)
         version[i].packcmd        = "";
         version[i].unpackcmd      = "";
         version[i].defaultopt     = "";
+        version[i].solid          = 1;
     }
 
 
@@ -376,6 +367,7 @@ int AddExternalCompressor (char *params)
             else if (strequ (left, "datafile"))    version[i].datafile    = subst (strdup_msg(right), "{compressor}", version[i].name);
             else if (strequ (left, "packedfile"))  version[i].packedfile  = subst (strdup_msg(right), "{compressor}", version[i].name);
             else if (strequ (left, "default"))     version[i].defaultopt  = subst (strdup_msg(right), "{compressor}", version[i].name);
+            else if (strequ (left, "solid"))       version[i].solid       = parseInt (right, &error);
             else                                   error=1;
 
             if (error)  return 0;

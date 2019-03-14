@@ -31,7 +31,7 @@ int tor_compress   (PackMethod m, CALLBACK_FUNC *callback, void *auxdata);
 int tor_decompress (CALLBACK_FUNC *callback, void *auxdata);
 }
 
-enum { STORING=0, BYTECODER=1, BITCODER=2, HUFCODER=3, ARICODER=4 };
+enum { STORING=0, BYTECODER=1, BITCODER=2, HUFCODER=3, ARICODER=4, ROLZ_HUFCODER=13 };
 enum { GREEDY=1, LAZY=2 };
 
 // Preconfigured compression modes
@@ -61,11 +61,16 @@ const int table_dist=256*1024, table_shift=128;
 // Also minimum amount of allocated space after end of buf (this allows to use things like p[11] without additional checks)
 #define LOOKAHEAD 256
 
-// Output buffer size
+// Output buffer size for compressor
 uint tornado_compressor_outbuf_size (uint buffer, int bytes_to_compress = -1)
 {return bytes_to_compress!=-1? bytes_to_compress+(bytes_to_compress/8)+512 :
         compress_all_at_once?  buffer+(buffer/8)+512 :
-                               HUGE_BUFFER_SIZE;}
+                               mymin (buffer+512, BUFFER_SIZE);}
+
+// Output buffer size for decompressor
+uint tornado_decompressor_outbuf_size (uint buffer)
+{return compress_all_at_once?  buffer+(buffer/8)+512 :
+                               mymax (buffer, LARGE_BUFFER_SIZE);}
 
 
 #ifndef FREEARC_DECOMPRESS_ONLY
@@ -188,6 +193,7 @@ int tor_compress_chunk (PackMethod m, CALLBACK_FUNC *callback, void *auxdata, by
         UINT len = mf.find_matchlen (p, matchend, 0);
         BYTE *q  = mf.get_matchptr();
         // Encode either match or literal
+        coder.set_context(p[-1]);
         if (!coder.encode (len, p, q, mf.min_length())) {      // literal encoded
             print_literal (p-buf+offset, *p); p++;
         } else {                                               // match encoded
@@ -210,7 +216,6 @@ finished:
     coder.finish();
     return coder.error();
 }
-
 
 // tor_compress template parameterized by MatchFinder and Coder
 template <class MatchFinder, class Coder>
@@ -262,6 +267,209 @@ int tor_compress0 (PackMethod m, CALLBACK_FUNC *callback, void *auxdata)
 }
 
 
+#ifdef ROLZ_ONLY
+// попробовать:
+// len - кодирование по слотам
+// несколько тредов match + один тред encode
+// -учитывать order0 статистику (то есть добавл€ть в каждую huftable глобальную стат-ку с весом скажем 1/128.
+//    дл€ этого вести глою счЄтчики и копировать их в локальную таблицу при каждом пересчЄте
+//    тогда разница глоб. счЄтчиков и их локальной копии даст счЄтчики дл€ последнего блока)
+
+#include "../MultiThreading.h"
+#include "../MultiThreading.cpp"
+
+#define BUF_SIZE (16*mb)
+
+const int ROLZ_EOF_CODE=256;  // code used to indicate EOF (the same as match with length 0)
+const int MATCH_SIZE=64;
+const int ENTRIES2 = 64*kb, ROW_SIZE2=4, BASE2=0;
+const int ENTRIES3 =  0*kb, ROW_SIZE3=0, BASE3=ENTRIES2*ROW_SIZE2;
+const int ENTRIES4 =  0*kb, ROW_SIZE4=0, BASE4=ENTRIES3*ROW_SIZE3+BASE3;
+const int TOTAL_ENTRIES = ENTRIES2*ROW_SIZE2 + ENTRIES3*ROW_SIZE3 + ENTRIES4*ROW_SIZE4;
+const int MINLEN=1;
+inline uint rolz_hashing(BYTE *p, int BYTES, int ENTRIES)
+{
+    return ENTRIES>=64*kb && BYTES==2?   *(uint16*)(p-BYTES)
+         : ENTRIES>=256   && BYTES==1?   *(uint8*) (p-BYTES)
+         : ((*(uint*)(p-BYTES) & (((1<<BYTES)<<(BYTES*7))-1)) * 123456791) / (gb/(ENTRIES/4));
+}
+
+#define HUFFMAN_TREES                          520
+#define HUFFMAN_ELEMS                          (256+(ROW_SIZE2+ROW_SIZE3+ROW_SIZE4)*MATCH_SIZE)
+#define ROLZ_ENCODE_DIRECT(context, symbol)    coder.encode(context, symbol)
+
+// Save match to buffer, encoding performed in another thread
+#define ROLZ_ENCODE(context, symbol)    (*x++ = ((context)<<16) + (symbol))
+// Do actual encode of data item saved in buffer
+#define ROLZ_ENCODE2(data)              ROLZ_ENCODE_DIRECT((data)>>16, (data)&0xFFFF)
+
+struct  entry {BYTE *ptr; uint32 cache;};
+static  entry hash [TOTAL_ENTRIES];
+
+struct Buffers {uint32 *x0;  int bufsize;};
+#define NUMBUFS 4
+struct Param {PackMethod m; CALLBACK_FUNC *callback; void *auxdata;
+              Buffers             bufarr[NUMBUFS];
+              SyncQueue<Buffers*> EncoderJobs;
+              SyncQueue<Buffers*> FreeBuffers;
+              Event               Finished;
+             };
+
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE rolz_encode_thread (void *paramPtr)
+{
+    Param *pa = (Param*)paramPtr;
+    HuffmanEncoderOrder1 <HUFFMAN_TREES, HUFFMAN_ELEMS>   coder (pa->callback, pa->auxdata, BUF_SIZE, 4*BUF_SIZE, HUFFMAN_ELEMS+1);
+    if (coder.error() != FREEARC_OK)  return coder.error();
+    coder.put8 (ROLZ_HUFCODER);
+    coder.put8 (0);
+    coder.put32(0);
+
+    for(;;)
+    {
+        Buffers *job = pa->EncoderJobs.Get();  if (job==NULL)  break;
+        for (int i=0; i < job->bufsize; i++)
+        {
+            ROLZ_ENCODE2( job->x0[i]);
+        }
+        pa->FreeBuffers.Put(job);
+        coder.flush();
+    }
+    coder.finish();
+    pa->Finished.Signal();
+    return coder.error();
+}
+
+int tor_compress_rolz (PackMethod m, CALLBACK_FUNC *callback, void *auxdata)
+{
+    int errcode = FREEARC_OK;
+    zeroArray(hash);
+    BYTE *buf = (BYTE*) BigAlloc (BUF_SIZE),  last_char = 0;
+
+    Param pa; pa.m=m, pa.callback=callback, pa.auxdata=auxdata;
+    pa.EncoderJobs.SetSize(NUMBUFS+1);
+    pa.FreeBuffers.SetSize(NUMBUFS+1);
+    for(int i=0; i<NUMBUFS; i++)
+    {
+        pa.bufarr[i].x0  = (uint32*) BigAlloc (BUF_SIZE*sizeof(uint32));
+        pa.FreeBuffers.Put(&(pa.bufarr[i]));
+    }
+    Thread thread;  thread.Create (rolz_encode_thread, &pa);
+
+    for(;;)
+    {
+        int bufsize;
+        READ_LEN_OR_EOF(bufsize, buf, BUF_SIZE);
+        iterate_var(i, TOTAL_ENTRIES)
+            hash[i].ptr   = buf,
+            hash[i].cache = 0;
+        Buffers *job = pa.FreeBuffers.Get();
+        uint32 *x0=job->x0, *x=x0;
+        BYTE *p=buf;
+        ROLZ_ENCODE( last_char, *p);        // First 4 and last MATCH_SIZE bytes of buffer are encoded as literals
+        for (; ++p < buf+4; )
+            ROLZ_ENCODE( p[-1], *p);
+        for (; p<buf+bufsize-MATCH_SIZE; )
+        {
+            entry *h;  BYTE *q;  uint32 data = *(uint32*)p,  cache;
+
+#define CHECK_MATCH(OFFSET,CUM_OFFSET)                                                               \
+          {                                                                                          \
+            uint32 t = data ^ cache;                                                                 \
+            int len;                                                                                 \
+                 if (t&0xffff)   goto try_next##CUM_OFFSET;                                          \
+            else if (t&0xff0000) len=2;                                                              \
+            else if (t)          len=3;                                                              \
+            else for (len=4; len<MATCH_SIZE && p[len]==q[len]; len++);  /* check match length */     \
+            ROLZ_ENCODE( p[-1], CUM_OFFSET*MATCH_SIZE + len+256);  p += len;  continue;  try_next##CUM_OFFSET:;    \
+          }
+
+#define TRY_FIRST(BYTES,CUM_OFFSET)                                                                  \
+            h = &hash[rolz_hashing(p,BYTES,ENTRIES##BYTES)*ROW_SIZE##BYTES + BASE##BYTES];           \
+            q = h->ptr;        h->ptr = p;                                                           \
+            cache = h->cache;  h->cache = data;                                                      \
+            CHECK_MATCH(0,CUM_OFFSET)                                                                \
+
+#define TRY_NEXT(OFFSET,CUM_OFFSET)                                                                  \
+          {                                                                                          \
+            BYTE *saved_q = q;          uint32 saved_cache = cache;                                  \
+            q = (h+OFFSET)->ptr;        (h+OFFSET)->ptr   = saved_q;                                 \
+            cache = (h+OFFSET)->cache;  (h+OFFSET)->cache = saved_cache;                             \
+            CHECK_MATCH(OFFSET,CUM_OFFSET)                                                           \
+          }
+
+            TRY_FIRST(2,0)
+            TRY_NEXT(1,1)
+            TRY_NEXT(2,2)
+            TRY_NEXT(3,3)
+
+            ROLZ_ENCODE( p[-1], *p);  p++;
+        }
+        for (; p < buf+bufsize; p++)
+            ROLZ_ENCODE( p[-1], *p);
+        last_char = buf[bufsize-1];
+        job->bufsize = x-x0;
+        pa.EncoderJobs.Put(job);
+    }
+finished:
+
+    // Encode EOF
+    Buffers *job = pa.FreeBuffers.Get();
+    job->x0[0] = (last_char<<16) + ROLZ_EOF_CODE;
+    job->bufsize = 1;
+    pa.EncoderJobs.Put(job);
+
+    // Finish encoding thread
+    pa.EncoderJobs.Put(NULL);
+    pa.Finished.Wait();
+    for(int i=0; i<NUMBUFS; i++)  BigFree(pa.bufarr[i].x0);  BigFree(buf);
+    return 0;
+}
+
+int tor_decompress0_rolz (CALLBACK_FUNC *callback, void *auxdata)
+{
+    int errcode = FREEARC_OK;                             // Error code of last "write" call
+    zeroArray(hash);
+    static HuffmanDecoderOrder1 <HUFFMAN_TREES, HUFFMAN_ELEMS>   decoder (callback, auxdata, BUF_SIZE, HUFFMAN_ELEMS+1);
+    if (decoder.error() != FREEARC_OK)  return decoder.error();
+    BYTE  buf[BUF_SIZE+MATCH_SIZE],  *p=buf,  last_char=0;
+    BYTE *cycle_h[MATCH_SIZE],  dummy[MATCH_SIZE];  iterate(MATCH_SIZE, cycle_h[i] = dummy);  int i=0;
+    static BYTE *hash_ptr[TOTAL_ENTRIES];
+
+    for (;;)
+    {
+        uint idx = rolz_hashing(p,3,ENTRIES3);         // ROLZ entry
+        entry *h = &hash[idx];
+
+        uint c = decoder.decode(last_char);
+        if (c < 256) {
+            *p++ = c;
+        } else if (c==ROLZ_EOF_CODE) {
+            break;
+        } else {
+            BYTE *match  =  hash_ptr[idx] >= p-MATCH_SIZE? hash_ptr[idx] : (BYTE *)&h[0];
+            int len      = c-256;
+            do   *p++ = *match++;
+            while (--len);
+        }
+
+        // Save match bytes to ROLZ hash (со сдвигом на 16 матчей назад поскольку байты не сразу по€вл€ютс€ ;)
+        memcpy (cycle_h[i], p, MATCH_SIZE);
+        hash_ptr[idx] = p;         // после WRITE станет некорректным, нужен hash_ptr_level показываюзий сколько вхождений данного idx сейчас содержитс€ в cycle_h
+        cycle_h[i]    = (BYTE *)&h[0];
+        i = (i+1) % MATCH_SIZE;
+
+        // Save context for order-1 coder and flush buffer if required
+        last_char = p[-1];
+        if (p-buf >= BUF_SIZE)
+            {WRITE (buf, BUF_SIZE);  p=buf;}
+    }
+    WRITE (buf, p-buf);            // Flush outbuf
+finished:
+    return errcode;
+}
+#endif  // ROLZ_ONLY
+
+
 template <class MatchFinder, class Coder>
 int tor_compress4 (PackMethod m, CALLBACK_FUNC *callback, void *auxdata)
 {
@@ -306,6 +514,9 @@ int tor_compress2d (PackMethod m, CALLBACK_FUNC *callback, void *auxdata)
 // Compress data using compression method m and callback for i/o
 int tor_compress (PackMethod m, CALLBACK_FUNC *callback, void *auxdata)
 {
+#ifdef ROLZ_ONLY
+    return tor_compress_rolz (m, callback, auxdata);
+#else
 // When FULL_COMPILE is defined, we compile all the 4*8*3*2=192 possible compressor variants
 // Otherwise, we compile only 8 variants actually used by -0..-11 predefined modes
 #ifdef FULL_COMPILE
@@ -334,14 +545,14 @@ int tor_compress (PackMethod m, CALLBACK_FUNC *callback, void *auxdata)
     } else if (m.encoding_method==BITCODER && m.hash_row_width==1 && m.hash3==0 && !m.caching_finder && m.match_parser==GREEDY ) {
         return tor_compress0 <MatchFinder1, LZ77_BitCoder > (m, callback, auxdata);
     } else if (m.encoding_method==HUFCODER && m.hash_row_width==2 && m.hash3==0 && !m.caching_finder && m.match_parser==GREEDY ) {
-        return tor_compress0 <MatchFinder2, LZ77_Coder<HuffmanEncoder<EOB_CODE> > > (m, callback, auxdata);
+        return tor_compress0 <MatchFinder2, LZ77_Coder< HuffmanEncoder<EOB_CODE> > > (m, callback, auxdata);
     } else if (m.encoding_method==HUFCODER && m.hash_row_width>=2 && m.hash3==0 && m.caching_finder && m.match_parser==GREEDY ) {
-        return tor_compress0 <CachingMatchFinder<4>, LZ77_Coder<HuffmanEncoder<EOB_CODE> > > (m, callback, auxdata);
+        return tor_compress0 <CachingMatchFinder<4>, LZ77_Coder< HuffmanEncoder<EOB_CODE> > > (m, callback, auxdata);
     } else if (m.encoding_method==ARICODER && m.hash_row_width>=2 && m.hash3==1 && m.caching_finder==1 && m.match_parser==LAZY ) {
         return tor_compress0 <LazyMatching<Hash3<CachingMatchFinder<4>,12,10,FALSE> >, LZ77_Coder<ArithCoder<EOB_CODE> > > (m, callback, auxdata);
     // -5 -c3 - used for FreeArc -m4$compressed
     } else if (m.encoding_method==HUFCODER && m.hash_row_width>=2 && m.hash3==1 && m.caching_finder==1 && m.match_parser==LAZY ) {
-        return tor_compress0 <LazyMatching<Hash3<CachingMatchFinder<4>,12,10,FALSE> >, LZ77_Coder<HuffmanEncoder<EOB_CODE> > > (m, callback, auxdata);
+        return tor_compress0 <LazyMatching<Hash3<CachingMatchFinder<4>,12,10,FALSE> >, LZ77_Coder< HuffmanEncoder<EOB_CODE> > > (m, callback, auxdata);
 
     // -7..-9
     } else if (m.hash_row_width>=2 && m.hash3==2 && m.caching_finder==5 && m.match_parser==LAZY ) {
@@ -359,6 +570,7 @@ int tor_compress (PackMethod m, CALLBACK_FUNC *callback, void *auxdata)
         return FREEARC_ERRCODE_INVALID_COMPRESSOR;
     }
 #endif
+#endif  // ROLZ_ONLY
 }
 
 #endif // FREEARC_DECOMPRESS_ONLY
@@ -403,8 +615,8 @@ int tor_decompress0 (CALLBACK_FUNC *callback, void *auxdata, int _bufsize, int m
     int errcode = FREEARC_OK;                             // Error code of last "write" call
     Decoder decoder (callback, auxdata, _bufsize);        // LZ77 decoder parses raw input bitstream and returns literals&matches
     if (decoder.error() != FREEARC_OK)  return decoder.error();
-    uint bufsize = compress_all_at_once? _bufsize : mymax (_bufsize, HUGE_BUFFER_SIZE);   // Make sure that outbuf is at least 8mb in order to avoid excessive disk seeks (not required in programs compiled for one-shot compression)
-    BYTE *outbuf = (byte*) malloc (bufsize+PAD_FOR_TABLES*2);  // Circular buffer for decompressed data
+    uint bufsize = tornado_decompressor_outbuf_size (_bufsize);  // Size of output buffer
+    BYTE *outbuf = (byte*) BigAlloc (bufsize+PAD_FOR_TABLES*2);  // Circular buffer for decompressed data
     if (!outbuf)  return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
     outbuf += PAD_FOR_TABLES;       // We need at least PAD_FOR_TABLES bytes available before and after outbuf in order to simplify datatables undiffing
     BYTE *output      = outbuf;     // Current position in decompressed data buffer
@@ -429,7 +641,7 @@ int tor_decompress0 (CALLBACK_FUNC *callback, void *auxdata, int _bufsize, int m
             UINT dist = decoder.getdist();
             print_match (output-outbuf+offset, len, dist);
 
-            // Check for simple match (i.e. match not requiring any special handling, >99% of matches fail to this category)
+            // Check for simple match (i.e. match not requiring any special handling, >99% of matches fall into this category)
             if (output-outbuf>=dist && write_end-output>len) {
                 BYTE *p = output-dist;
                 do   *output++ = *p++;
@@ -462,12 +674,12 @@ int tor_decompress0 (CALLBACK_FUNC *callback, void *auxdata, int _bufsize, int m
                 tables.add (len, output, dist);
                 // If list of data tables is full then flush it by preprocessing
                 // and writing to outstream already filled part of outbuf
-                WRITE_DATA_IF (tables.filled());
+                WRITE_DATA_IF (tables.filled() && !compress_all_at_once);
             }
         }
     }
 finished:
-    free(outbuf-PAD_FOR_TABLES);
+    BigFree(outbuf-PAD_FOR_TABLES);
     // Return decoder error code, errcode or FREEARC_OK
     return decoder.error() < 0 ?  decoder.error() :
            errcode         < 0 ?  errcode
@@ -485,6 +697,7 @@ int tor_decompress (CALLBACK_FUNC *callback, void *auxdata)
     uint bufsize;         READ4 (bufsize);
 
     switch (encoding_method) {
+#ifndef ROLZ_ONLY
     case BYTECODER:
             return tor_decompress0 <LZ77_ByteDecoder> (callback, auxdata, bufsize, minlen);
 
@@ -496,6 +709,12 @@ int tor_decompress (CALLBACK_FUNC *callback, void *auxdata)
 
     case ARICODER:
             return tor_decompress0 <LZ77_Decoder <ArithDecoder<EOB_CODE> >   > (callback, auxdata, bufsize, minlen);
+
+#else
+    case ROLZ_HUFCODER:
+            return tor_decompress0_rolz (callback, auxdata);
+#endif
+
     default:
             errcode = FREEARC_ERRCODE_BAD_COMPRESSED_DATA;
     }

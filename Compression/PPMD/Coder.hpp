@@ -55,11 +55,11 @@ public:
 };
 *****************************************************************************/
 
-static struct SUBRANGE {
+static _THREAD1 struct SUBRANGE {
     DWORD LowCount, HighCount, scale;
-} SubRange;
+} _THREAD SubRange;
 enum { TOP=1 << 24, BOT=1 << 15 };
-static DWORD low, code, range;
+static _THREAD1 DWORD _THREAD low, _THREAD code, _THREAD range;
 
 inline void ariInitEncoder()
 {

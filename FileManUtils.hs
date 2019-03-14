@@ -5,12 +5,13 @@ module FileManUtils where
 
 import Prelude hiding (catch)
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Char
 import Data.IORef
 import Data.List
 import Data.Maybe
+import System.IO.Unsafe
 
 import Graphics.UI.Gtk
 import Graphics.UI.Gtk.ModelView as New
@@ -22,25 +23,30 @@ import FileInfo
 import Options
 import UIBase
 import UI
-import ArhiveDirectory
-import ArcExtract
+import Arhive7zLib
+
+
+-- |Пароли шифрования и расшифровки
+encryptionPassword  =  unsafePerformIO$ newIORef$ ""
+decryptionPassword  =  unsafePerformIO$ newIORef$ ""
+
 
 ----------------------------------------------------------------------------------------------------
 ---- Текущее состояние файл-менеджера --------------------------------------------------------------
 ----------------------------------------------------------------------------------------------------
 
 -- |Текущее состояние файл-менеджера: список выбранных файлов, общий список файлов и прочая информация
-data FM_State = FM_State { fm_window       :: Window
+data FM_State = FM_State { fm_window_      :: Maybe Window
                          , fm_view         :: TreeView
                          , fm_model        :: New.ListStore FileData
                          , fm_selection    :: TreeSelection
                          , fm_statusLabel  :: Label
                          , fm_messageCombo :: (New.ComboBox, IORef Int)
                          , fm_filelist     :: [FileData]
-                         , fm_history_file :: MVar FilePath
-                         , fm_history      :: Maybe [String]
+                         , fm_history      :: HistoryFile
                          , fm_onChdir      :: [IO()]
                          , fm_sort_order   :: String
+                         , fm_passwords    :: [String]                       -- пароли, введённые пользователем за время текущей сессии
                          , subfm           :: SubFM_State
                          }
 
@@ -62,6 +68,9 @@ fm_arcname = subfm_arcname.subfm
 fm_arcdir  = subfm_arcdir .subfm
 fm_dir     = subfm_dir    .subfm
 
+-- |Окно файл-менеджера
+fm_window FM_State{fm_window_ = Just window} = window
+
 -- |Текущий архив+каталог в нём или каталог на диске
 fm_current fm | isFM_Archive fm = fm_arcname fm </> fm_arcdir fm
               | otherwise       = fm_dir     fm
@@ -73,6 +82,17 @@ fm_curdir fm | isFM_Archive fm = fm_arcname fm .$takeDirectory
 -- |Изменить имя архива, открытого в FM
 fm_changeArcname arcname fm@(FM_State {subfm=subfm@FM_Archive{}}) =
                          fm {subfm = subfm {subfm_arcname=arcname}}
+
+-- |Сохранить список паролей расшифровки, использованных при выполнении команды
+fmSaveDecryptionPasswords fm' command = do
+  passwords <- get_opt_decryption_passwords command    -- сохраним список паролей, введённых пользователем
+  fm' .= \fm -> fm {fm_passwords = take 10 passwords}  -- ... по крайней мере первые 10 из них
+
+-- |Получить список паролей расшифровки
+fmGetDecryptionPasswords fm' = do
+  xpwd'     <- val decryptionPassword        -- пароль распаковки, введённый в Settings
+  passwords <- fm_passwords `fmap` val fm'   -- пароли, введённые пользователем в текущей сессии
+  return ((insertAt 1 (xpwd' &&& [xpwd']) (delete xpwd' passwords)))   -- на первом месте должен быть последний пароль, введённый вручную - поскольку 7z.dll поддерживает только один пароль
 
 
 ----------------------------------------------------------------------------------------------------
@@ -90,16 +110,16 @@ splitArcPath fm' fullname = do
   fm <- val fm'
   -- Сравним fullname с именем открытого в fm архива (arcname)
   -- Если arcname - префикс fullname, то разобьём fullname на имя архива arcname и каталог внутри него
-  let arcname = isFM_Archive fm.$bool "!^%^@!%" (fm_arcname fm)
-  if arcname `isParentDirOf` fullname
+  let arcname = fm_arcname fm
+  if isFM_Archive fm  &&  (arcname `isParentDirOf` fullname)
     then return$ ArcPath arcname (fullname `dropParentDir` arcname)
     else do
   -- Проверим существование каталога с таким именем (или "", чтобы избежать зацикливания)
-  d <- not(isURL fullname) &&& io(dirExist fullname)
+  d <- not(isURL fullname) &&& dirExist fullname
   if d || fullname=="" then return$ DiskPath fullname
     else do
   -- Проверим существование файла с таким именем
-  f <- io(fileExist fullname)
+  f <- fileExist fullname
   if f then return$ ArcPath fullname ""
     else do
   -- Повторим все проверки, отрезав от fullname последнюю компоненту имени
@@ -117,7 +137,7 @@ fmCanonicalizeDiskPath fm' relname = do
   let name  =  unquote (trimRight relname)
   if (name=="")  then return ""  else do
   fm <- val fm'
-  io$ myCanonicalizePath$ fm_curdir fm </> name
+  myCanonicalizePath$ fm_curdir fm </> name
 
 -- |Перевести путь, записанный относительно текущего положения в FM, в абсолютный
 fmCanonicalizePath fm' relname = do
@@ -170,19 +190,19 @@ fmname = fdBasename
 
 -- |Возвращает искусственный каталог с базовым именем name
 fdArtificialDir name = FileData { fdPackedDirectory = myPackStr ""
-                                , fdPackedBasename  = myPackStr name
+                                , fdPackedBasename  = name
                                 , fdSize            = 0
-                                , fdTime            = aMINIMAL_POSSIBLE_DATETIME
+                                , fdTime            = aMINIMUM_POSSIBLE_FILETIME
                                 , fdIsDir           = True }
 
 
 
 -- |Дерево файлов. Включает список файлов на этом уровне плюс поименованные поддеревья
 --                        files   dirname subtree
-data FileTree a = FileTree [a]  [(String, FileTree a)]
+data FileTree a = FileTree [a]  [(MyPackedString, FileTree a)]
 
 -- |Возвращает количество каталогов в дереве
-ftDirs  (FileTree files subdirs) = length (removeDups (subdirs.$map fst  ++  files.$filter fdIsDir .$map fdBasename))
+ftDirs  (FileTree files subdirs) = length (removeDups (subdirs.$map fst  ++  files.$filter fdIsDir .$map fdPackedBasename))
                                  + sum (map (ftDirs.snd) subdirs)
 
 -- |Возвращает количество файлов в дереве
@@ -190,22 +210,26 @@ ftFiles (FileTree files subdirs) = length (filter (not.fdIsDir) files)  +  sum (
 
 -- |Возврашает список файлов в заданном каталоге,
 -- используя отображение artificial для генерации псевдо-файлов из имён вложенных каталогов
-ftFilesIn dir artificial = f (splitDirectories dir)
+ftFilesIn dir artificial = f (map myPackStr$ splitDirectories dir)
  where
   f (path0:path_rest) (FileTree _     subdirs) = lookup path0 subdirs.$ maybe [] (f path_rest)
   f []                (FileTree files subdirs) = (files++map (artificial.fst) subdirs)
-                                                  .$ keepOnlyFirstOn (filenameLower.fmname)
+                                                  .$ keepOnlyFirstOn fdPackedBasename
+
+-- |Найти информацию о файле по его полному пути в дереве
+ftFind fullpath tree = let (dir,name) = splitFileName fullpath
+                           files = ftFilesIn (dropTrailingPathSeparator dir) fdArtificialDir tree
+                       in  listToMaybe$ filter ((name==).fdBasename) files
 
 -- |Превращает список файлов в дерево
 buildTree x = x
-  .$splitt 0                                  -- Разбиваем на группы по каталогам, начиная с 0-го уровня
+  .$splitt 0                                     -- Разбиваем на группы по каталогам, начиная с 0-го уровня
 splitt n x = x
-  .$sort_and_groupOn (dirPart n)              -- Сортируем/группируем по имени каталога очередного уровня
-  .$partition ((=="").dirPart n.head)         -- Отделяем группу с файлами, находящимися непосредственно в этом каталоге
-  .$(\(root,other) -> FileTree (concat root)  -- Остальные группы обрабатываем рекурсивно на (n+1)-м уровне
+  .$sort_and_groupOn (dirPart n)                 -- Сортируем/группируем по имени каталога очередного уровня
+  .$partition ((==myPackStr"").dirPart n.head)   -- Отделяем группу с файлами, находящимися непосредственно в этом каталоге
+  .$(\(root,other) -> FileTree (concat root)     -- Остальные группы обрабатываем рекурсивно на (n+1)-м уровне
                                (map2s (dirPart n.head, splitt (n+1)) other))
 
 -- Имя n-й части каталога
-dirPart n = (!!n).(++[""]).splitDirectories.fdDirectory
+dirPart n = myPackStr.(!!n).(++[""]).splitDirectories.fdDirectory
 
-io=id

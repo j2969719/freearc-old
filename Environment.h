@@ -1,31 +1,28 @@
 #include <time.h>
 #include "Compression/Common.h"
 
-#define PRESENT_INT32
-
 #ifdef  __cplusplus
 extern "C" {
 #endif
 
-#define INIT_CRC 0xffffffff
-
 // Environment.cpp
-void SetFileDateTime (const CFILENAME Filename, time_t t); // Установить время/дату модификации файла
-void RunProgram (const CFILENAME filename, const CFILENAME curdir, int wait_finish);  // Execute program `filename` in the directory `curdir` optionally waiting until it finished
-void RunFile    (const CFILENAME filename, const CFILENAME curdir, int wait_finish);  // Execute file `filename` in the directory `curdir` optionally waiting until it finished
 int long_path_size (void);                                 // Максимальная длина имени файла
 void FormatDateTime (char *buf, int bufsize, time_t t);    // Отформатировать время/дату для команды листинга
 CFILENAME GetExeName (CFILENAME buf, int bufsize);         // Вернуть имя исполняемого файла программы
-unsigned GetPhysicalMemory (void);                         // Объём физической памяти компьютера
+int MyGetAppUserDataDirectory (CFILENAME buf);             // Вернуть %APPDATA%
+uint64   GetPhysicalMemory (void);                         // Объём физической памяти компьютера
 unsigned GetMaxMemToAlloc (void);                          // Макс. объём памяти который мы можем выделить в адресном пространстве нашего процесса
+unsigned GetTotalMemoryToAlloc (void);                     // Общий объём памяти который мы можем выделить в адресном пространстве нашего процесса
 unsigned GetAvailablePhysicalMemory (void);                // Объём свободной физической памяти компьютера
 void TestMalloc (void);                                    // Печатает статистику свободной памяти
 int GetProcessorsCount (void);                             // Общее количество процессоров (точнее, физических ядер) в системе. Используется для определения того, сколько "тяжёлых" вычислительных потоков целесообразно запустить в программе
-uint UpdateCRC (void *Addr, uint Size, uint StartCRC);     // Обновить CRC содержимым блока данных
-uint CalcCRC (void *Addr, uint Size);                      // Вычислить CRC блока данных
+int PowerOffComputer();                                    // Инициировать выключение компьютера
 void memxor (char *dest, char *src, uint size);            // От-xor-ить два блока данных
 int systemRandomData (char *rand_buf, int rand_size);
-void BuildPathTo (CFILENAME name);                         // Создать каталоги на пути к name
+
+#ifdef FREEARC_WIN
+DWORD RegistryDeleteTree(HKEY hStartKey, LPTSTR pKeyName);  // Delete entrire subtree from Windows Registry
+#endif
 
 // GuiEnvironment.cpp
 int BrowseForFolder(TCHAR *prompt, TCHAR *in_filename, TCHAR *out_filename);                      // Дать пользователю выбрать каталог

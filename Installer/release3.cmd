@@ -1,22 +1,29 @@
-set VER=0.51
+set VER=0.666
+::set VER=0.61-alpha
 ::set V=-alpha-2009-04-19
 
 del FreeArc*.exe FreeArc*.zip FreeArc*.bz2 FreeArc*.arc
-arc a FreeArc-console FreeArc.url Addons\ -xFreeArc.reg bin\arc.* bin\facompress.dll bin\*.sfx bin\unarc.* bin\empty.arc bin\scripts\ Documentation\ -xFreeArc-GUI*.* -xDocumentation\readme.txt -z=Documentation\readme.txt -m5x -mm- -sfx=bin\freearc-tiny.sfx
 
-"C:\Program Files (x86)\NSIS\makensis.exe"       FreeArc.nsi
-"C:\Program Files (x86)\NSIS\makensis.exe" -DGTK FreeArc.nsi
+"C:\Program Files (x86)\NSIS\makensis.exe"           FreeArc.nsi
+"C:\Program Files (x86)\NSIS\makensis.exe" -DUPDATE  FreeArc.nsi
 
 ren FreeArc-install.exe FreeArc-%VER%-win32%V%.exe
 ren FreeArc-update.exe  FreeArc-update-%VER%-win32%V%.exe
-ren FreeArc-console.exe FreeArc-console-%VER%-win32%V%.exe
 
-7z -mx a FreeArc-portable-%VER%-win32%V%.zip  -x!GTK* -x!FreeArc-* -x!*.nsi -x!*.nsh -x!*.cmd
+move ini\* bin
+rmdir ini
+move ArcShellExt-dll\* bin\ArcShellExt
+rmdir ArcShellExt-dll
+
+bin\arc a arc.arc Addons bin -x7z* -m5
+bin\arc a -t FreeArc-console-%VER%-win32%V%.exe FreeArc.url Addons\ -xFreeArc.reg bin\arc.* bin\facompress*.dll bin\*.sfx bin\unarc.* bin\empty.arc bin\scripts\ Documentation\ License\ -xFreeArc-GUI*.* -xDocumentation\readme.txt -z=Documentation\readme.txt -m5x -mm- -sfx=bin\freearc-tiny.sfx
+
+7z -mx a FreeArc-portable-%VER%-win32%V%.zip  -x!arc.arc -x!GTK* -x!FreeArc-* -x!*.nsi -x!*.nsh -x!*.cmd
+copy /b FreeArc-portable-%VER%-win32%V%.zip FreeArc-portable-update-%VER%-win32%V%.zip
 cd gtk2-themes
 7z -mx a ..\FreeArc-portable-%VER%-win32%V%.zip
 cd ..
-copy /b FreeArc-portable-%VER%-win32%V%.zip FreeArc-portable-update-%VER%-win32%V%.zip
-cd GTK
+cd gtk2-runtime
 7z -mx a ..\FreeArc-portable-%VER%-win32%V%.zip
 cd ..
 

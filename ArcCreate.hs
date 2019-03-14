@@ -12,10 +12,11 @@ module ArcCreate where
 
 import Prelude hiding (catch)
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.IORef
 import Data.List
+import Data.Maybe
 import System.Mem
 import System.IO
 #if defined(FREEARC_UNIX)
@@ -32,8 +33,9 @@ import FileInfo
 import Options
 import UI
 import ArhiveStructure
-import ArhiveDirectory
 import ArhiveFileList
+import Arhive7zLib
+import ArhiveDirectory
 import ArcExtract
 import ArcvProcessRead
 import ArcvProcessExtract
@@ -66,7 +68,7 @@ runArchiveCreate pretestArchive
   -- Команда "create" всегда создаёт архив с нуля
   when (cmd=="create")$  do ignoreErrors$ fileRemove arcname
   -- Сообщить пользователю о начале обработки архива и запросить пароль архивации, если необходимо
-  uiStartArchive command =<< limit_compressor command compressor   -- ограничить компрессор объёмом памяти и значением -lc
+  uiStartArchive command =<< limit_compression command compressor   -- ограничить компрессор объёмом памяти и значением -lc
   command <- (command.$ opt_cook_passwords) command ask_passwords  -- подготовить пароли в команде к использованию
   debugLog "Started"
 
@@ -74,6 +76,8 @@ runArchiveCreate pretestArchive
   -- Выйти, если архив залочен или содержит recovery info и повреждён.
   -- Если мы создаём новый архив, то подставить вместо старого "фантом".
   let abort_on_locked_archive archive footer = do
+          when (isNothing archive) $
+              registerError$ GENERAL_ERROR ["0478 can't modify non-"++aFreeArc++" archive"]
           when (ftLocked footer) $
               registerError$ GENERAL_ERROR ["0310 can't modify archive locked with -k"]
           pretestArchive command archive footer
@@ -134,7 +138,7 @@ runArchiveCreate pretestArchive
   --   Для этого в create_archive_structure_PROCESS передаётся процедура `find_last_time`.
   --   Ей передают по частям список файлов, записываемых в архив, и она отслеживает самый свежий из них.
   --   Этой датой будет проштампован архив после окончания архивации.
-  last_time <- ref aMINIMAL_POSSIBLE_DATETIME
+  last_time <- ref aMINIMUM_POSSIBLE_FILETIME
   let find_last_time dir  =  last_time .= (\time -> maximum$ time : map (fiTime.fwFileInfo) dir)
   let processDir dir      =  do when (opt_time_to_last command) (find_last_time dir)
                                 postProcess_processDir dir  -- враппер постпроцессинга тоже должен получить список успешно сархивированных файлов
@@ -175,10 +179,11 @@ temparc_prefix = "$$temparc$$"
 temparc_suffix = ".tmp"
 
 -- |Выполнить `action` с именем временного файла и затем переименовать его
-tempfile_wrapper filename command deleteFiles pretestArchive action  =  find 0 >>= doit
+tempfile_wrapper filename command deleteFiles pretestArchive action  =  find 1 >>= doit
   where -- Найти свободное имя для временного файла
-        find n = do let tempname = (opt_workdir command ||| takeDirectory filename)
-                                   </> (temparc_prefix++show n++temparc_suffix)
+        find n = do tempdir <- if opt_create_in_workdir command  then getTempDir  else return (takeDirectory filename)
+                    createDirectoryHierarchy tempdir
+                    let tempname = tempdir </> (temparc_prefix++show n++temparc_suffix)
                     found <- fileExist tempname
                     case found of
                         True  | n==999    -> registerError$ GENERAL_ERROR ["0311 can't create temporary file"]
@@ -204,8 +209,8 @@ tempfile_wrapper filename command deleteFiles pretestArchive action  =  find 0 >
                              fileRename tempname filename
                                  `catch` (\_-> do condPrintLineLn "n"$ "Copying temporary archive "++tempname++" to "++filename
                                                   fileCopy tempname filename; fileRemove tempname)
-                           -- Если указаны опции "-t" и "-w", то ещё раз протестируем окончательный архив
-                           when (opt_test command && opt_workdir command/="") $ do
+                           -- Если указаны опции "-t" и "--create-in-workdir", то ещё раз протестируем окончательный архив
+                           when (opt_test command && opt_create_in_workdir command) $ do
                                test_archive filename (opt_keep_broken command || opt_delete_files command /= NO_DELETE)
 
         -- Протестировать архив и выйти, удалив его, если при этом возникли проблемы
@@ -243,17 +248,23 @@ postProcess_wrapper command archiving = do
                       evalList dirs   `seq`  (dirs2delete  ++= dirs )
                   -- Удалить сархивированные файлы и каталоги
                   deleteFiles = when (opt_delete_files command /= NO_DELETE) $ do
+                                    -- Функция удаления, при необходимости снимающая атрибуты у файла
+                                    let superRemove removeAction fi = do
+                                            let filename = diskName fi
+                                            removeAction filename `catch` \e -> do
+                                                -- Remove readonly/hidden/system attributes and try to remove file/directory again
+                                                ignoreErrors$ clearFileAttributes filename
+                                                ignoreErrors$ removeAction filename
                                     -- Удаление файлов
                                     condPrintLineLn "n"$ "Deleting successfully archived files"
                                     files <- val files2delete
-                                    --print$ map diskName files   -- debugging tool :)
                                     for files $ \fi -> do
                                         whenM (check_that_file_was_not_changed fi) $ do
-                                            ignoreErrors.fileRemove.fpFullname.fiDiskName$ fi
+                                            superRemove fileRemove fi
                                     -- Удаление каталогов
                                     when (opt_delete_files command == DEL_FILES_AND_DIRS) $ do
                                         dirs <- val dirs2delete
-                                        for (reverse dirs) (ignoreErrors.dirRemove.fpFullname.fiDiskName)   -- Каталоги обычно сохраняются в порядке обхода, то есть родительский каталог в списке раньше дочерних. Так что reverse позволяет удалить сначала дочерние каталоги
+                                        for (reverse dirs) (superRemove dirRemove)   -- Каталоги обычно сохраняются в порядке обхода, то есть родительский каталог в списке раньше дочерних. Так что reverse позволяет удалить сначала дочерние каталоги
 
               -- Выполнить архивацию, занося успешно сархивированные файлы в списки files2delete и dirs2delete.
               -- Удалить файлы после архивации, если задана опция -d[f]
@@ -303,8 +314,8 @@ getArcComment arccmt_str arccmt_file input_archives parseFile = do
 
 -- |Записать SFX-модуль в начало создаваемого архива
 writeSFX sfxname archive old_archive = do
-  let oldArchive = arcArchive old_archive
-      oldSFXSize = ftSFXSize (arcFooter old_archive)
+  let Just oldArchive = arcArchive old_archive
+      oldSFXSize      = ftSFXSize (arcFooter old_archive)
   case sfxname of                                      -- В зависимости от значения опции "-sfx":
     "-"      -> return ()                              --   удалить старый sfx-модуль
     "--"     -> unless (arcPhantom old_archive) $ do   --   скопировать sfx из исходного архива (по умолчанию)

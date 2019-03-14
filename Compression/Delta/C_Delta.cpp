@@ -42,7 +42,7 @@ int DELTA_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_DELTA)
-void DELTA_METHOD::ShowCompressionMethod (char *buf)
+void DELTA_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     DELTA_METHOD defaults; char BlockSizeStr[100]=":";
     showMem (BlockSize, BlockSizeStr+1);

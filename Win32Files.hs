@@ -78,17 +78,17 @@ foreign import ccall unsafe "Win32Files.h _wrename"
   c_wrename :: CWFilePath -> CWFilePath -> IO Int
 
 wcreat :: String -> Int -> IO FD
-wcreat name mode =
-  modifyIOError (`ioeSetFileName` name) $
-  withCWFilePath name $ \ p_name ->
+wcreat name mode = do
+  modifyIOError (`ioeSetFileName` name) $ do
+  withCWFilePath name $ \ p_name -> do
   throwErrnoIfMinus1Retry "creat" $ c_wcreat p_name mode
 foreign import ccall unsafe "Win32Files.h _wcreat"
   c_wcreat :: CWFilePath -> Int -> IO FD
 
 wopen :: String -> CInt -> CMode -> IO FD
-wopen name access mode =
-  modifyIOError (`ioeSetFileName` name) $
-  withCWFilePath name $ \ p_name ->
+wopen name access mode = do
+  modifyIOError (`ioeSetFileName` name) $ do
+  withCWFilePath name $ \ p_name -> do
   throwErrnoIfMinus1Retry "open" $ c_wopen p_name access mode
 foreign import ccall safe "Win32Files.h _wopen"
   c_wopen :: CWFilePath -> CInt -> CMode -> IO FD

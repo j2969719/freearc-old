@@ -56,7 +56,7 @@ static inline UINT  lzpH(UINT c,BYTE* p,int HashMask) {
 #define LZP_INIT(HashSize,Pattern)                                               \
     UINT i, k, n1=1, n=1, HashMask=HashSize-1;                                   \
     BYTE *p, *InEnd=In+Size, *OutStart=Out;                                      \
-    BYTE **HTable = (BYTE**) malloc (HashSize * sizeof(BYTE*));                  \
+    BYTE **HTable = (BYTE**) BigAlloc (HashSize * sizeof(BYTE*));                \
     if (HTable==NULL)  return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;                 \
     for (i=0;i < HashSize;i++)              HTable[i]=Pattern+5;                 \
     lzpC(Out+4)=lzpC(In+4);                 lzpC(Out+8)=lzpC(In+8);              \
@@ -90,7 +90,7 @@ MATCH_NOT_FOUND:
         }
         k=lzpH(i=lzpC(In),In,HashMask);
     } while (In<InEnd && Out<OutEnd);
-    delete HTable;
+    BigFree(HTable);
     if (Out >= OutEnd)       return 0;
     memmove(Out,OutEnd,OutStart+Size-OutEnd);
     return Size-(OutEnd-Out);
@@ -101,23 +101,29 @@ int LZPDecode(BYTE* In,UINT Size,BYTE* Out,int MinLen,int HashSize,int Barrier,i
 {
     LZP_INIT(HashSize,Out);
     do {
-        p=HTable[k];
-        if ( !--n )  { HTable[k]=Out;       n=n1; }
-        if (*In++ != LZP_MATCH_FLAG || i != lzpC(p) || *--InEnd == 255)
-                *Out++ = In[-1];
-        else {
-            HTable[k]=Out;                  n1 += (Out-p > (n1+1)*HashSize && n1 < 7);
-            for (i=(Out-p>Barrier? SmallestLen:MinLen)-1;*InEnd == 0;InEnd--)
-                    i += 254;
-            i += *InEnd;                    k=2*n1+2;
-            do {
-                if ( !--k ) { k=2*n1+1;     HTable[lzpH(lzpC(Out),Out,HashMask)]=Out; }
-                *Out++ = *p++;
-            } while ( --i );
+        if (*In++ != LZP_MATCH_FLAG) {
+            if ( !--n )  { HTable[k]=Out;       n=n1; }
+            *Out++ = In[-1];
+        } else {
+            p=HTable[k];
+            if ( !--n )  { HTable[k]=Out;       n=n1; }
+            if (i != lzpC(p) || *--InEnd == 255)
+                    *Out++ = In[-1];
+            else {
+                HTable[k]=Out;                  n1 += (Out-p > (n1+1)*HashSize && n1 < 7);
+                for (i=(Out-p>Barrier? SmallestLen:MinLen)-1;*InEnd == 0;InEnd--)
+                        i += 254;
+                i += *InEnd;                    k=2*n1+2;
+                do {
+                    if ( !--k ) { k=2*n1+1;     HTable[lzpH(lzpC(Out),Out,HashMask)]=Out; }
+                    *Out++ = *p++;
+                } while ( --i );
+            }
         }
         k=lzpH(i=lzpC(Out),Out,HashMask);
     } while (In < InEnd);
-    delete HTable;                          return (Out-OutStart);
+    BigFree(HTable);
+    return (Out-OutStart);
 }
 
 
@@ -135,29 +141,29 @@ int lzp_compress (MemSize BlockSize, int MinCompression, int MinMatchLen, int Ha
     while (1)
     {
         int InSize, OutSize;     // количество байт во входном и выходном буфере, соответственно
-        MALLOC (BYTE, In, BlockSize+2);
+        BIGALLOC (BYTE, In, BlockSize+2);
     	READ_LEN_OR_EOF (InSize, In, BlockSize);
-        In = (BYTE*) realloc(In,InSize);
-        MALLOC (BYTE, Out, InSize+2);
+        //In = (BYTE*) realloc(In,InSize);   -- impossible since we used BigAlloc
+        BIGALLOC (BYTE, Out, InSize+2);
         OutSize = LZPEncode (In, InSize, Out, MinMatchLen, 1<<HashSizeLog, Barrier, SmallestLen);
         if (OutSize<0)  {errcode=OutSize; goto finished;}
         if (OutSize==0 || MinCompression>0 && OutSize/MinCompression>=InSize/100) {
             // Упаковать данные [достаточно хорошо] не удалось, запишем вместо них исходные данные
-            FreeAndNil(Out);
+            BigFreeAndNil(Out);
             WRITE4 (-InSize);      // Отрицательное число в качестве длины блока - признак Stored блока
             WRITE  (In, InSize);
-            FreeAndNil(In);
+            BigFreeAndNil(In);
         } else {
             // Данные успешно упакованы, можно освободить входной буфер прежде чем записывать их
             // (чтобы освободить больше памяти для следующего алгоритма в цепочке алгоритмов сжатия)
-            FreeAndNil(In);
+            BigFreeAndNil(In);
             WRITE4 (OutSize);
             WRITE  (Out, OutSize);
-            FreeAndNil(Out);
+            BigFreeAndNil(Out);
         }
     }
 finished:
-    FreeAndNil(In); FreeAndNil(Out);
+    BigFreeAndNil(In); BigFreeAndNil(Out);
     return errcode;
 }
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)
@@ -174,24 +180,24 @@ int lzp_decompress (MemSize BlockSize, int MinCompression, int MinMatchLen, int 
         if (InSize<0) {
             // скопируем неупакованные данные
             InSize = -InSize;
-            MALLOC (BYTE, In, InSize);
+            BIGALLOC (BYTE, In, InSize);
             READ  (In, InSize);
             WRITE (In, InSize);
-            FreeAndNil(In);
+            BigFreeAndNil(In);
         } else {
             // Произвести декодирование и получить размер выходных данных
-            MALLOC (BYTE, In,  InSize);
-            MALLOC (BYTE, Out, BlockSize);
+            BIGALLOC (BYTE, In,  InSize);
+            BIGALLOC (BYTE, Out, BlockSize);
             READ  (In, InSize);
             OutSize = LZPDecode (In, InSize, Out, MinMatchLen, 1<<HashSizeLog, Barrier, SmallestLen);
-            FreeAndNil(In);
-            Out = (BYTE*) realloc (Out, OutSize);
+            BigFreeAndNil(In);
+            //Out = (BYTE*) realloc (Out, OutSize);   -- impossible since we used BigAlloc
             WRITE (Out, OutSize);
-            FreeAndNil(Out);
+            BigFreeAndNil(Out);
         }
     }
 finished:
-    FreeAndNil(In); FreeAndNil(Out);
+    BigFreeAndNil(In); BigFreeAndNil(Out);
     return errcode;
 }
 
@@ -245,7 +251,7 @@ void LZP_METHOD::SetBlockSize (MemSize bs)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_LZP)
-void LZP_METHOD::ShowCompressionMethod (char *buf)
+void LZP_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     LZP_METHOD defaults; char BlockSizeStr[100], MinCompressionStr[100], BarrierTempStr[100], BarrierStr[100], SmallestLenStr[100];
     showMem (BlockSize, BlockSizeStr);

@@ -4,7 +4,7 @@
 ---- Процедура generateDecryption добавляет ключи к записи алгоритма сжатия+шифрования,         ----
 ---- Процедура generateRandomBytes возвращает последовательность крипт. случайных байт          ----
 ----------------------------------------------------------------------------------------------------
-module Encryption (generateEncryption, generateDecryption, generateRandomBytes) where
+module Encryption (generateEncryption, generateDecryption, generateSzDecryption, generateRandomBytes) where
 
 import Prelude hiding (catch)
 import Control.Concurrent
@@ -40,6 +40,17 @@ generateEncryption encryption password = do
                ,algorithm++":s"++encode16 salt++":c"++encode16 checkCode
                          ++":i"++encode16 initVector)
     return ((++map fst result), (++map snd result))
+
+
+-- |Получить пароль для распаковки архивов
+generateSzDecryption (dont_ask_passwords, mvar_passwords, keyfiles, ask_decryption_password, bad_decryption_password) = do
+  password <- modifyMVar mvar_passwords $ \passwords -> do
+    if passwords>[]        then return (passwords, head passwords)   else do
+    if dont_ask_passwords  then return (passwords, "")               else do
+    password <- ask_decryption_password
+    if password==""        then return (passwords, "")               else do
+    return (password:passwords, password)
+  return password
 
 
 -- |Обработать compressor, прочитанный из архива, добавив к нему информацию,

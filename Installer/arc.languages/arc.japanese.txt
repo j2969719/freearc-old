@@ -1,0 +1,718 @@
+﻿******************************************************************************
+***  This is a language file for FreeArc (http://freearc.org).             ***
+***  You may improve it by providing new translations.                     ***
+***  Messages that need translation are marked by "??",                    ***
+***  You just need to find all those question signs and replace them with  ***
+***  appropriate translations of the text at left side.                    ***
+***                                                                        ***
+***  Please note that Tooltips section should include not direct           ***
+***  translations but TOOLTIPS diplayed at the top of appropriate labels.  ***
+***  You may assign tooltip to any label - just use its number +1000 at    ***
+***  the left side. For example, label:                                    ***
+***    0185 Protection:=Protection: (written in your language, of course)  ***
+***  It's tooltip:                                                         ***
+***    1185 Protection:=Appends recovery information to archive            ***
+******************************************************************************
+
+Metainformation (not translations!)
+0000 Language name in english and mother tongue=Japanese (日本語)
+0159 Translated by=Translated by Komuro, Mick, 2chBBS-software\nAdditions and minor fixes by Stepanushkin Dmitry\nSome fixes by Crus Mitsuaki
+0462 Short language code=ja
+
+Language-specific helpfiles (not translations!)
+Filled only for languages providing their own translations
+0256 Helpfile=??
+0257 Command-line help=??
+
+
+=== Explorer context menu =======================================================
+0391 Add to "%s"="%s"に圧縮
+0392 Compress the selected files using FreeArc=FreeArcを使用して、選択されているファイルを圧縮
+0393 Add to SFX "%s"="%s"の自己解凍書庫作成
+0394 Compress the selected files into SFX using FreeArc=FreeArcを使用して、選択されているファイルから自己解凍書庫を作成
+0395 Add to archive...=圧縮...
+0396 Compress the selected files using FreeArc via dialog=FreeArcを使用して、圧縮設定を確認し、選択されているファイルを圧縮
+--
+0397 Open with FreeArc=FreeArcで開く
+0398 Open the selected archive(s) with FreeArc=選択されているファイルをFreeArcで開く
+0399 Extract to "%s"="%s"に解凍
+0400 Extract the selected archive(s) to new folder=選択されている書庫を指定フォルダーに解凍
+0401 Extract here=ここに解凍
+0402 Extract the selected archive(s) to the same folder==選択されている書庫を現行フォルダーに解凍
+0403 Extract...=解凍...
+0404 Extract the selected archive(s) via dialog=解凍設定を確認し、選択されている書庫を解凍
+0405 Test=テスト
+0406 Test the selected archive(s)=選択されている書庫をテスト
+--
+0407 Convert to SFX=自己解凍書庫に変換
+0408 Convert the selected archive(s) to SFX=選択されている書庫を自己解凍書庫に変換
+0409 Convert from SFX=通常書庫に変換
+0410 Convert the selected SFX(es) to normal archive(s)=自己解凍モジュール削除して、通常書庫に変換
+--
+0411 Modify...=編集...
+0412 Modify the selected archives via dialog=選択されている書庫の編集
+0413 Join...=結合...
+0414 Join the selected archives via dialog=複数書庫の結合
+--
+0415 Convert to .arc=arc形式に変換
+0416 Convert the selected archive(s) to FreeArc format=選択されている書庫をFreeArc形式に変換
+0417 Convert to .arc SFX=自己解凍書庫に変換
+0418 Convert the selected archive(s) to FreeArc SFX=選択されている書庫を自己解凍書庫に変換
+0419 Convert to .arc...=arc形式に変換...
+0420 Convert the selected archive(s) to FreeArc format via dialog=設定を確認し、FreeArc形式に変換
+
+
+=== Menu ========================================================================
+Main menu
+0050 File=ファイル(&F)
+0066 Edit=編集(&E)
+0258 Commands=コマンド
+0259 Tools=ツール(&T)
+0260 Options=設定
+0261 Help=ヘルプ(&H)
+
+File menu/toolbar
+0262 Open archive=開く(&O)
+0265 Open archive=書庫を開く
+0263 Select all=全て選択(&A)
+0290 Select all files=全てのファイルを選択
+0037 Select=選択
+0047 Select files=ファイル選択
+0038 Unselect=選択解除
+0048 Unselect files=ファイル選択解除
+0264 Invert selection=選択切り替え(&I)
+0291 Invert selection=選択の切り替え
+0039 Refresh=更新(&R)
+0049 Reread archive/directory=表示更新
+0036 Exit=閉じる(&X)
+0046 Quit application=終了
+
+Commands menu/toolbar
+0030 Add=追加
+0040 Add files to archive(s)=選択したファイルを圧縮
+0035 Extract=解凍
+0045 Extract files from archive(s)=選択した書庫を解凍...
+0034 Test=テスト
+0044 Test files in archive(s)=選択した書庫をテスト
+0086 ArcInfo=情報
+0087 Information about archive=書庫の情報
+0033 Delete=削除(&D)
+0043 Delete files (from archive)=ファイル削除
+
+Tools menu/toolbar
+0266 Lock=ロック
+0267 Lock archive from further changes=書庫の編集を無効にします
+0268 Comment=コメント
+0269 Edit archive comment=書庫のコメントを編集
+0293 Recompress=再圧縮
+0294 Recompress files in archive=書庫のファイル再圧縮
+0270 Convert to SFX=自己解凍書庫に変換
+0271 Convert archive to SFX=書庫を自己解凍書庫に変換
+0426 Convert to FreeArc=FreeArc形式に変換
+0427 Convert foreign archive to FreeArc format=書庫の形式をFreeArcに変換
+0272 Encrypt=暗号化
+0273 Encrypt archive contents=書庫の内容を暗号化
+0274 Protect=保護
+0275 Add Recovery record to archive=書庫にデータ破壊防止情報を追加
+0379 Repair=修復
+0380 Repair damaged archive=破壊された書庫を修復する
+0031 Modify=編集
+0041 Modify archive(s)=書庫の編集
+0032 Join=結合
+0042 Join archives together=複数書庫を結合
+
+Options menu/toolbar
+0064 Settings=設定
+0065 Edit program settings=設定の確認及び変更
+0276 View log=ログ表示
+0277 View logfile=ログファイルの表示
+0278 Clear log=ログ削除
+0279 Clear logfile=ログファイルの削除
+
+Help menu/toolbar
+0280 Main help=メインヘルプ
+0281 Help on using FreeArc=FreeArc使い方のヘルプ
+0282 Cmdline help=コマンドラインのヘルプ
+0283 Help on FreeArc command line=FreeArcコマンドラインのパラメータのヘルプ
+0284 Open Homepage=ホームページを開く
+0285 Open program site=プログラムのホームページを開く
+0373 Open forum=フォーラムを開く
+0374 Open program forum=プログラムのフォーラムを開く
+0375 Open wiki=ウィキを開く
+0376 Open program wiki=プログラムのウィキを開く
+0286 Check for update=アップデートの有無の確認
+0287 Check for new program versions=プログラムの新しいバージョンの有無のチェック
+0288 About=FreeArcについて
+0289 About=FreeArcについての情報表示
+
+
+=== File manager ==================================================================
+Navibar
+0006 Up=上へ
+0007 Save=保存
+0008 Select files=選択(&S)...
+0009 Unselect files=選択解除(&E)...
+
+Filelist
+0015 Name=名前
+0016 Size=サイズ
+0017 Modified=更新日時
+0018 DIRECTORY=<フォルダー>
+
+Statusbar
+0022 Selected %1 bytes in %2 file(s)=%2 個のオブジェクト選択, %1 バイト
+0023 Total %1 bytes in %2 file(s)=%2 個のオブジェクト, %1 バイト
+
+Messages
+0012 There are no files selected!=ファイルが選択されていません。
+0013 There are no archives selected!=書庫が選択されていません。
+0071 %1: no such file or directory!=%1のファイルがありません。
+0133 You can't compress files directly from archive!=書庫のファイルを圧縮する前、そのファイルを解凍する必要があります。
+0145 You can't join archives directly from archive!=書庫のファイルを結合する前、そのファイルを解凍する必要があります。
+0251 Abort operation?=操作を中止しますか。
+
+
+=== Dialogs =======================================================================
+Archive open dialog
+0305 Open archive=書庫を開く
+0306 This file isn't a FreeArc archive!=書庫の形式はFreeArc形式ではありません。
+0307 FreeArc archives (*.arc)=FreeArc書庫(*.arc)
+0308 Archives and SFXes (*.arc;*.exe)=書庫及び自己解凍書庫(*.arc;*.exe)
+0309 All files (*)=全てのファイル(*)
+
+
+Add dialog
+--Title
+0134 Add %1 to archive=選択したファイルを圧縮
+0135 Add %2 files to archive=選択したファイルを圧縮
+0136 Add all files to archive=選択したファイルを圧縮
+0146 Modify all archives=全ての書庫の編集
+0147 Modify %1=%1の編集
+0148 Modify %2 archives=%2書庫の編集
+0149 Join all archives=全ての書庫の結合
+0150 Join %1 with another archive=%1を他の書庫と結合
+0151 Join %2 archives=%2書庫の結合
+0428 Convert %1 to FreeArc format=%1をFreeArc形式に変換
+0429 Convert %2 archives to FreeArc format=%2書庫をFreeArc形式に変換
+---------
+0182 Main=メイン
+0131 Output archive:=圧縮先(&A)：
+0132 Select output archive=圧縮先を選択してください
+0141 Base directory inside archive:=書庫のルートディレクトリ:
+--
+0188 Store file paths:=ファイルパスの保存
+0189 No=いいえ
+0190 Relative to compressed dir=圧縮先の相対パス
+0191 Relative to curdir (default)=現行フォルダーの相対パス(初期設定)
+0192 Absolute (relative to root dir)=絶対パス(ルートフォルダーの相対パス)
+0193 Full (including drive letter)=フルパス(ドライブ名を含む)
+--
+0194 Update mode:=更新方法(&U)：
+0195 Add and replace files (default)=全てのファイル上書き
+0196 Add and update files=ファイル追加と更新
+0197 Fresh existing files=変更したファイルのみ更新
+0198 Synchronize archive with disk contents=ファイルを同期させる
+--
+0183 Compression:=圧縮中
+0184 Encryption:=暗号化
+0185 Protection:=保護
+0186 Comment:=コメント(&C)：
+0227 Make EXE:=自己解凍書庫作成(&X)
+0128 Test archive after operation=圧縮後テストします
+0122 Delete files successfully archived=圧縮が正常に完了後に元のファイルを削除
+0187 Finalize archive=書庫の編集ができないようにします
+---------
+0200 Archive=書庫
+0201 Compress each file into separate archive=ファイルごとに別の書庫にします
+0202 Add to archive name:=書庫のファイル名：
+--
+0203 Set archive time to:=書庫更新日時設定：
+0204 Current system time=現在の日時
+0205 Original archive time=書庫の日時を変更しません
+0206 Latest file time=最新のファイル日時
+--
+0207 Delete previous archive contents=書庫のコメントを削除
+0208 Order of files in archive:=書庫のファイルの整列：
+--
+0209 Recompression mode:=再圧縮モード
+0210 Quickly append new files=新しいファイルを速く追加します
+0211 Smart recompression of solid blocks (default)=再圧縮が必要なソリッドブロックしか再圧縮しません(初期設定)
+0212 Recompress all files=全てのファイルを再圧縮します
+0213 Store only fileinfo=ファイル情報しか保存しない
+0214 Store only fileinfo & crcs=ファイル情報及びチェックサムしか保存しない
+0215 No archive headers=書庫のヘッダなし
+--
+0216 Backup mode:=バックアップモード:
+0217 No (default)=無効(初期設定)
+0218 Full: clear \"Archive\" attribute of files succesfully archived=フル(正常に圧縮されたファイルのアーカイブ可能の属性をクリアします)
+0219 Differential: select only files with \"Archive\" attribute set=微分(アーカイブ可能の属性が設定されているファイルしか選択しません)
+0220 Incremental: select by \"Archive\" attribute & clear it after compression=増分(アーカイブ可能の属性が設定されているファイルしか選択しないで、圧縮後そのファイルのアーカイブ可能の属性をクリアします)
+---------
+0221 Files=ファイル
+0222 Include only files:=指定ファイルだけを使用：
+0223 Exclude files:=除外ファイル：
+0224 Include only files larger than:=指定サイズより大きいファイル圧縮
+0225 Include only files smaller than:=指定サイズより小さいファイル圧縮
+---------
+0199 Comment=コメント
+
+
+Delete dialog
+0160 Delete %1 from archive?=\"%1\"を本当に削除しますか。
+0161 Delete %1?=\"%1\"を本当に削除しますか。
+0019 Delete %2 file(s) from archive?=これらの%2個の項目を本当に削除しますか。
+0020 Delete %2 file(s)?=これらの%2個の項目を本当に削除しますか。
+0484 Delete directory %1?=%1のフォルダーを削除しますか。
+
+
+Extract dialog
+0024 Extract files from %3=%3を解凍(&E)
+0025 Extract %1 from %3=%3の書庫から%1を解凍
+0026 Extract %2 files from %3=%3の書庫から%2ファイルを解凍
+0027 Extract files from %4 archives=%4書庫からファイル解凍
+0158 Extract all archives=全ての書庫を解凍
+0152 Test %3=%3の書庫をテスト(&T)
+0153 Test %1 from %3=%3の書庫の%1をテスト
+0154 Test %2 files from %3=%3の書庫の%2ファイルをテスト
+0155 Test %4 archives=%4書庫をテスト
+0157 Test all archives=全ての書庫をテスト
+--Overwrite mode
+0005 Overwrite mode=上書き方法
+0001 Ask before overwrite=上書きするときは確認する(&B)
+0002 Overwrite without prompt=常に上書き(&O)
+0003 Update old files=より古いファイルの更新
+0051 Skip existing files=ファイルが存在するときはスキップ(&E)
+--Output directory
+0004 Output directory:=解凍先(&X)：
+0021 Select output directory=解凍先指定
+0014 Append archive name to the output directory=出力フォルダーに書庫名を追加
+0468 Open output directory in Explorer=出力フォルダーをエクスプローラーで開く
+--Other
+0425 Keep broken extracted files=破壊されたファイルを削除しません
+0479 Shutdown computer when operation completed=完了後にシャットダウン
+0072 Additional options:=詳細設定
+
+
+Archive information dialog
+0085 All about %1=%1についての全ての情報表示
+0465 Archive type:=書庫種類
+0173 Directories:=フォルダー数：
+0088 Files:=ファイル数：
+0089 Total bytes:=サイズ：
+0090 Compressed bytes:=圧縮済みサイズ：
+0091 Ratio:=圧縮率：
+--
+0104 Directory blocks:=ディレクトリブロック数：
+0463 Directory, bytes:=ディレクトリ、バイト数：
+0464 Directory, compressed:=ディレクトリ、圧縮サイズ：
+0092 Solid blocks:=ソリッドブロック数：
+0093 Avg. blocksize:=平均ブロックサイズ：
+--
+0099 Compression memory:=圧縮に必要なメモリ：
+0100 Decompression memory:=解凍に必要なメモリ：
+0105 Dictionary:=辞書サイズ(&D)：
+--
+0094 Archive locked:=ロック：
+0095 Recovery info:=リカバリレコード：
+0096 SFX size:=自己解凍モジュールのサイズ：
+0156 Headers encrypted:=ファイル名を暗号化(&N)
+--
+0097 Encryption algorithms:=暗号化メソッド：
+0098 Archive comment:=コメント(&C)：
+---
+0449 Solid blocks=ソリッドブロック数
+0450 Position=位置
+0451 Size=サイズ
+0452 Compressed=圧縮サイズ
+0453 Files=ファイル数
+0454 Method=圧縮方法
+
+
+Settings dialog
+0067 Settings=設定
+0174 Main=メイン
+0068 Language:=言語設定：
+0069 Edit=編集(&E)
+0070 Import=インポート
+0170 Full name:=フルネーム：
+0171 Copyright:=著作権：
+0166 Logfile:=ログファイル：
+0292 View=表示(&V)
+0167 Select logfile=ログファイル選択
+0447 Temporary directory:=一時フォルダー：
+0448 Select directory for temporary files=一時フォルダーを選択してください
+0172 Associate FreeArc with .arc files=.arcファイルをFreeArcに関連付け
+0471 Associate FreeArc with other archives=その他書庫をFreeArcに関連付け
+0370 Watch for new versions via Internet=インターネットで新しいバージョンの有無の確認
+0168 You should restart FreeArc in order for a language settings to take effect.=言語設定を適用するのにFreeArcを再起動してください
+0169 Passwords need to be entered again after restart.=再起動後パスワードを再度入力する必要があります
+--
+0466 Interface=インターフェース
+0361 Add captions to toolbar buttons=ツールバーボタンのテキスト表示
+0469 Show "Test archive" dialog=書庫テストのダイアログを表示
+0485 Open .tar.gz-like archives in single step=.tar.gzのような書庫を一段階で開く
+0467 Unpack whole archive when running:=書庫から実行の前にすべての書庫のファイルを解凍
+--
+0421 Explorer integration=シェルに結合
+0422 Enable context menu in Explorer=エクスプローラーの右クリックメニューでFreeArcを表示
+0423 Make it cascaded=サブメニュー化する
+0424 Enable individual commands:=メニュー項目：
+--
+0388 Info=情報
+0461 Largest address space block:=最大アドレス空間ブロック
+
+
+Logfiles
+0303 No log file specified in Settings dialog!=ログファイルが設定されていません。
+0304 Clear logfile %1?=%1のログファイルを削除しますか。
+
+Checking for updates
+0295 Checking for updates...=アップデートの確認中...
+0296 Cannot open %1. Do you want to check the page with browser?=%1を開くことができません。そのページをブラウザで開きますか。
+0297 Nothing new at %1=%1でより新しいバージョンが見つかりません
+0298 Found new information at %1! Open the page with browser?=%1でより新しいバージョンが見つかりました。そのページをブラウザで開きますか。
+
+About dialog
+0459 High-performance archiver=高性能圧縮ソフト
+0460 Free as well for commercial as for non-commercial use=このソフトの商業利用及び非商業利用が無料です
+
+
+=== Profile settings ============================================================
+--Compression settings
+0106 Compression=圧縮
+0175 Compression profile:=圧縮プロファイル:
+0178 Save=保存
+0107 Compression level=圧縮レベル(&L)：
+0108 Maximum=最高
+0109 High=高
+0110 Normal=標準
+0111 Fast=高速
+0112 Very fast=最速
+0127 HDD-speed=HDD速度
+0113 Fast, low-memory decompression=高速、メモリの使用量が少ない
+0226 (fast, low-memory decompression)=(高速、メモリの使用量が少ない)
+0176 Filetype auto-detection=ファイル形式の自動検出
+--Description of compression method selected
+0114 Compression level: %1=圧縮方法： %1
+0115 Compression speed: %1, memory: %2=圧縮に必要なメモリ： %2, 速度： %1
+0116 Decompression speed: %1, memory: %2=解凍に必要なメモリ： %2, 速度： %1
+0390 All speeds were measured on 3GHz Core2Duo=3GHz Core2Duoで速度を測定しました
+--Solid block size
+0177 Limit solid blocks=ソリッドブロック制限
+0138 Bytes, no more than:=サイズ：
+0139 Files, no more than:=ファイル数：
+0140 Split by extension=拡張子で検出
+
+--Encryption settings
+0119 Encryption=暗号化
+0179 Encryption profile:=暗号化プロファイル
+0180 Save=保存
+0120 Encrypt archive directory=ファイル名を暗号化(&N)
+0181 Use password=パスワード使用
+0123 Keyfile:=キーファイル：
+0124 Select keyfile=キーファイル選択
+0125 Create=作成
+0126 Create new keyfile=キーファイル作成
+0121 Encryption algorithm:=暗号化アルゴリズム：
+--Decryption settings
+0144 Decryption=復号
+
+
+=== Execution dialogs ============================================================
+Many dialogs
+0079 &Yes=はい(&Y)
+0080 &No=いいえ(&N)
+0362 &OK=OK(&O)
+0081 &Cancel=キャンセル(&C)
+0363 &Select=選択(&S)
+0364 &Close=閉じる(&C)
+0432 &Detach=バックグラウンドで実行(&D)
+
+Progress indicator
+--Labels
+0056 Files=ファイル数：
+0057 Total files=計ファイル数：
+0058 Bytes=処理済み：
+0059 Total bytes=サイズ：
+0252 Compressed=圧縮済みサイズ：
+0253 Total compressed=処理済みサイズ：
+0060 Ratio=圧縮率：
+0061 Speed=速度：
+0062 Time=経過時間：
+0063 Total time=総使用時間：
+--Messages
+0246 Found %1 files=%1ファイルが見つかりました
+0247 Found %1 archives=%1書庫が見つかりました
+0248 Analyzed %1 files=%1ファイルの分析完了
+0249 Reading archive directory=書庫のディレクトリの読み込み中
+0250 Sorting filelist=ファイル一覧の並べ替え中
+0385 Scanning archive for damages=書庫のテスト中
+0386 Protecting archive from damages=書庫の保護中
+0387 Recovering archive=書庫の修復中
+--Extra options
+0446 Keep window on top=常に手前に表示
+--Buttons
+0052 &Background=バックグラウンド(&B)
+0053 &Pause=一時停止(&P)
+0054 &Continue=続行(&C)
+0470 &Close=閉じる(&C)
+
+File overwrite dialog
+0078 Confirm File Replace=ファイル上書き確認
+0162 Destination folder already contains processed file.=このフォルダーには既に以下の同じファイルが存在します
+0163 Would you like to replace the existing file=現在のファイル
+0164 with this one?=に次の新しいファイルを上書きしますか。
+0165 %1\n%2 bytes\nmodified on %3=%1\n%2 バイト\n更新日時： %3
+0082 Yes to &All=全てはい(&A)
+0083 No to A&ll=全ていいえ(&L)
+0084 &Update all=全て更新(&U)
+
+Enter password dialog
+0076 Enter encryption password=パスワード入力
+0077 Enter decryption password=パスワード入力
+0074 Enter password:=パスワード入力(&W)：
+0075 Reenter password:=パスワード再入力 ：
+
+Archive comment dialog
+0073 Enter archive comment=書庫のコメントを入力してください
+
+
+=== Infoline messages ====================================================
+0439 Listing archive %1=%1の書庫のファイル表示中
+0445 SUCCESFULLY LISTED %1=%1の書庫のファイルが正常に表示された
+0442 %2 WARNINGS WHILE LISTING %1=%1の書庫のファイル表示中%2警告が発生しました
+
+0435 Deleting files from archive %1=%1の書庫からファイルの削除中
+0229 FILES SUCCESFULLY DELETED FROM %1=%1の書庫からファイルの削除が正常に完了
+0230 %2 WARNINGS WHILE DELETING FROM %1=%1の書庫からファイルの削除中%2警告が発生しました
+
+0440 Testing archive %1=%1の書庫のテスト中
+0232 SUCCESFULLY TESTED %1=%1の書庫のテストが正常に完了
+0233 %2 WARNINGS WHILE TESTING %1=%1の書庫のテスト中%2警告が発生しました
+
+0441 Extracting files from archive %1=%1の書庫の解凍中
+0235 FILES SUCCESFULLY EXTRACTED FROM %1=%1の書庫の解凍が正常に完了
+0236 %2 WARNINGS WHILE EXTRACTING FILES FROM %1=%1の書庫の解凍中%2警告が発生しました
+
+0433 Modifying archive %1=%1の書庫の編集中
+0238 SUCCESFULLY MODIFIED %1=%1の書庫の編集が正常に完了
+0239 %2 WARNINGS WHILE MODIFYING %1=%1の書庫の編集中%2警告が発生しました
+
+0240 Joining archives to %1=%1に結合中
+0241 SUCCESFULLY JOINED ARCHIVES TO %1=%1に結合が正常に完了
+0242 %2 WARNINGS WHILE JOINING ARCHIVES TO %1=%1に結合中%2警告が発生しました
+
+0437 Creating archive %1=%1の書庫の作成中
+0443 SUCCESFULLY CREATED %1=%1の書庫が正常に作成されました
+0434 %2 WARNINGS WHILE CREATING %1=%1の書庫の作成中%2警告が発生しました
+
+0438 Updating archive %1=%1の書庫の更新中
+0444 SUCCESFULLY UPDATED %1=%1の書庫が正常に更新されました
+0436 %2 WARNINGS WHILE UPDATING %1=%1の書庫の更新中%2警告が発生しました
+
+0299 Lock archive(s)?=書庫をロックしますか。
+0300 Locking archive %1=%1の書庫のロック中
+0301 SUCCESFULLY LOCKED ARCHIVE %1=%1の書庫のロックが正常に完了
+0302 %2 WARNINGS WHILE LOCKING ARCHIVE %1=%1の書庫のロック中%2警告が発生しました
+
+0381 Repair archive(s)? Repaired archive(s) will be placed into files named fixed.*=書庫を修復してみますか。修復された書庫がfixed.*のファイルに保存されます
+0382 Repairing archive %1=%1の書庫の修復中
+0383 SUCCESFULLY REPAIRED ARCHIVE %1=%1の書庫が正常に修復されました
+0384 %2 WARNINGS WHILE REPAIRING ARCHIVE %1=%1の書庫の修復中%2警告が発生しました
+
+
+=== Console messages ====================================================
+0480 Compressing %1=%1の圧縮中
+0481 Testing %1=%1のテスト中
+0482 Extracting %1=%1の解凍中
+0483 Skipping %1=%1のスキップ中
+
+
+=== Error messages =======================================================
+0316 ERROR: %1=エラー：%1
+0317 WARNING: %1=警告：%1
+0310 can't modify archive locked with -k=ロックされた書庫の編集ができません
+0311 can't create temporary file=一時ファイル作成ができません
+0312 output archive already exists, keeping temporary file %1=書庫が既に圧縮先に存在する為、%1の一時ファイルを削除しません
+0313 archive broken, keeping temporary file %1=書庫が破壊されている為、%1の一時ファイルを削除しません
+0314 archive broken, deleting=書庫が破壊されている為、削除します
+0315 can't open SFX module %1=%1の自己解凍モジュールを開くことができません
+0318 command syntax is "%1"=コマンド記述法は"%1"です
+0319 options %1 and %2 can't be used together=%1と%２のオプションが同時に使えません
+0320 unknown command "%1". Supported commands are: %2="%1"のコマンドが不明です。サポートされているコマンドが%2です
+0321 unknown option "%1"="%1"のオプションが不明です
+0322 ambiguous option "%1" - is that %2?="%1"のオプションが曖昧です。もしかして%2という意味ですか。
+0325 option "%1" have illegal format="%1"のオプションの形式が不正です。
+0326 %1 option must be one of: %2=%1のオプションの記述法が%2のいずれかです
+0327 no command name in command: %1=%1にコマンド名がありません
+0328 no archive name in command: %1=%1に書庫のファイル名がありません
+0329 no filenames in command: %1=%1にファイル名がありません
+0330 can't read directory "%1"="%1"のフォルダーにアクセスができません
+0331 can't get info about file "%1"="%1"のファイルの情報取得ができません
+0332 can't open file "%1"="%1"のファイルを開くことができません
+0334 bad section %1 in %2=%2の%1の区分が不正です
+0455 Operation terminated by user!=動作がユーザーによる中断されました。
+0456 Program terminated by user!=プログラムがユーザーによる中断されました。
+0337 no files, erasing empty archive=書庫にファイルがない為、書庫を削除します
+0338 skipped %1 fake files=%1偽造のファイルをスキップしました
+0339 bad password for archive %1=%1の書庫のパスワードが間違っています
+0340 bad password for %1 in archive %2=%1の書庫の%2のパスワードが間違っています
+0341 %1 isn't archive or this archive is corrupt: %2. Please recover it using 'r' command or use -tp- option to ignore Recovery Record=%1が書庫じゃありません。または書庫が破壊されています。エラーメッセージ：%2。'r'のコマンドを使用して、書庫の修復することができます。または-tp-のオプションを使用して、リカバリレコードを無視することも可能です
+0342 SFX module %1 is not found=%1の自己解凍モジュールがありません
+0343 %1 isn't implemented=%1の機能が非対応です
+0344 only first of %1 recovery records can be processed by this program version. Please use newer versions to process the rest=現在のバージョンで%1リカバリレコードの1つしか処理することができません。残りのリカバリレコードを処理するためにより新しいバージョンを使用してください
+0345 you need FreeArc %1 or above to process this recovery info=リカバリレコードを処理するためにFreeArc %1以上のバージョンが必要です。
+0346 file %1 already exists=%1のファイルが既に存在します
+0347 archive can't be recovered - recovery data absent or corrupt=書庫のリカバリデータがないか破壊されている為、書庫の修復ができません
+0348 %1 unrecoverable errors (%2) found, can't restore anything!=%1の復元できないエラー(%2)が発生し、データ修復ができません。
+0349 can't open original at %1=%1を開くことができません
+0350 %1 has size %2 so it can't be used to recover %3 having size %4=%1のサイズが%2の為、サイズ%4の%3の修復ができません
+0351 %1 errors (%2) remain unrecovered=%1回復できないエラー(%2)が残っています
+0352 found %1 errors (%2)=%1エラー(%2)が発生しました
+0353 there were %1 warnings due archive testing=書庫のテスト中%1警告が発生しました
+0354 block descriptor at pos %1 is corrupted=%1の位置にブロック記述子が破壊されています
+0355 %1 is corrupted=%1がが破壊されています
+0359 %1 failed decompression=%1の解凍が失敗しました
+0360 %1 should be uncompressed=%1の解凍が必要です
+0356 archive directory not found=書庫のディレクトリが見つかりません
+0357 archive signature not found at the end of archive=書庫の最後に書庫の署名が見つかりません
+0358 last block of archive is not footer block=書庫の最後のブロック形式が不正です
+0377 command "%1" shouldn't have additional arguments="%1"のコマンドでパラメータを使用してはいけません
+0378 bad name or parameters in encryption algorithm %1=%1の圧縮アルゴリズム名かパラメータが不正です
+0472 Unsupported compression method for "%1".=\"%1\"はサポートされていない圧縮形式です
+0473 Data error in "%1". File is broken.=\"%1\"でデータエラーが発生しました。ファイルは壊れています
+0474 Data error in encrypted file "%1". Wrong password?=暗号化されたファイル\"%1\"でデータエラーが発生しました。パスワードが間違っていませんか？
+0475 CRC failed in "%1". File is broken.=\"%1\"のCRCが違います。 ファイルは壊れています
+0476 CRC failed in encrypted file "%1". Wrong password?=暗号化されたファイル\"%1\"のCRCが違います。パスワードが間違っていませんか？
+0477 Unknown error=不明なエラー
+0478 can't modify non-FreeArc archive=FreeArcではない書庫の編集ができません。
+
+Errors returned by compression methods
+0365 general (de)compression error in %1=%1の処理中一般エラーが発生しました
+0366 invalid compression method or parameters in %1=%1の圧縮方法かパラメータが不正です
+0367 can't allocate memory required for (de)compression in %1=メモリが不足している為、%1の処理ができません
+0369 bad compressed data in %1=%1の圧縮データが不正です
+0430 read error (bad media?) in compression algorithm %1=%1の圧縮アルゴリズムの使用中読み込みエラーが発生しました
+0431 write error (disk full?) in compression algorithm %1=%1の圧縮アルゴリズムの使用中書き込みエラーが発生しました
+
+
+=== Standard profiles ====================================================
+Compression
+0771 Maximum=最大
+0772 Maximum with fast decompression=最大(高速解凍可能)
+0773 Ultra (require 2 gb RAM for decompression)=超圧縮(解凍する時、2GBのメモリを使用)
+0774 Maximum (require 1 gb RAM for decompression)=最大(解凍する時、1GBのメモリを使用)
+0775 Best asymmetric (with fast decompression)=非対称最高(高速解凍可能)
+0752 No compression=無圧縮
+
+Encryption
+0733 Strongest=一番強い
+0732 Strong=強い
+0730 Standard=通常
+0731 Fast=高速
+
+Protection
+0769 Add (autosize, 1-4%)=リカバリレコードのサイズ(自動、1～4%)
+0735 Remove=リカバリレコード削除
+0734 Add=リカバリレコード追加
+0770 Add for recovery via Internet=インターネットで公開するデータの修復ができるためにリカバリレコード追加
+
+Comment
+0740 Add from textbox=テキストボックスから追加
+0741 Remove=削除
+0742 Add short comment, example=短いコメントの追加、例
+0743 Add from a file, example=ファイルから追加、例
+
+SFX
+0765 Windows GUI=Windowsグラフィカルユーザーインターフェース
+0766 Windows console=Windowsコンソール
+0767 Linux console=Linuxコンソール
+0768 Convert EXE back to ARC=自己解凍モジュールを削除し、ARCに変換
+
+Sorting
+0744 No sorting=無効
+0745 Standard=通常
+0746 Advanced=高度
+0747 Smart+Path=スマート+パス
+0748 Smart+Name=スマート+名前
+0750 Extension+Path=拡張子+パス
+0749 Extension+Name=拡張子+名前
+0751 Extension+Size=拡張子+サイズ
+
+Archive name template
+0754 Date+Time=日時
+0755 Date=日付
+0756 Time=時刻
+0757 Month=月
+0758 Monthday=月日
+0759 Weekday=週日
+
+Exclude
+0753 Backup files=バックアップファイル
+
+Additional compression options
+0760 Perform full backup=フルバックアップを行います
+0761 Full archive test before and after operation=動作の前後に書庫をテストします
+
+Additional extraction options
+0762 Remove pathnames=パスなし
+0763 Restore absolute pathnames=絶対パス
+0764 Full archive test before performing operation=解凍する前書庫のテストを行います
+
+
+=== Tooltips (index=N+1000) ===========================================
+
+******************************************************************************************
+***  DON'T FORGET THAT THIS SECTION SHOULD PROVIDE TOOLTIPS, NOT DIRECT TRANSLATIONS.  ***
+***  You may find some tooltips in arc.english.txt                                     ***
+******************************************************************************************
+
+Add dialog
+--
+1183 Compression=圧縮
+1184 Encryption=暗号化
+1185 Protection:=保護：
+1186 Comment=コメント
+1227 Make EXE:=自己解凍書庫の作成：
+1128 Test archive after operation=圧縮が完了後
+1122 Delete files successfully archived=正常に圧縮した後元のファイルを削除
+1187 Finalize archive=書庫のロック
+1072 Additional options:=詳細設定：
+--
+1201 Compress each marked file/directory into separate archive=ファイルごとに別の書庫にします
+1202 Add to archive name=書庫のファイル名に追加
+--
+1207 Delete previous archive contents=以前の書庫の内容を削除
+1208 Order of files in archive=書庫のファイルの並べ替え
+--
+1222 Include only files=指定ファイルだけを使用
+1223 Exclude files=除外ファイル
+
+--Settings dialog
+1467 Unpack whole archive when running:=書庫から実行の前にすべての書庫のファイルを解凍
+1469 Show "Test archive" dialog=書庫テストのダイアログ表示
+
+--Compression settings
+1113 Fast, low-memory decompression=高速、メモリ使用容量の少ない解凍
+1176 Filetype auto-detection=ファイル形式の自動検出
+1138 Bytes, no more than:=バイト数上限：
+1139 Files, no more than:=ファイル数上限：
+1140 Split by extension=拡張子で分けます
+
+--Encryption settings
+1120 Encrypt archive directory=ファイル名を暗号化
+1123 Keyfile:=キーファイル：
+1125 Generate new keyfile=新しいキーファイルを生成します
+1181 Use password=パスワード使用
+
+
+=== Everything else ====================================================
+Common words
+0101 Yes=はい
+0102 No=いいえ
+0323 or=か
+0324 and=と
+
+Failure messages
+0010 Operation interrupted!=動作が中止されました。
+0011 No threads to run: infinite loop or deadlock?=実行スレッドがありません。無限ループかデッドロック問題が発生した可能性があります。

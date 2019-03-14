@@ -5,83 +5,75 @@
 #include <sys/stat.h>
 #include <string.h>
 
+#include "../Compression.h"
+#include "../MultiThreading.h"
+
 extern "C" {
 #include "C_PPMD.h"
 }
 #include "PPMdType.h"
 
-/*-------------------------------------------------*/
-/* Реализация ppmd_compress                        */
-/*-------------------------------------------------*/
-#ifndef FREEARC_DECOMPRESS_ONLY
 
-namespace PPMD_compression {
+#define INSERT(routine,locking)                                                                                               \
+                                                                                                                              \
+extern "C" {                                                                                                                  \
+int routine (int ENCODE, int order, MemSize mem, int MRMethod, MemSize chunk, CALLBACK_FUNC *callback, void *auxdata)         \
+{                                                                                                                             \
+  locking;                                                                                                                    \
+  _PPMD_FILE fpIn (callback, auxdata, compress_all_at_once? (ENCODE? chunk : chunk/8*9+1000) : BUFFER_SIZE);                  \
+  fpIn.fill();                                                                                                                \
+  _PPMD_FILE fpOut(callback, auxdata, compress_all_at_once? (ENCODE? chunk/8*9+1000 : chunk) : BUFFER_SIZE);                  \
+  if ( !StartSubAllocator(mem) ) {                                                                                            \
+    return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;                                                                                 \
+  }                                                                                                                           \
+  ENCODE? EncodeFile (&fpOut, &fpIn, order, MR_METHOD(MRMethod))                                                              \
+        : DecodeFile (&fpOut, &fpIn, order, MR_METHOD(MRMethod));                                                             \
+  StopSubAllocator();                                                                                                         \
+  fpIn.free();                                                                                                                \
+  fpOut.flush();                                                                                                              \
+  return mymin(_PPMD_ERROR_CODE(&fpIn), _PPMD_ERROR_CODE (&fpOut));                                                           \
+}                                                                                                                             \
+}                                                                                                                             \
+                                                                                                                              \
+void _STDCALL PrintInfo (_PPMD_FILE* DecodedFile, _PPMD_FILE* EncodedFile)                                                    \
+{                                                                                                                             \
+}                                                                                                                             \
 
+
+
+/*-------------------------------------------------*/
+/* Реализация ppmd_*_compress                      */
+/*-------------------------------------------------*/
+#define _USE_THREAD_KEYWORD
+
+namespace PPMD_de_compression {
+#if defined(PPMD_MT) || defined(FREEARC_UNIX)
 #include "Model.cpp"
-
-extern "C" {
-int ppmd_compress (int order, MemSize mem, int MRMethod, CALLBACK_FUNC *callback, void *auxdata)
-{
-  if ( !StartSubAllocator(mem) ) {
-    return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
-  }
-  _PPMD_FILE* fpIn  = new _PPMD_FILE (callback, auxdata);
-  _PPMD_FILE* fpOut = new _PPMD_FILE (callback, auxdata);
-  EncodeFile (fpOut, fpIn, order, MR_METHOD(MRMethod));
-  fpOut->flush();
-  int ErrCode = FREEARC_OK;
-  if (_PPMD_ERROR_CODE(fpIn) <0)  ErrCode = _PPMD_ERROR_CODE (fpIn);
-  if (_PPMD_ERROR_CODE(fpOut)<0)  ErrCode = _PPMD_ERROR_CODE (fpOut);
-  delete fpOut;
-  delete fpIn;
-  StopSubAllocator();
-  return ErrCode;
-}
-} // extern "C"
-
-void _STDCALL PrintInfo (_PPMD_FILE* DecodedFile, _PPMD_FILE* EncodedFile)
-{
-}
-
-} // namespace PPMD_compression
+INSERT(ppmd_de_compress,(void)0)
 #undef _PPMD_H_
+#else
+static FARPROC ppmd_de_compress = NULL;
+#endif
+}
 
-#endif // FREEARC_DECOMPRESS_ONLY
 
-
-/*-------------------------------------------------*/
-/* Реализация ppmd_decompress                      */
-/*-------------------------------------------------*/
+#undef _USE_THREAD_KEYWORD
 
 namespace PPMD_decompression {
-
 #include "Model.cpp"
-
-extern "C" {
-int ppmd_decompress (int order, MemSize mem, int MRMethod, CALLBACK_FUNC *callback, void *auxdata)
-{
-  if ( !StartSubAllocator(mem) ) {
-    return FREEARC_ERRCODE_NOT_ENOUGH_MEMORY;
-  }
-  _PPMD_FILE* fpIn  = new _PPMD_FILE (callback, auxdata);
-  _PPMD_FILE* fpOut = new _PPMD_FILE (callback, auxdata);
-  DecodeFile (fpOut, fpIn, order, MR_METHOD(MRMethod));
-  fpOut->flush();
-  int ErrCode = FREEARC_OK;
-  if (_PPMD_ERROR_CODE(fpIn) <0)  ErrCode = _PPMD_ERROR_CODE (fpIn);
-  if (_PPMD_ERROR_CODE(fpOut)<0)  ErrCode = _PPMD_ERROR_CODE (fpOut);
-  delete fpOut;
-  delete fpIn;
-  StopSubAllocator();
-  return ErrCode;
+INSERT(ppmd_decompress2, static Mutex mutex; Lock _(mutex))
 }
-} // extern "C"
+#undef _PPMD_H_
 
-void _STDCALL PrintInfo(_PPMD_FILE* DecodedFile,_PPMD_FILE* EncodedFile)
-{
+namespace PPMD_compression {
+#ifndef FREEARC_DECOMPRESS_ONLY
+#include "Model.cpp"
+INSERT(ppmd_compress2, static Mutex mutex; Lock _(mutex))
+#else
+static FARPROC ppmd_compress2 = NULL;
+#endif // FREEARC_DECOMPRESS_ONLY
 }
-
-} // namespace PPMD_decompression
+#undef _PPMD_H_
 
 
 /*-------------------------------------------------*/
@@ -94,16 +86,29 @@ PPMD_METHOD::PPMD_METHOD()
   order    = 10;
   mem      = 48*mb;
   MRMethod = 0;
+  chunk    = 0;
+}
+
+// Диспетчеризатор функций упаковки/распаковки
+int ppmd_dispatch (int ENCODE, int order, MemSize mem, int MRMethod, MemSize chunk, CALLBACK_FUNC *callback, void *auxdata)
+{
+  // Use faster function from DLL if possible
+  static FARPROC    compress = LoadFromDLL ("ppmd_compress2");
+  static FARPROC  decompress = LoadFromDLL ("ppmd_decompress2");
+  static FARPROC de_compress = LoadFromDLL ("ppmd_de_compress");
+
+  // Use m/t function for calls from 4x4 if possible
+  FARPROC f = compress_all_at_once? (de_compress? de_compress : (FARPROC) PPMD_de_compression::ppmd_de_compress) : (FARPROC) NULL;
+  if (!f) f = ENCODE? (FARPROC) compress                         : (FARPROC) decompress;
+  if (!f) f = ENCODE? (FARPROC) PPMD_compression::ppmd_compress2 : (FARPROC) ppmd_decompress2;
+  if (!f)   return FREEARC_ERRCODE_INVALID_COMPRESSOR;
+  return ((int (*)(int, int, MemSize, int, MemSize, CALLBACK_FUNC*, void*)) f) (ENCODE, order, mem, MRMethod, chunk, callback, auxdata);
 }
 
 // Функция распаковки
 int PPMD_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 {
-  // Use faster function from DLL if possible
-  static FARPROC f = LoadFromDLL ("ppmd_decompress");
-  if (!f) f = (FARPROC) ppmd_decompress;
-
-  return ((int (*)(int, MemSize, int, CALLBACK_FUNC*, void*)) f) (order, mem, MRMethod, callback, auxdata);
+  return ppmd_dispatch (FALSE, order, mem, MRMethod, chunk, callback, auxdata);
 }
 
 #ifndef FREEARC_DECOMPRESS_ONLY
@@ -111,19 +116,16 @@ int PPMD_METHOD::decompress (CALLBACK_FUNC *callback, void *auxdata)
 // Функция упаковки
 int PPMD_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 {
-  // Use faster function from DLL if possible
-  static FARPROC f = LoadFromDLL ("ppmd_compress");
-  if (!f) f = (FARPROC) ppmd_compress;
-
-  return ((int (*)(int, MemSize, int, CALLBACK_FUNC*, void*)) f) (order, mem, MRMethod, callback, auxdata);
+  return ppmd_dispatch (TRUE, order, mem, MRMethod, chunk, callback, auxdata);
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_PPMD)
-void PPMD_METHOD::ShowCompressionMethod (char *buf)
+void PPMD_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
-  char MemStr[100];
+  char MemStr[100], ChunkStr[100];
   showMem (mem, MemStr);
-  sprintf (buf, "ppmd:%d:%s%s", order, MemStr, MRMethod==2? ":r2": (MRMethod==1? ":r":""));
+  showMem (chunk, ChunkStr);
+  sprintf (buf, "ppmd:%d:%s%s%s%s", order, MemStr, MRMethod==2? ":r2": (MRMethod==1? ":r":""), chunk?":c":"", chunk?ChunkStr:"");
 }
 
 // Изменить потребность в памяти, заодно оттюнинговав order
@@ -161,6 +163,7 @@ COMPRESSION_METHOD* parse_PPMD (char** parameters)
         case 'm':  p->mem      = parseMem (param+1, &error); continue;
         case 'o':  p->order    = parseInt (param+1, &error); continue;
         case 'r':  p->MRMethod = parseInt (param+1, &error); continue;
+        case 'c':  p->chunk    = parseMem (param+1, &error); continue;
       }
       // Сюда мы попадаем, если в параметре не указано его название
       // Если этот параметр удастся разобрать как целое число (т.е. в нём - только цифры),
@@ -169,7 +172,7 @@ COMPRESSION_METHOD* parse_PPMD (char** parameters)
       if (!error) p->order = n;
       else        error=0, p->mem = parseMem (param, &error);
     }
-    if (error)  {delete p; return NULL;}  // Ошибка при парсинге параметров метода
+    if (error || p->mem<MIN_MEM || p->order<MIN_O || p->order>MAX_O)  {delete p; return NULL;}  // Ошибка при парсинге параметров метода или значение параметра за пределами допустимого
     return p;
   } else
     return NULL;   // Это не метод ppmd

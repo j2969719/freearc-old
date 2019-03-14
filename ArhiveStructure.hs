@@ -263,6 +263,27 @@ archiveReadFooterBlock footer @ ArchiveBlock {
              , ftSFXSize  = minimum (map blPos blocks)   -- Размер SFX = позиции HEADER_BLOCK в архиве
              }
 
+{-# NOINLINE archiveReadFooter #-}
+-- |Прочитать финальный блок архива
+archiveReadFooter command               -- выполняемая команда со всеми её опциями
+                  arcname = do          -- имя файла, содержащего архив
+  archive <- archiveOpen arcname
+  arcsize <- archiveGetSize archive
+  let scan_bytes = min aSCAN_MAX arcsize  -- сканируем 4096 байт в конце архива, если столько найдётся :)
+
+  withPool $ \pool -> do
+    -- Прочитаем 4096 байт в конце архива, которые должны содержать дескриптор FOOTER_BLOCK'а
+    buf <- archiveMallocReadBuf pool archive (arcsize-scan_bytes) (i scan_bytes)
+    -- Найдём и декодируем последний дескриптор архива (это должен быть дескриптор FOOTER_BLOCK'а)
+    res <- archiveFindBlockDescriptor archive (arcsize-scan_bytes) buf (i scan_bytes) (i scan_bytes)
+    case res of
+      Left  msg -> do archiveClose archive
+                      registerError msg
+      Right footer_descriptor -> do
+              -- Прочитаем FOOTER_BLOCK, описываемый этим дескриптором, целиком в буфер и декодируем его содержимое
+              footer <- archiveReadFooterBlock footer_descriptor (opt_decryption_info command)
+              return (archive,footer)
+
 {-# NOINLINE archiveWriteFooterBlock #-}
 {-# NOINLINE archiveReadFooterBlock #-}
 
@@ -285,7 +306,7 @@ data ArchiveBlock = ArchiveBlock
        }
 
 instance Eq ArchiveBlock where
-  (==)  =  map2eq$ map2 (blPos, archiveName.blArchive)
+  (==)  =  map2eq$ map5 (blPos, blOrigSize, blCompSize, archiveName.blArchive, blCompressor)    -- not exact! block with only directories and empty files may have size 0!!!
 
 -- |Вспомогательная функция для вычисления поля blIsEncrypted по blCompressor
 enc = any isEncryption

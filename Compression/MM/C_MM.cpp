@@ -36,7 +36,7 @@ int MM_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_MM)
-void MM_METHOD::ShowCompressionMethod (char *buf)
+void MM_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     MM_METHOD defaults;
     char dStr[100], cStr[100], rStr[100];

@@ -1,4 +1,4 @@
-#define _WIN32_WINNT 0x0500
+#define _WIN32_WINNT 0x0501
 #include <stdio.h>
 #include <sys/stat.h>
 #include <utime.h>
@@ -8,7 +8,7 @@
 #include "Compression/Compression.h"
 
 // Изменим настройки RTS, включив compacting GC начиная с 40 mb:
-char *ghc_rts_opts = "-c1 -M4000m";
+char *ghc_rts_opts = "-c1 -M4000m -K80m                       ";
 
 
 /* ********************************************************************************************************
@@ -23,6 +23,7 @@ struct LargestMemoryBlock
   size_t size;
   LargestMemoryBlock();
   ~LargestMemoryBlock()         {free();}
+  size_t total();
   void alloc(size_t n);
   void free();
   void test();
@@ -39,6 +40,16 @@ LargestMemoryBlock::LargestMemoryBlock() : p(NULL)
   }
 }
 
+size_t LargestMemoryBlock::total()
+{
+  if (size >= 10*mb) {               // Don't count too small memory blocks
+    LargestMemoryBlock next;
+    return size + next.total();
+  } else {
+    return 0;
+  }
+}
+
 void LargestMemoryBlock::test()
 {
   if ((size>>20)>0) {
@@ -49,7 +60,6 @@ void LargestMemoryBlock::test()
     memstat();
   }
 }
-
 
 void TestMalloc (void)
 {
@@ -62,7 +72,30 @@ void TestMalloc (void)
 
 #ifdef FREEARC_WIN
 
+#include <../HsFFI.h>
+#include <io.h>
+#include <wchar.h>
+#include <sys/stat.h>
+
+extern "C" HsInt    __w_find_sizeof       ( void ) { return sizeof(struct _wfinddatai64_t); };
+extern "C" unsigned __w_find_attrib       ( struct _wfinddatai64_t* st ) { return st->attrib;      }
+extern "C" time_t   __w_find_time_create  ( struct _wfinddatai64_t* st ) { return st->time_create; }
+extern "C" time_t   __w_find_time_access  ( struct _wfinddatai64_t* st ) { return st->time_access; }
+extern "C" time_t   __w_find_time_write   ( struct _wfinddatai64_t* st ) { return st->time_write;  }
+extern "C" __int64  __w_find_size         ( struct _wfinddatai64_t* st ) { return st->size;        }
+extern "C" wchar_t* __w_find_name         ( struct _wfinddatai64_t* st ) { return st->name;        }
+
+extern "C" HsInt          __w_stat_sizeof ( void ) { return sizeof(struct _stati64); }
+extern "C" unsigned short __w_stat_mode   ( struct _stati64* st ) { return st->st_mode;  }
+extern "C" time_t         __w_stat_ctime  ( struct _stati64* st ) { return st->st_ctime; }
+extern "C" time_t         __w_stat_atime  ( struct _stati64* st ) { return st->st_atime; }
+extern "C" time_t         __w_stat_mtime  ( struct _stati64* st ) { return st->st_mtime; }
+extern "C" __int64        __w_stat_size   ( struct _stati64* st ) { return st->st_size;  }
+
+
 #include <windows.h>
+#include <reason.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <conio.h>
 #include <time.h>
@@ -124,48 +157,68 @@ void memstat (void)
 
 #ifdef FREEARC_WIN
 
-/*
-void SetDateTimeAttr(const char* Filename, time_t t)
-{
-    struct tm* t2 = gmtime(&t);
-
-    SYSTEMTIME t3;
-    t3.wYear         = t2->tm_year+1900;
-    t3.wMonth        = t2->tm_mon+1;
-    t3.wDay          = t2->tm_mday;
-    t3.wHour         = t2->tm_hour;
-    t3.wMinute       = t2->tm_min;
-    t3.wSecond       = t2->tm_sec;
-    t3.wMilliseconds = 0;
-
-    FILETIME ft;
-    SystemTimeToFileTime(&t3, &ft);
-
-    HANDLE hndl=CreateFile(Filename,GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,0);
-    SetFileTime(hndl,NULL,NULL,&ft);  //creation, last access, modification times
-    CloseHandle(hndl);
-    //SetFileAttributes(Filename,ai.attrib);
-}
-*/
-
-
 CFILENAME GetExeName (CFILENAME buf, int bufsize)
 {
   GetModuleFileNameW (NULL, buf, bufsize);
   return buf;
 }
 
-unsigned GetPhysicalMemory (void)
+
+#if !defined(_WIN64) && defined(__GNUC__)
+
+typedef struct _MY_MEMORYSTATUSEX {
+  DWORD dwLength;
+  DWORD dwMemoryLoad;
+  DWORDLONG ullTotalPhys;
+  DWORDLONG ullAvailPhys;
+  DWORDLONG ullTotalPageFile;
+  DWORDLONG ullAvailPageFile;
+  DWORDLONG ullTotalVirtual;
+  DWORDLONG ullAvailVirtual;
+  DWORDLONG ullAvailExtendedVirtual;
+} MY_MEMORYSTATUSEX, *MY_LPMEMORYSTATUSEX;
+
+#else
+
+#define MY_MEMORYSTATUSEX MEMORYSTATUSEX
+#define MY_LPMEMORYSTATUSEX LPMEMORYSTATUSEX
+
+#endif
+
+typedef BOOL (WINAPI *GlobalMemoryStatusExP)(MY_LPMEMORYSTATUSEX lpBuffer);
+
+uint64 GetPhysicalMemory (void)
 {
-  MEMORYSTATUS buf;
-    GlobalMemoryStatus (&buf);
-  return buf.dwTotalPhys;
+  MY_MEMORYSTATUSEX statx;
+  statx.dwLength = sizeof(statx);
+  GlobalMemoryStatusExP globalMemoryStatusEx = (GlobalMemoryStatusExP) GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "GlobalMemoryStatusEx");
+  if (globalMemoryStatusEx != 0 && globalMemoryStatusEx(&statx))
+    return statx.ullTotalPhys;
+
+  MEMORYSTATUS stat;
+  stat.dwLength = sizeof(stat);
+  GlobalMemoryStatus(&stat);
+  return stat.dwTotalPhys;
 }
 
 unsigned GetMaxMemToAlloc (void)
 {
+  MEMORYSTATUS stat;
+  stat.dwLength = sizeof(stat);
+  GlobalMemoryStatus(&stat);
+
   LargestMemoryBlock block;
-  return block.size - 5*mb;
+  return mymin(block.size, stat.dwAvailPageFile) - 5*mb;
+}
+
+unsigned GetTotalMemoryToAlloc (void)
+{
+  MEMORYSTATUS stat;
+  stat.dwLength = sizeof(stat);
+  GlobalMemoryStatus(&stat);
+
+  LargestMemoryBlock block;
+  return mymin(block.total(), stat.dwAvailPageFile) - 5*mb;
 }
 
 unsigned GetAvailablePhysicalMemory (void)
@@ -182,44 +235,92 @@ int GetProcessorsCount (void)
   return si.dwNumberOfProcessors;
 }
 
-void SetFileDateTime (const CFILENAME Filename, time_t mtime)
+// Delete entrire subtree from Windows Registry
+DWORD RegistryDeleteTree(HKEY hStartKey, LPTSTR pKeyName)
 {
-  struct _stat st;
-    _wstat (Filename, &st);
-  struct _utimbuf times;
-    times.actime  = st.st_atime;
-    times.modtime = mtime;
-  _wutime (Filename, &times);
+   const int MAX_KEY_LENGTH = MAX_PATH;
+   DWORD   dwRtn, dwSubKeyLength;
+   TCHAR   szSubKey[MAX_KEY_LENGTH];
+   HKEY    hKey;
+
+   // Do not allow NULL or empty key name
+   if (pKeyName && lstrlen(pKeyName))
+   {
+      if((dwRtn = RegOpenKeyEx (hStartKey, pKeyName, 0, KEY_ENUMERATE_SUB_KEYS | DELETE, &hKey))  ==  ERROR_SUCCESS)
+      {
+         while (dwRtn == ERROR_SUCCESS )
+         {
+            dwSubKeyLength = MAX_KEY_LENGTH;
+            dwRtn=RegEnumKeyEx(
+                           hKey,
+                           0,       // always index zero
+                           szSubKey,
+                           &dwSubKeyLength,
+                           NULL,
+                           NULL,
+                           NULL,
+                           NULL
+                         );
+
+            if(dwRtn == ERROR_NO_MORE_ITEMS)
+            {
+               dwRtn = RegDeleteKey(hStartKey, pKeyName);
+               break;
+            }
+            else if(dwRtn == ERROR_SUCCESS)
+               dwRtn=RegistryDeleteTree(hKey, szSubKey);
+         }
+         RegCloseKey(hKey);
+         // Do not save return code because error
+         // has already occurred
+      }
+   }
+   else
+      dwRtn = ERROR_BADKEY;
+
+   return dwRtn;
 }
 
-// Execute program `filename` in the directory `curdir` optionally waiting until it finished
-void RunProgram (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+int MyGetAppUserDataDirectory (CFILENAME buf)
 {
-  STARTUPINFO si;
-  PROCESS_INFORMATION pi;
-  ZeroMemory (&si, sizeof(si));
-  si.cb = sizeof(si);
-  ZeroMemory (&pi, sizeof(pi));
-  BOOL process_created = CreateProcessW (filename, NULL, NULL, NULL, FALSE, 0, NULL, curdir, &si, &pi);
-
-  if (process_created && wait_finish)
-      WaitForSingleObject (pi.hProcess, INFINITE);
+  return SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0 /*SHGFP_TYPE_CURRENT*/, buf);
 }
 
-// Execute file `filename` in the directory `curdir` optionally waiting until it finished
-void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
+// Инициировать выключение компьютера
+int PowerOffComputer()
 {
-  SHELLEXECUTEINFO sei;
-  ZeroMemory(&sei, sizeof(SHELLEXECUTEINFO));
-  sei.cbSize = sizeof(SHELLEXECUTEINFO);
-  sei.fMask = (wait_finish? SEE_MASK_NOCLOSEPROCESS : 0);
-  sei.hwnd = GetActiveWindow();
-  sei.lpFile = filename;
-  sei.lpDirectory = curdir;
-  sei.nShow = SW_SHOW;
-  DWORD rc = ShellExecuteEx(&sei);
-  if (rc && wait_finish)
-    WaitForSingleObject(sei.hProcess, INFINITE);
+   HANDLE hToken;
+   TOKEN_PRIVILEGES tkp;
+
+   // Get a token for this process.
+
+   if (!OpenProcessToken(GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+      return( FALSE );
+
+   // Get the LUID for the shutdown privilege.
+
+   LookupPrivilegeValue(NULL, SE_SHUTDOWN_NAME,
+        &tkp.Privileges[0].Luid);
+
+   tkp.PrivilegeCount = 1;  // one privilege to set
+   tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+   // Get the shutdown privilege for this process.
+
+   AdjustTokenPrivileges(hToken, FALSE, &tkp, 0,
+        (PTOKEN_PRIVILEGES)NULL, 0);
+
+   if (GetLastError() != ERROR_SUCCESS)
+      return FALSE;
+
+   // Shut down the system and force all applications to close.
+
+   if (!ExitWindowsEx(EWX_POWEROFF, SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_MINOR_MAINTENANCE | SHTDN_REASON_FLAG_PLANNED))
+      return FALSE;
+
+   //shutdown was successful
+   return TRUE;
 }
 
 
@@ -229,18 +330,31 @@ void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
 #include <unistd.h>
 #include <sys/sysinfo.h>
 
-unsigned GetPhysicalMemory (void)
+CFILENAME GetExeName (CFILENAME buf, int bufsize)
+{
+  int len = readlink("/proc/self/exe", buf, bufsize-1);
+  if (len<0)  len=0;
+  buf[len] = '\0';
+  return buf;
+}
+
+uint64 GetPhysicalMemory (void)
 {
   struct sysinfo si;
     sysinfo(&si);
-  return si.totalram*si.mem_unit;
+  return uint64(si.totalram)*si.mem_unit;
+}
+
+unsigned GetTotalMemoryToAlloc (void)
+{
+  return INT_MAX;
 }
 
 unsigned GetMaxMemToAlloc (void)
 {
   //struct sysinfo si;
   //  sysinfo(&si);
-  return UINT_MAX;
+  return INT_MAX;
 }
 
 unsigned GetAvailablePhysicalMemory (void)
@@ -255,31 +369,11 @@ int GetProcessorsCount (void)
   return get_nprocs();
 }
 
-void SetFileDateTime(const CFILENAME Filename, time_t mtime)
+// Инициировать выключение компьютера
+int PowerOffComputer()
 {
-#undef stat
-  struct stat st;
-    stat (Filename, &st);
-  struct utimbuf times;
-    times.actime  = st.st_atime;
-    times.modtime = mtime;
-  utime (Filename, &times);
-}
-
-// Execute file `filename` in the directory `curdir` optionally waiting until it finished
-void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
-{
-  char *olddir = (char*) malloc(MY_FILENAME_MAX*4),
-       *cmd    = (char*) malloc(strlen(filename)+10);
-  getcwd(olddir, MY_FILENAME_MAX*4);
-
-  chdir(curdir);
-  sprintf(cmd, "./%s%s", filename, wait_finish? "" : " &");
-  system(cmd);
-
-  chdir(olddir);
-  free(cmd);
-  free(olddir);
+  system ("shutdown now");
+  return TRUE;
 }
 
 #endif // Windows/Unix
@@ -287,10 +381,10 @@ void RunFile (const CFILENAME filename, const CFILENAME curdir, int wait_finish)
 
 void FormatDateTime (char *buf, int bufsize, time_t t)
 {
+  if (t<0)  t=INT_MAX;  // Иначе получаем вылет :(
   struct tm *p;
-  if (t==-1)  t=0;  // Иначе получим вылет :(
   p = localtime(&t);
-  strftime( buf, bufsize, "%Y-%m-%d %H:%M:%S", p);
+  strftime (buf, bufsize, "%Y-%m-%d %H:%M:%S", p);
 }
 
 // Максимальная длина имени файла
@@ -299,66 +393,6 @@ int long_path_size (void)
   return MY_FILENAME_MAX;
 }
 
-
-/************************************************************************
- ************* CRC-32 subroutines ***************************************
- ************************************************************************/
-
-uint CRCTab[256];
-
-void InitCRC()
-{
-  for (int I=0;I<256;I++)
-  {
-    uint C=I;
-    for (int J=0;J<8;J++)
-      C=(C & 1) ? (C>>1)^0xEDB88320L : (C>>1);
-    CRCTab[I]=C;
-  }
-}
-
-uint UpdateCRC( void *Addr, uint Size, uint StartCRC)
-{
-  if (CRCTab[1]==0)
-    InitCRC();
-  uint8 *Data=(uint8 *)Addr;
-#if defined(FREEARC_INTEL_BYTE_ORDER) && defined(PRESENT_UINT32)
-  while (Size>=8)
-  {
-    StartCRC^=*(uint32 *)Data;
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    StartCRC^=*(uint32 *)(Data+4);
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    StartCRC=CRCTab[(uint8)StartCRC]^(StartCRC>>8);
-    Data+=8;
-    Size-=8;
-  }
-#endif
-  for (int I=0;I<Size;I++)
-    StartCRC=CRCTab[(uint8)(StartCRC^Data[I])]^(StartCRC>>8);
-  return(StartCRC);
-}
-
-// Вычислить CRC блока данных
-uint CalcCRC( void *Addr, uint Size)
-{
-  return UpdateCRC (Addr, Size, INIT_CRC) ^ INIT_CRC;
-}
-
-
-
-// От-xor-ить два блока данных
-void memxor (char *dest, char *src, uint size)
-{
-  if (size) do
-      *dest++ ^= *src++;
-  while (--size);
-}
 
 // Вернуть имя файла без имени каталога
 FILENAME basename (FILENAME fullname)
@@ -370,24 +404,12 @@ FILENAME basename (FILENAME fullname)
   return basename;
 }
 
-// Создать каталоги на пути к name
-void BuildPathTo (CFILENAME name)
+// От-xor-ить два блока данных
+void memxor (char *dest, char *src, uint size)
 {
-  CFILENAME path_ptr = NULL;
-  for (CFILENAME p = _tcschr(name,0); --p >= name;)
-    if (_tcschr (_T(DIRECTORY_DELIMITERS), *p))
-      {path_ptr=p; break;}
-  if (path_ptr==NULL)  return;
-
-  TCHAR oldc = *path_ptr;
-  *path_ptr = 0;
-
-  if (! file_exists (name))
-  {
-    BuildPathTo (name);
-    create_dir  (name);
-  }
-  *path_ptr = oldc;
+  if (size) do
+      *dest++ ^= *src++;
+  while (--size);
 }
 
 

@@ -44,6 +44,7 @@
         else
             printf ("MM compression? ha-ha, forget about this!");
 
+   PS дл€ FAR: внизу есть русские комментарии
 */
 
 // to do:
@@ -151,7 +152,7 @@ inline void Model::lcount (int channel, unsigned long x)
 }
 
 // It's the heart of entropy metering algorithm.
-// It maps usnigned value into its slot and count extra bits required to
+// It maps unsigned value into its slot and count extra bits required to
 // encode values in this slot. In order to better calculate entropy,
 // each of first 256 values has its individual slot (in particular,
 // this allows to precisely calculate entropy of original file using order-0
@@ -184,7 +185,7 @@ void Model::calc_results()
 
         for(int i=0;i<STATSIZE;i++)
             if (stats[N][i])
-                bits += stats[N][i] * log(double(total/stats[N][i]))/log(double(2));
+                bits += stats[N][i] * log(double(total)/stats[N][i])/log(double(2));
     }
     // Total result including additional bits required for extension codes
     result = (long)(bits/8 + xbits/8);
@@ -838,11 +839,11 @@ void detect_datatype (BYTE *buf, int bufsize, char *type)
 
     // “ип данных: $compressed если не сжимаетс€ ни order-0 ни lz77.
     //             $text если активных символов от 17 до 80, число повторов дистанций невелико и lz-матчи составл€ют хот€ бы 10% данных
-    strcpy (type, buf==NULL                                 ? "$compressed $text" :  // list of data types this procedure is able to recognize
+    strcpy (type, buf==NULL                                 ? "$precomp $compressed $text" :  // list of data types this procedure is able to recognize
 
                   order0 > 0.95*bufsize
                     // && matches < bufsize/100
-                    && sumlen < 0.10*bufsize                ? "$compressed" :
+                    && sumlen < 0.10*bufsize                ? "$precomp $compressed" :
 
                   17<=normal_chars && normal_chars<=80
                     // && matches < bufsize/6

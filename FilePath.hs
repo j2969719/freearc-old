@@ -34,7 +34,7 @@ depending on the platform.
 
 module FilePath
     (
-    isWindows, windosifyPath,
+    isWindows, windosifyPath, unixifyPath, make_OS_native_path,
 
     -- * Separator predicates
     FilePath,
@@ -115,11 +115,18 @@ isWindows = False
 -- > pathSeparator ==  '/'
 -- > isPathSeparator pathSeparator
 pathSeparator :: Char
-pathSeparator = '/'
+pathSeparator = head pathSeparators
 
 -- | Make filename valid for Windows functions
 windosifyPath :: FilePath -> FilePath
 windosifyPath = replace '/' '\\'
+
+-- | Make Unix-style filename
+unixifyPath :: FilePath -> FilePath
+unixifyPath = replace '\\' '/'
+
+-- | Make filename valid for this OS
+make_OS_native_path   =   if isWindows   then windosifyPath   else unixifyPath
 
 replace from to  =  map (\x -> if x==from  then to  else x)
 

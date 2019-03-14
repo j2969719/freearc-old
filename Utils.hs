@@ -1,4 +1,4 @@
-{-# OPTIONS_GHC -cpp -fallow-overlapping-instances -fallow-undecidable-instances -fno-monomorphism-restriction #-}
+{-# OPTIONS_GHC -cpp #-}
 ---------------------------------------------------------------------------------------------------
 ---- Вспомогательные функции: работа со строками, списками, регулярными выражениями,           ----
 ----   аллокатор памяти. упрощение манипуляций с IORef-переменными,                            ----
@@ -8,12 +8,13 @@ module Utils (module Utils, module CompressionLib) where
 
 import Prelude hiding (catch)
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Control.Monad
 import Data.Array
 import Data.Bits
 import Data.Char
 import Data.Either
+import qualified Data.HashTable
 import Data.IORef
 import Data.List
 import Data.Maybe
@@ -35,6 +36,14 @@ import CompressionLib (MemSize,b,kb,mb,gb,tb)
 #if !defined(FREEARC_INTEL_BYTE_ORDER) && !defined(FREEARC_MOTOROLA_BYTE_ORDER)
 #error "You must define byte order!"
 #endif
+
+#if 1
+aFreeArc = "FreeArc"
+#else
+aFreeArc = "Hamster"
+#endif
+
+aFreeArcExt = "arc"
 
 
 ---------------------------------------------------------------------------------------------------
@@ -75,11 +84,11 @@ parseMem memstr =
         _             ->  error$ memstr++" - unrecognized size specifier"
 
 -- |Аналогично parseMem, но с добавлением поддержки записи в виде 75%/75p (от общего объёма памяти)
-parseMemWithPercents memory memstr =
+parseMemWithPercents memory memstr = clipToMaxMemSize$
     case (parseNumber memstr 'm') of
-        (bytes,    'b')  ->  clipToMaxMemSize$ bytes
+        (bytes,    'b')  ->  bytes
         (percents, c) | c `elem` "%p"
-                         ->  clipToMaxMemSize$ (memory * percents) `div` 100
+                         ->  (toInteger memory * percents) `div` 100
         _                ->  error$ memstr++" - unrecognized size specifier"
 
 -- Должна усекать к максимальному позволенному в MemSize числу или может вообще выдавать ошибку?
@@ -155,6 +164,15 @@ a ||| b | isDefaultValue a = b
 a &&& b | isDefaultValue a = defaultValue
         | otherwise        = b
 
+-- |Выполнить b если a (условное выполнение с условием в конце строки)
+infixr 0 `on_`, `onM`
+on_ b a | isDefaultValue a = return ()
+        | otherwise        = b >> return ()
+
+-- |`on_` с монадическим условием
+action `onM` conditionM = do condition <- conditionM
+                             action `on_` condition
+
 -- |Применить функцию f к списку только если он не пустой
 unlessNull f xs  =  xs &&& f xs
 
@@ -191,10 +209,6 @@ foreach = flip mapM
 
 -- |Выполнить для каждого элемента из списка
 for = flip mapM_
-
--- |Условное выполнение с условием в конце строки
-infixr 0 `on`
-on = flip (&&&)
 
 -- |Удобный способ записать сначала то, что должно обязательно быть выполнено в конце :)
 doFinally = flip finally
@@ -263,6 +277,15 @@ doChunks size chunk action =
             action (fromIntegral n)
             doChunks (size-n) chunk action
 
+-- |Управляющая структура, разбивающая выполнение операции над буфером размером size
+-- на отдельные операции размером не более chunk каждая.
+doBufChunks buf size chunk action =
+  case size of
+    0 -> return ()
+    _ -> do let n = minI size chunk
+            action buf (fromIntegral n)
+            doBufChunks (buf+:n) (size-n) chunk action
+
 -- |Выполнить `action` над x, затем над каждым элементом списка, возвращённого из `action`, и так далее рекурсивно
 recursiveM action x  =  action x >>= mapM_ (recursiveM action)
 
@@ -293,6 +316,11 @@ bg action = do
   forkIO (action >>= putMVar resultVar)
   takeMVar resultVar
 
+#ifdef FREEARC_GUI
+isGUI = True
+#else
+isGUI = False
+#endif
 
 {-# NOINLINE foreverM #-}
 {-# NOINLINE repeat_while #-}
@@ -351,6 +379,10 @@ maybe2bool Nothing  = False
 -- |Проверка на Left
 isLeft (Left _) = True
 isLeft _        = False
+
+-- |Проверка на Right
+isRight (Right _) = True
+isRight _         = False
 
 -- |Удалить элементы, отвечающие заданному предикату
 deleteIf p = filter (not.p)
@@ -425,6 +457,12 @@ split2 c s  =  (chunk, drop 1 rest)
 join2 :: [a] -> ([a],[a]) -> [a]
 join2 between (a,b) = a++between++b
 
+-- |Разбить строку на подстроки, разделённые заданными символами, игнорируя их лишние вхождения в начале/середине/конце строки
+split_by_any separators s =
+  case break (`elem` separators) (dropWhile (`elem` separators) s) of
+    ([],[])        -> []
+    (chunk, rest)  -> chunk : split_by_any separators rest
+
 -- |Разбить строку на подстроки, разделённые заданным символом
 split :: (Eq a) => a -> [a] -> [[a]]
 split c s =
@@ -448,9 +486,9 @@ between s1 x [] = s1
 between [] x s2 = s2
 between s1 x s2 = s1++x++s2
 
--- |Добавить двойные кавычки вокруг строки
+-- |Добавить двойные кавычки вокруг строки, экранируя кавычки внутри неё и "\" в конце строки
 quote :: String -> String
-quote str  =  "\"" ++ str ++ "\""
+quote str  =  "\"" ++ (str.$replaceAll "\"" "\\\"" .$replaceAtEnd "\\" "\\\\") ++ "\""
 
 -- |Удалить двойные кавычки вокруг строки (если они есть)
 unquote :: String -> String
@@ -476,6 +514,10 @@ replaceAt n x xs  =  hd ++ x : drop 1 tl
 updateAt n f xs  =  hd ++ f x : tl
     where (hd,x:tl) = splitAt n xs
 
+-- |Вставить перед n'м элементом (считая с 0)
+insertAt n sublist xs  =  hd ++ sublist ++ tl
+    where (hd,tl) = splitAt n xs
+
 -- |Заменить в списке все вхождения элемента 'from' на 'to'
 replace from to  =  map (\x -> if x==from  then to  else x)
 
@@ -494,10 +536,10 @@ tryToSkip substr str  =  (startFrom substr str) `defaultVal` str
 -- |Попытаться удалить строку substr в конце str
 tryToSkipAtEnd substr str = reverse (tryToSkip (reverse substr) (reverse str))
 
--- | The 'isInfixOf' function takes two lists and returns 'True'
+-- | The 'substr' function takes two lists and returns 'True'
 -- if the second list is contained, wholy and intact,
 -- anywhere within the first.
-substr haystack needle  =  any (needle `isPrefixOf`) (tails haystack)
+substr str substr  =  any (substr `isPrefixOf`) (tails str)
 
 -- |Список позиций подстроки в строке
 strPositions haystack needle  =  elemIndices True$ map (needle `isPrefixOf`) (tails haystack)
@@ -528,19 +570,6 @@ replaceAtEnd from to s =
   case startFrom (reverse from) (reverse s) of
     Just remainder  -> reverse remainder ++ to
     Nothing         -> s
-
--- |Закодировать символы, запрещённые в URL
-urlEncode = concatMap (\c -> if isReservedChar(ord c) then '%':encode16 [c] else [c])
-  where
-        isReservedChar x
-            | x >= ord 'a' && x <= ord 'z' = False
-            | x >= ord 'A' && x <= ord 'Z' = False
-            | x >= ord '0' && x <= ord '9' = False
-            | x <= 0x20 || x >= 0x7F = True
-            | otherwise = x `elem` map ord [';','/','?',':','@','&'
-                                           ,'=','+',',','$','{','}'
-                                           ,'|','\\','^','[',']','`'
-                                           ,'<','>','#','%', chr 34]
 
 -- |Вернуть шестнадцатеричную запись строки символов с кодами <=255
 encode16 (c:cs) | n<256 = [intToDigit(n `div` 16), intToDigit(n `mod` 16)] ++ encode16 cs
@@ -600,7 +629,7 @@ mapTail f []      =  []
 mapTail f (x:xs)  =  x : map f xs
 
 mapInit f []      =  []
-mapInit f xs      =  map f (init xs) : last xs
+mapInit f xs      =  map f (init xs) ++ [last xs]
 
 mapLast f []      =  []
 mapLast f xs      =  init xs ++ [f (last xs)]
@@ -747,6 +776,19 @@ deleteElems = go 0
                                | n==i =   go (n+1) xs is   -- дошли - удаляем!
 
 
+-- |Превращает возрастающий список чисел в список диапазонов:
+-- 1,2,3,10,21,22 -> (1,3),(10,10),(21,22)
+makeRanges (x:y:zs) | x+1==y    =  makeRanges1 x (y:zs)
+                    | otherwise =  (x,x) : makeRanges (y:zs)
+makeRanges [x]                  =  [(x,x)]
+makeRanges []                   =  []
+
+-- Вспомогательное определение для makeRanges
+makeRanges1 start (x:y:zs) | x+1==y    =  makeRanges1 start (y:zs)
+                           | otherwise =  (start,x) : makeRanges (y:zs)
+makeRanges1 start [x]                  = [(start,x)]
+
+
 {-# NOINLINE partitionList #-}
 {-# NOINLINE splitList #-}
 
@@ -773,6 +815,7 @@ mapFst    f (a,b)  =  (f a,   b)
 mapSnd    f (a,b)  =  (  a, f b)
 mapFstSnd f (a,b)  =  (f a, f b)
 map2      (f,g) a  =  (f a, g a)
+map5      (f1,f2,f3,f4,f5) a  =  (f1 a,f2 a,f3 a,f4 a,f5 a)
 mapFsts = map . mapFst
 mapSnds = map . mapSnd
 map2s   = map . map2
@@ -785,6 +828,40 @@ fst3 (a,_,_)    =  a
 snd3 (_,a,_)    =  a
 thd3 (_,_,a)    =  a
 map3 (f,g,h) a  =  (f a, g a, h a)
+
+
+---------------------------------------------------------------------------------------------------
+---- Pure hash tables -----------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------
+
+class Hashable a where
+  stdHashFunc :: a -> Int
+
+instance Hashable String where
+  stdHashFunc = fromEnum . Data.HashTable.hashString
+
+
+data HT a b = HT (a->Int) (Array Int [(a,b)])
+
+-- size is the size of array (we implement a closed hash)
+-- hash is the hash function (a->Int)
+-- list is assoclist of items to put in hash
+htCreateHash' size hash list = HT hashfunc
+                              (accumArray (flip (:))
+                                          []
+                                          (0, arrsize-1)
+                                          (map (\(a,b) -> (hashfunc a,(a,b))) list)
+                              )
+
+  where arrsize     =  head$ filter (>size)$ iterate (\x->3*x+1) 1
+        hashfunc a  =  hash a `mod` arrsize
+
+htCreateHash hash list  =  htCreateHash' (length list) hash list
+
+htCreate' size list  =  htCreateHash' size stdHashFunc list
+htCreate       list  =  htCreateHash       stdHashFunc list
+
+htLookup a (HT hash arr) = lookup a (arr!hash a)
 
 
 ---------------------------------------------------------------------------------------------------
@@ -886,13 +963,14 @@ minI a b                =  i$ min (i a) (i b)
 maxI a b                =  i$ max (i a) (i b)
 clipToMaxInt            =  i. min (i (maxBound::Int))
 atLeast                 =  max
+minusPositive a b       =  if a>b  then a-b  else 0
 i                       =  fromIntegral
 clipTo low high         =  min high . max low
-divRoundUp   x chunk    = ((x-1) `div` i chunk) + 1
-roundUp      x chunk    = divRoundUp x chunk * i chunk
-divRoundDown x chunk    = x `div` i chunk
-roundDown    x chunk    = divRoundDown x chunk * i chunk
-roundTo      x chunk    = i (((((toInteger(x)*2) `divRoundDown` chunk)+1) `divRoundDown` 2) * i chunk) `asTypeOf` x
+divRoundUp   x chunk    =  ((x-1) `div` i chunk) + 1
+roundUp      x chunk    =  divRoundUp x chunk * i chunk
+divRoundDown x chunk    =  x `div` i chunk
+roundDown    x chunk    =  divRoundDown x chunk * i chunk
+roundTo      x chunk    =  i (((((toInteger(x)*2) `divRoundDown` chunk)+1) `divRoundDown` 2) * i chunk) `asTypeOf` x
 
 
 ---------------------------------------------------------------------------------------------------
@@ -978,7 +1056,7 @@ allocator heapsize aBUFFER_SIZE aALIGN returnBlock = do
   -- Укоротить выделенный блок до размера `size`. Должна быть обязательно вызвана после getBlock
   let shrinkBlock block size = do
         astart <- val start
-        --unless (astart == block)$      fail "Tryed to shrink another block"
+        --unless (astart == block)$      fail "Tried to shrink another block"
         unless (size <= aBUFFER_SIZE)$  fail "Growing instead of shrinking :)"
         start =: nextAvail(block+size)
         printStats$ "getBlock buf:"++show block++", size: "++show aBUFFER_SIZE++" --> "++show size++"    "

@@ -49,7 +49,7 @@ int TTA_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_TTA)
-void TTA_METHOD::ShowCompressionMethod (char *buf)
+void TTA_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
     TTA_METHOD defaults;  char eStr[100], cStr[100], rStr[100];
     if (num_chan || word_size) {

@@ -7,7 +7,7 @@ module UIBase where
 import Prelude hiding (catch)
 import Control.Monad
 import Control.Concurrent
-import Control.Exception
+import Control.OldException
 import Data.Char
 import Data.IORef
 import Foreign
@@ -76,8 +76,10 @@ refStartPauseTime         =  unsafePerformIO$ newIORef$ error "undefined UI::ref
 refArchiveProcessingTime  =  unsafePerformIO$ newIORef$ error "undefined UI::refArchiveProcessingTime"  :: IORef Double
 ref_ui_state              =  unsafePerformIO$ newIORef$ error "undefined UI::ref_ui_state"
 putHeader                 =  unsafePerformIO$ init_once
+ref_w0                    =  unsafePerformIO$ newIORef$ error "undefined UI::ref_w0"         :: IORef Int
+ref_arcExist              =  unsafePerformIO$ newIORef$ error "undefined UI::ref_arcExist"   :: IORef Bool
 -- Текущая стадия выполнения команды или имя файла из uiFileinfo
-uiMessage                 =  unsafePerformIO$ newIORef$ ""
+uiMessage                 =  unsafePerformIO$ newIORef$ ("","")
 -- |Счётчик просканированных файлов
 files_scanned             =  unsafePerformIO$ newIORef$ (0::Integer)
 
@@ -90,34 +92,58 @@ indicator_start_real_secs  =  unsafePerformIO$ newIORef$ (0::Double)
 -- |Синхронизация доступа к UI
 syncUI = withMVar mvarSyncUI . const;  mvarSyncUI = unsafePerformIO$ newMVar "mvarSyncUI"
 
+{-# NOINLINE indicators #-}
+-- |Переменные для разбуживания тредов индикации
+indicators  = unsafePerformIO$ newMVar$ ([]::[MVar Message])   -- list of indicator threads
+type Message = (Update, IO())                                  -- message sent to indicator thread in order to make an update
+data Update  = ForceUpdate | LazyUpdate  deriving (Eq)         -- ForceUpdate message requesting whole update sent after (de)compression has been finished
+
+-- |Принудительно обновить все индикаторы
+updateAllIndicators = do
+  indicators' <- val indicators
+  for indicators' $ \indicator -> do
+    x <- newEmptyMVar
+    putMVar indicator (ForceUpdate, putMVar x ())
+    takeMVar x
+
+-- |Выполнять в бэкграунде action каждые secs секунд
+backgroundThread secs action = do
+  x <- newEmptyMVar
+  indicators ++= [x]  -- добавление в этот список позволяет также обновлять индикаторы "извне"
+  forkIO $ do
+    foreverM $ do
+      sleepSeconds secs
+      putMVar x (LazyUpdate, doNothing0)
+  forkIO $ do
+    foreverM $ do
+      (updateMode, afterAction) <- takeMVar x
+      syncUI $ do
+        action updateMode
+      afterAction
 
 -- |Тред, следящий за indicator, и выводящий время от времени его обновлённые значения
 indicatorThread secs output =
-  backgroundThread secs $ do
+  backgroundThread secs $ \updateMode -> do
     whenM (val aProgressIndicatorEnabled) $ do
       operationTerminated' <- val operationTerminated
-      (indicator, indType, arcname, direction, b, bytes', total') <- val aProgressIndicatorState
+      (indicator, indType, arcname, winTitleMsg, bRational :: Rational, bytes', total') <- val aProgressIndicatorState
+      let b = round bRational  -- we use Rational in order to save decimal fractions (results of 90%/10% counting rule)
       when (indicator /= NoIndicator  &&  not operationTerminated') $ do
         bytes <- bytes' b;  total <- total'
+        bytes <- return (bytes `min` total)   -- bytes не должно превышать total
         -- Отношение объёма обработанных данных к общему объёму
         let processed = total>0 &&& (fromIntegral bytes / fromIntegral total :: Double)
         secs <- return_real_secs
         sec0 <- val indicator_start_real_secs
         let remains  = if processed>0.001  then " "++showHMS(sec0+(secs-sec0)/processed-secs)  else ""
-            winTitle = "{"++trimLeft p++remains++"}" ++ direction ++ takeFileName arcname
+            winTitle = "{"++trimLeft p++remains++"} " ++ (format winTitleMsg (takeFileName arcname))
             p        = percents indicator bytes total
-        output indicator indType winTitle b bytes total processed p
+        output updateMode indicator indType winTitle b bytes total processed p
 
--- |Выполнять в бэкграунде action каждые secs секунд
-backgroundThread secs action =
-  forkIO $ do
-    foreverM $ do
-      threadDelay (round$ secs*1000000)
-      syncUI $ do
-        action
-
-{-# NOINLINE indicatorThread #-}
+{-# NOINLINE updateAllIndicators #-}
 {-# NOINLINE backgroundThread #-}
+{-# NOINLINE indicatorThread  #-}
+
 
 ----------------------------------------------------------------------------------------------------
 ---- Индикатор прогресса ---------------------------------------------------------------------------
@@ -164,7 +190,7 @@ ratio3 count total =  case (show$ count*1000 `div` total) of
 -- |Вывести число, отделяя тысячи, миллионы и т.д.: "1.234.567"
 show3 :: (Show a) => a -> [Char]
 show3 = reverse.xxx.reverse.show
-          where xxx (a:b:c:d:e) = a:b:c:'.': xxx (d:e)
+          where xxx (a:b:c:d:e) = a:b:c:',': xxx (d:e)
                 xxx a = a
 
 {-# NOINLINE ratio2 #-}
@@ -262,12 +288,51 @@ msgStart cmd arcExist =
                   (EXTRACT_CMD, _)      ->  "Extracting archive: "
                   (RECOVER_CMD, _)      ->  "Recovering archive: "
 
-msgDo cmd    =  case (cmdType cmd) of
-                  ADD_CMD     -> "Compressing "
-                  TEST_CMD    -> "Testing "
-                  EXTRACT_CMD -> "Extracting "
+msgStartGUI cmd arcExist =
+                case (cmd, cmdType cmd, arcExist) of
+                  ("ch", _,           _)      ->  "0433 Modifying archive %1"
+                  ("j",  _,           _)      ->  "0240 Joining archives to %1"
+                  ("d",  _,           _)      ->  "0435 Deleting files from archive %1"
+                  ("k",  _,           _)      ->  "0300 Locking archive %1"
+                  (_,    ADD_CMD,     False)  ->  "0437 Creating archive %1"
+                  (_,    ADD_CMD,     True)   ->  "0438 Updating archive %1"
+                  (_,    LIST_CMD,    _)      ->  "0439 Listing archive %1"
+                  (_,    TEST_CMD,    _)      ->  "0440 Testing archive %1"
+                  (_,    EXTRACT_CMD, _)      ->  "0441 Extracting files from archive %1"
+                  (_,    RECOVER_CMD, _)      ->  "0382 Repairing archive %1"
 
-msgFile      =  ("  "++).msgDo
+msgFinishGUI cmd arcExist warnings@0 =
+                case (cmd, cmdType cmd, arcExist) of
+                  ("ch", _,           _)      ->  "0238 SUCCESFULLY MODIFIED %1"
+                  ("j",  _,           _)      ->  "0241 SUCCESFULLY JOINED ARCHIVES TO %1"
+                  ("d",  _,           _)      ->  "0229 FILES SUCCESFULLY DELETED FROM %1"
+                  ("k",  _,           _)      ->  "0301 SUCCESFULLY LOCKED ARCHIVE %1"
+                  (_,    ADD_CMD,     False)  ->  "0443 SUCCESFULLY CREATED %1"
+                  (_,    ADD_CMD,     True)   ->  "0444 SUCCESFULLY UPDATED %1"
+                  (_,    LIST_CMD,    _)      ->  "0445 SUCCESFULLY LISTED %1"
+                  (_,    TEST_CMD,    _)      ->  "0232 SUCCESFULLY TESTED %1"
+                  (_,    EXTRACT_CMD, _)      ->  "0235 FILES SUCCESFULLY EXTRACTED FROM %1"
+                  (_,    RECOVER_CMD, _)      ->  "0383 SUCCESFULLY REPAIRED ARCHIVE %1"
+
+msgFinishGUI cmd arcExist warnings =
+                case (cmd, cmdType cmd, arcExist) of
+                  ("ch", _,           _)      ->  "0239 %2 WARNINGS WHILE MODIFYING %1"
+                  ("j",  _,           _)      ->  "0242 %2 WARNINGS WHILE JOINING ARCHIVES TO %1"
+                  ("d",  _,           _)      ->  "0230 %2 WARNINGS WHILE DELETING FROM %1"
+                  ("k",  _,           _)      ->  "0302 %2 WARNINGS WHILE LOCKING ARCHIVE %1"
+                  (_,    ADD_CMD,     False)  ->  "0434 %2 WARNINGS WHILE CREATING %1"
+                  (_,    ADD_CMD,     True)   ->  "0436 %2 WARNINGS WHILE UPDATING %1"
+                  (_,    LIST_CMD,    _)      ->  "0442 %2 WARNINGS WHILE LISTING %1"
+                  (_,    TEST_CMD,    _)      ->  "0233 %2 WARNINGS WHILE TESTING %1"
+                  (_,    EXTRACT_CMD, _)      ->  "0236 %2 WARNINGS WHILE EXTRACTING FILES FROM %1"
+                  (_,    RECOVER_CMD, _)      ->  "0384 %2 WARNINGS WHILE REPAIRING ARCHIVE %1"
+
+msgDo cmd    =  case (cmdType cmd) of
+                  ADD_CMD     -> "0480 Compressing %1"
+                  TEST_CMD    -> "0481 Testing %1"
+                  EXTRACT_CMD -> "0482 Extracting %1"
+
+msgSkipping  =                   "0483 Skipping %1"
 
 msgDone cmd  =  case (cmdType cmd) of
                   ADD_CMD     -> "Compressed "
@@ -294,8 +359,7 @@ show_bytes3 n = show3 n ++ " bytes"
 
 {-
   Структура UI:
-  - один процесс, получающий информацию от упаковки/распаковки и определяющий структуру
-      взаимодействия с UI:
+  - один процесс, получающий информацию от упаковки/распаковки и определяющий структуру взаимодействия с UI:
         ui_PROCESS pipe = do
           (StartCommand cmd) <- receiveP pipe
             (StartArchive cmd) <- receiveP pipe
@@ -305,5 +369,5 @@ show_bytes3 n = show3 n ++ " bytes"
             (EndArchive) <- receiveP pipe
           (EndCommand) <- receiveP pipe
          (EndProgram) <- receiveP pipe
-      Этот процесс записывает текущее состояние UI в SampleVar
+    Этот процесс записывает текущее состояние UI в SampleVar
 -}

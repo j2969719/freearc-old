@@ -1,6 +1,5 @@
 #include "Compression.h"
 #include "MultiThreading.h"
-#include "LZMA/Windows/Synchronization.cpp"
 
 // Распаковать данные заданным методом сжатия и возвратить время работы в секундах
 int timed_decompress (COMPRESSION_METHOD *compressor, CALLBACK_FUNC *callback, void *auxdata)
@@ -120,7 +119,7 @@ int CompressWithHeader (char *method, CALLBACK_FUNC *callback, void *auxdata)
   COMPRESSION_METHOD *compressor = ParseCompressionMethod (method);
   if (compressor){
     char canonical_method [MAX_METHOD_STRLEN];
-    compressor->ShowCompressionMethod (canonical_method);
+    compressor->ShowCompressionMethod (canonical_method, FALSE);
     int result = callback ("write", canonical_method, strlen(canonical_method)+1, auxdata);
     if (result>=0) result = timed_compress (compressor, callback, auxdata);
     delete compressor;
@@ -148,11 +147,11 @@ int CompressMemWithHeader (char *method, void *input, int inputSize, void *outpu
 }
 
 // Вывести в canonical_method каноническое представление метода сжатия in_method
-int CanonizeCompressionMethod (char *method, char *canonical_method)
+int CanonizeCompressionMethod (char *method, char *canonical_method, int purify)
 {
   COMPRESSION_METHOD *compressor = ParseCompressionMethod (method);
   if (compressor){
-    compressor->ShowCompressionMethod (canonical_method);
+    compressor->ShowCompressionMethod (canonical_method, purify!=0);
     delete compressor;
     return FREEARC_OK;}
   else
@@ -178,7 +177,7 @@ int CanonizeCompressionMethod (char *method, char *canonical_method)
     COMPRESSION_METHOD *compressor = ParseCompressionMethod (in_method);     \
     if (compressor){                                                         \
       compressor->SETTER (bytes);                                            \
-      compressor->ShowCompressionMethod (out_method);                        \
+      compressor->ShowCompressionMethod (out_method, FALSE);                 \
       delete compressor;                                                     \
       return FREEARC_OK;}                                                    \
     else                                                                     \
@@ -187,7 +186,6 @@ int CanonizeCompressionMethod (char *method, char *canonical_method)
 
 // Информация о памяти, необходимой для упаковки/распаковки, размере словаря и размере блока.
 Generate_Getter(GetCompressionMem)
-Generate_Getter(GetDecompressionMem)
 Generate_Getter(GetDictionary)
 Generate_Getter(GetBlockSize)
 
@@ -206,6 +204,18 @@ Generate_Setter(LimitDictionary)
 Generate_Setter(LimitBlockSize)
 
 #endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
+// Информация о памяти, необходимой для распаковки
+MemSize GetDecompressionMem (char *method)
+{
+  COMPRESSION_METHOD *compressor = ParseCompressionMethod (method);
+  if (compressor){
+    MemSize bytes = compressor->GetDecompressionMem();
+    delete compressor;
+    return bytes;}
+  else
+    return (MemSize)FREEARC_ERRCODE_INVALID_COMPRESSOR;
+}
 
 
 // Универсальный метод. Параметры:
@@ -229,7 +239,7 @@ int COMPRESSION_METHOD::doit (char *what, int param, void *data, CALLBACK_FUNC *
 // Локальные данные одного метода
 struct Params
 {
-  CThread             thread;         // OS thread executing this (de)compression algorithm
+  Thread              thread;         // OS thread executing this (de)compression algorithm
   int                 thread_num;     // Number of method in chain (0..N-1)
   int                 threads_total;  // Total amount of methods in chain (N)
   CMETHOD             method;         // String denoting (de)compression method with its parameters
@@ -237,35 +247,39 @@ struct Params
   void*               auxdata;        // Original callback parameter
   BYTE*               buf;            // Buffer that points to data sent from i'th thread to i+1'th
   int                 size;           // Amount of data in the buf
-  CManualResetEvent*  done;           // Set when (de)compression is finished or error was found
+  ManualEvent*        done;           // Set when (de)compression is finished or error was found
   int*                retcode;        // Overall multi_decompress return code
-  CCriticalSection*   retcode_cs;     // Ensure single-threaded access to retcode
-  CSemaphore          read;
-  CSemaphore          write;
+  Mutex*              retcode_cs;     // Ensure single-threaded access to retcode
+  Semaphore           read;
+  Semaphore           write;
 
   // Abort multi_decompress and set its exit code
   void SetExitCode (int code)
   {
-    CCriticalSectionLock lock(*retcode_cs);
+    Lock _(*retcode_cs);
     if (*retcode == 0)  *retcode = code;   // Save into retcode first error code signalled (subsequent error codes may be sequels of the first one)
-    done->Set();
+    done->Signal();
   }
 };
-static DWORD WINAPI multi_decompress_thread (void *paramPtr);
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE multi_decompress_thread (void *paramPtr);
 static int multi_decompress_callback (const char *what, void *buf, int size, void *paramPtr);
 
 
 // Распаковать данные, сжатые цепочкой методов
-int MultiDecompress (char *method, CALLBACK_FUNC *callback, void *auxdata)
+int MultiDecompress (char *_method, CALLBACK_FUNC *callback, void *auxdata)
 {
+  char method [MAX_METHOD_STRLEN];
+  strncopy (method, _method, sizeof (method));
+
   // Разобьём компрессор на отдельные алгоритмы и запустим для каждого из них отдельный тред
   CMETHOD cm[MAX_METHODS_IN_COMPRESSOR];
-  Params  param[MAX_METHODS_IN_COMPRESSOR];
   int N = split (method, COMPRESSION_METHODS_DELIMITER, cm, MAX_METHODS_IN_COMPRESSOR);
+  if (N==1)  return Decompress (method, callback, auxdata);  // multi-threading isn't required
+  Params param[MAX_METHODS_IN_COMPRESSOR];
 
-  CManualResetEvent  done;           // Set when (de)compression is finished or error was found
+  ManualEvent        done;           // Set when (de)compression is finished or error was found
   int                retcode = 0;    // multi_decompress return code
-  CCriticalSection   retcode_cs;     // Ensure single-threaded access to retcode
+  Mutex              retcode_cs;     // Ensure single-threaded access to retcode
 
   // Create semaphores for inter-thread communication
   for (int i=0; i<N; i++)
@@ -287,7 +301,7 @@ int MultiDecompress (char *method, CALLBACK_FUNC *callback, void *auxdata)
     param[i].thread.Create (multi_decompress_thread, &param[i]);
   }
 
-  done.Lock();    // wait for error or finish of last thread
+  done.Wait();    // wait for error or finish of last thread
 
   // Wait until all threads will be finished and return errcode or 0 at success
   for (int i=0; i<N; i++)
@@ -298,15 +312,17 @@ int MultiDecompress (char *method, CALLBACK_FUNC *callback, void *auxdata)
 
 
 // Один тред распаковки в multi_decompress
-static DWORD WINAPI multi_decompress_thread (void *paramPtr)
+static THREAD_FUNC_RET_TYPE THREAD_FUNC_CALL_TYPE multi_decompress_thread (void *paramPtr)
 {
   Params *param = (Params*) paramPtr;
   // Не запускать этот thread, пока не начался вывод из предыдущего (для экономии памяти)
   if (param->thread_num > 0)
-    param->read.Lock(),           // ожидаем разрешения на чтение (появления данных в буфере)
+    param->read.Wait(),           // ожидаем разрешения на чтение (появления данных в буфере)
     param->read.Release();        // возвращаем разрешение на чтение
   //printf("\nstarted %d    ", param->thread_num);
+  int old_priority = BeginCompressionThreadPriority();  // понизить приоритет треда на время выполнения распаковки
   int ret = Decompress (param->method, multi_decompress_callback, param);
+  EndCompressionThreadPriority (old_priority);
   // Abort multi_decompress if decompress() returned error code
   if (ret<0)
     param->SetExitCode (ret);
@@ -339,7 +355,7 @@ static int multi_decompress_callback (const char *what, void *_buf, int size, vo
     param->buf  = buf;
     param->size = size;
     param[+1].read.Release();   // даём разрешение на чтение (в буфере появились данные)
-    param->write.Lock();        // ожидаем разрешения на выход (после того, как все данные будут прочитаны)
+    param->write.Wait();        // ожидаем разрешения на выход (после того, как все данные будут прочитаны)
     //printf("\n%s %d -> %d  ", what, param->thread_num, param->size<0? -1 : size);
     return param->size<0? FREEARC_ERRCODE_NO_MORE_DATA_REQUIRED : size;
   }
@@ -350,7 +366,7 @@ static int multi_decompress_callback (const char *what, void *_buf, int size, vo
     int prev=0;
 loop:
     //if (size==0)  return prev;
-    param->read.Lock();             // ожидаем разрешения на чтение (появления данных в буфере)
+    param->read.Wait();             // ожидаем разрешения на чтение (появления данных в буфере)
     if (param[-1].size < 0)         // данных больше не будет - предыдущий тред завершён
     {
       param->read.Release();        // возвращаем разрешение на чтение
@@ -386,6 +402,103 @@ loop:
     return n;
   }
 }
+
+
+// ****************************************************************************************************************************
+// ВЫЧИСЛЕНИЕ CRC-32                                                                                                          *
+// ****************************************************************************************************************************
+
+#define kCrcPoly 0xEDB88320
+
+#ifndef FREEARC_DLL
+
+uint32 CRCTab[256];
+
+void InitCRC()
+{
+  for (int I=0;I<256;I++)
+  {
+    uint C=I;
+    for (int J=0;J<8;J++)
+      C=(C & 1) ? (C>>1)^kCrcPoly : (C>>1);
+    CRCTab[I]=C;
+  }
+}
+
+uint32 UpdateCRC (void *Addr, uint Size, uint32 crc)
+{
+  static FARPROC f  =  LoadFromDLL ("UpdateCRC");
+  if (f)   return ((uint32 (__cdecl *)(void*, uint, uint32)) f) (Addr, Size, crc);
+
+  if (CRCTab[1]==0)
+    InitCRC();
+  uint8 *Data = (uint8 *)Addr;
+#if defined(FREEARC_INTEL_BYTE_ORDER)
+  while (Size>=8)
+  {
+    crc ^= *(uint32*)Data;
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    crc ^= *(uint32*)(Data+4);
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    crc = CRCTab [(uint8)crc] ^ (crc>>8);
+    Data+=8;
+    Size-=8;
+  }
+#endif
+  for (int I=0;I<Size;I++)
+    crc=CRCTab[(uint8)(crc^Data[I])]^(crc>>8);
+  return crc;
+}
+
+#else
+
+#define CRC_NUM_TABLES 8
+
+uint32 g_CrcTable[256 * CRC_NUM_TABLES];
+
+void CrcGenerateTable()
+{
+  uint32 i;
+  for (i = 0; i < 256; i++)
+  {
+    uint32 r = i;
+    int j;
+    for (j = 0; j < 8; j++)
+      r = (r >> 1) ^ (kCrcPoly & ~((r & 1) - 1));
+    g_CrcTable[i] = r;
+  }
+  #if CRC_NUM_TABLES > 1
+  for (; i < 256 * CRC_NUM_TABLES; i++)
+  {
+    uint32 r = g_CrcTable[i - 256];
+    g_CrcTable[i] = g_CrcTable[r & 0xFF] ^ (r >> 8);
+  }
+  #endif
+}
+
+extern "C" uint32 __fastcall CrcUpdateT8(uint32 StartCRC, void *data, uint size, const uint32 *table);
+
+uint32 UpdateCRC (void *Addr, uint Size, uint32 StartCRC)
+{
+  if (g_CrcTable[1]==0)
+    CrcGenerateTable();
+  return CrcUpdateT8 (StartCRC, Addr, Size, g_CrcTable);
+}
+
+#endif
+
+
+// Вычислить CRC блока данных
+uint32 CalcCRC (void *Addr, uint Size)
+{
+  return UpdateCRC(Addr, Size, INIT_CRC) ^ INIT_CRC;
+}
+
 
 
 // ****************************************************************************************************************************
@@ -438,65 +551,64 @@ void __cdecl SetCompressionThreads (int threads)
 {
   CompressionThreads = threads==0? 1 : threads;
 #ifndef FREEARC_DLL
-  static FARPROC f = LoadFromDLL ("SetCompressionThreads");
-  if (f)  ((void (__cdecl *)(int)) f) (threads);
+  static FARPROC f  = LoadFromDLL ("SetCompressionThreads");
+  static FARPROC f2 = LoadFromDLL ("SetCompressionThreads", TRUE);
+  if (f)   ((void (__cdecl *)(int)) f)  (threads);
+  if (f2)  ((void (__cdecl *)(int)) f2) (threads);
 #endif
 }
 
 
-// Load accelerated function from facompress.dll
-FARPROC LoadFromDLL (char *funcname)
+// Used in 4x4 only: read entire input buffer before compression begins, allocate output buffer large enough to hold entire compressed output
+int compress_all_at_once = 0;
+void __cdecl Set_compress_all_at_once (int n)
+{
+  compress_all_at_once = n;
+#ifndef FREEARC_DLL
+  static FARPROC f  = LoadFromDLL ("Set_compress_all_at_once");
+  static FARPROC f2 = LoadFromDLL ("Set_compress_all_at_once", TRUE);
+  if (f)   ((void (__cdecl *)(int)) f)  (n);
+  if (f2)  ((void (__cdecl *)(int)) f2) (n);
+#endif
+}
+
+
+// Load accelerated function either from facompress.dll or facompress_mt.dll
+FARPROC LoadFromDLL (char *funcname, int only_facompress_mt)
 {
 #ifdef FREEARC_WIN  // Non-Windows platforms aren't yet supported
   static bool loaded = FALSE;
-  static HMODULE dll = NULL;
+  static HMODULE dll = NULL,  dll2 = NULL;
 
   if (!loaded)
   {
     loaded = TRUE;
-    dll = LoadLibraryA("facompress.dll");
+
+    // Get program's executable filename
+    wchar_t path[MY_FILENAME_MAX];
+    GetModuleFileNameW (NULL, path, MY_FILENAME_MAX);
+
+    // Load facompress.dll from the same directory as executable
+    wchar_t *basename = _tcsrchr (path,L'\\')+1;
+    _tcscpy (basename, L"facompress.dll");
+    dll = LoadLibraryW(path);
+
+    // Load facompress_mt.dll from the same directory as executable
+    _tcscpy (basename, L"facompress_mt.dll");
+    dll2 = LoadLibraryW(path);
   }
 
-  return GetProcAddress (dll, funcname);
+  FARPROC f = GetProcAddress (dll, funcname);
+  return f && !only_facompress_mt? f : GetProcAddress (dll2, funcname);
 #else
   return NULL;
 #endif
 }
 
-
-// ****************************************************************************************************************************
-// ПОДДЕРЖКА СПИСКА ВРЕМЕННЫХ ФАЙЛОВ И УДАЛЕНИЕ ИХ ПРИ АВАРИЙНОМ ВЫХОДЕ ИЗ ПРОГРАММЫ ******************************************
-// ****************************************************************************************************************************
-
-// Table of temporary files that should be deleted on ^Break
-static int TemporaryFilesCount=0;
-static struct {char *name; FILE* file;}  TemporaryFiles[10];
-
-void registerTemporaryFile (char *name, FILE* file)
-{
-  unregisterTemporaryFile (name);  // First, delete all existing registrations of the same file
-  TemporaryFiles[TemporaryFilesCount].name = name;
-  TemporaryFiles[TemporaryFilesCount].file = file;
-  TemporaryFilesCount++;
-}
-
-void unregisterTemporaryFile (char *name)
-{
-  iterate_var(i,TemporaryFilesCount)
-    if (strequ (TemporaryFiles[i].name, name))
-    {
-      memmove (TemporaryFiles+i, TemporaryFiles+i+1, (TemporaryFilesCount-(i+1)) * sizeof(TemporaryFiles[i]));
-      TemporaryFilesCount--;
-      return;
-    }
-}
-
 // This function cleans up the Compression Library
 void compressionLib_cleanup (void)
 {
-  iterate_var(i,TemporaryFilesCount)
-    TemporaryFiles[i].file!=NULL  &&  fclose (TemporaryFiles[i].file),
-    remove (TemporaryFiles[i].name);
+  removeTemporaryFiles();
 }
 
 
@@ -568,7 +680,7 @@ COMPRESSION_METHOD *ParseCompressionMethod (char* method)
 
 
 // ***********************************************************************************************************************
-// Реализация класса STORING                                                                                             *
+// Реализация класса STORING_METHOD                                                                                      *
 // ***********************************************************************************************************************
 
 // Функция "(рас)паковки", копирующая данные один в один
@@ -596,7 +708,7 @@ int STORING_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
 }
 
 // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия (функция, обратная к parse_STORING)
-void STORING_METHOD::ShowCompressionMethod (char *buf)
+void STORING_METHOD::ShowCompressionMethod (char *buf, bool purify)
 {
   sprintf (buf, "storing");
 }
@@ -615,4 +727,31 @@ COMPRESSION_METHOD* parse_STORING (char** parameters)
 }
 
 static int STORING_x = AddCompressionMethod (parse_STORING);   // Зарегистрируем парсер метода STORING_METHOD
+
+// ***********************************************************************************************************************
+// Реализация класса CRC_METHOD                                                                                          *
+// ***********************************************************************************************************************
+
+#ifndef FREEARC_DECOMPRESS_ONLY
+// Функция упаковки, просто "съедающая" входные жанные
+int CRC_METHOD::compress (CALLBACK_FUNC *callback, void *auxdata)
+{
+  char buf[BUFFER_SIZE]; int len;
+  while ((len = callback ("read", buf, BUFFER_SIZE, auxdata)) > 0);
+  return len;
+}
+#endif  // !defined (FREEARC_DECOMPRESS_ONLY)
+
+// Конструирует объект типа CRC_METHOD или возвращает NULL, если это другой метод сжатия
+COMPRESSION_METHOD* parse_CRC (char** parameters)
+{
+  if (strcmp (parameters[0], "crc") == 0
+      &&  parameters[1]==NULL )
+    // Если название метода - "storing" и параметров у него нет, то это наш метод
+    return new CRC_METHOD;
+  else
+    return NULL;   // Это не метод storing
+}
+
+static int CRC_x = AddCompressionMethod (parse_CRC);   // Зарегистрируем парсер метода CRC_METHOD
 

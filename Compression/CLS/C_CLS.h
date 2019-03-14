@@ -24,11 +24,10 @@ public:
   virtual int compress   (CALLBACK_FUNC *callback, void *auxdata);
 
   // Записать в buf[MAX_METHOD_STRLEN] строку, описывающую метод сжатия и его параметры (функция, обратная к parse_CLS)
-  virtual void ShowCompressionMethod (char *buf);
+  virtual void ShowCompressionMethod (char *buf, bool purify);
 
   // Получить/установить объём памяти, используемой при упаковке/распаковке, размер словаря или размер блока
   virtual MemSize GetCompressionMem     (void)          {return 0;}
-  virtual MemSize GetDecompressionMem   (void)          {return 0;}
   virtual MemSize GetDictionary         (void)          {return 0;}
   virtual MemSize GetBlockSize          (void)          {return 0;}
   virtual void    SetCompressionMem     (MemSize)  {}
@@ -36,6 +35,7 @@ public:
   virtual void    SetDictionary         (MemSize)  {}
   virtual void    SetBlockSize          (MemSize)  {}
 #endif
+  virtual MemSize GetDecompressionMem   (void)          {return 0;}
 };
 
 // Разборщик строки препроцессора CLS

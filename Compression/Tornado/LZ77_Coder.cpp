@@ -616,6 +616,17 @@ struct LZ77_DynamicCoder
         }
     }
 
+    void set_context(int i)
+    {
+        switch (coder)
+        {
+        case 1: return coder1.set_context(i);
+        case 2: return coder2.set_context(i);
+        case 3: return coder3.set_context(i);
+        case 4: return coder4.set_context(i);
+        }
+    }
+
     // Writes match/literal into output. Returns 0 - literal encoded, 1 - match encoded
     int encode (int len, byte *current, byte *match, const int MINLEN)
     {
